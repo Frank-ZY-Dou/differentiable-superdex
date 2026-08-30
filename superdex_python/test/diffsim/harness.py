@@ -248,6 +248,29 @@ class QuaternionErrorLoss:
         diffsim.get_center_of_mass_transform_backward(self.actor, grad)
 
 
+class ContactForceLoss:
+    """0.5 * || total world contact force ||^2 on one rigid actor.
+
+    Registers the ``TOTAL_CONTACT_FORCE`` query at construction time (it must
+    be registered before the first step). The output-backward accumulates into
+    per-contact force adjoints, so it exercises the contact-VJP path.
+    """
+
+    def __init__(self, actor):
+        self.actor = actor
+        actor.register_query(physics.QueryType.TOTAL_CONTACT_FORCE)
+
+    def _force(self) -> np.ndarray:
+        return np.asarray(self.actor.get_contact_force_world(), dtype=np.float64)
+
+    def value(self) -> float:
+        force = self._force()
+        return 0.5 * float(force @ force)
+
+    def accumulate_output_grad(self) -> None:
+        diffsim.get_contact_force_world_backward(self.actor, self._force())
+
+
 class ArticulatedPoseErrorLoss:
     """0.5 * || pose - ref ||^2 on one articulated actor's joint pose."""
 
@@ -393,10 +416,17 @@ class GradientCheckCase:
 
         grad_control = np.zeros((self.total_input, self.num_steps))
         grad_force = np.zeros((self.total_dofs, self.num_steps))
+        fd_valid_all = True
+        max_residual = 0.0
         for i in range(self.num_steps, 0, -1):
             if i != self.num_steps:
                 diffsim.prepare_back_propagate(self.scene, post[i - 1], pre[i - 1])
             diffsim.back_propagate(self.scene)
+            # Accumulate diagnostics across the whole reverse sweep; the scene
+            # stats only describe the most recent back_propagate call.
+            step_stats = diffsim.get_back_propagation_scene_stats(self.scene)
+            fd_valid_all = fd_valid_all and step_stats.finite_diff_valid
+            max_residual = max(max_residual, step_stats.residual_norm)
             for entry in self.entries:
                 if entry.input_size > 0:
                     g = np.zeros(entry.input_size)
@@ -439,13 +469,13 @@ class GradientCheckCase:
                 grad_init_vel[entry.dofs_offset : entry.dofs_offset + 3] = gl
                 grad_init_vel[entry.dofs_offset + 3 : entry.dofs_offset + 6] = ga
 
-        stats = diffsim.get_back_propagation_scene_stats(self.scene)
         return {
             "control": grad_control,
             "force": grad_force,
             "init_pose": grad_init_pose,
             "init_vel": grad_init_vel,
-            "stats": stats,
+            "fd_valid_all": fd_valid_all,
+            "max_residual": max_residual,
         }
 
     # -- finite differences -------------------------------------------------
@@ -549,6 +579,7 @@ class GradientCheckCase:
                         self.fd_force_step(i),
                     )
                 )
-        self.stats = grads["stats"]
+        self.fd_valid_all = grads["fd_valid_all"]
+        self.max_residual = grads["max_residual"]
         self.scene.release_all_states()
         return reports

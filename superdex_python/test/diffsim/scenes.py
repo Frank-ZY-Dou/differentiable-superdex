@@ -92,7 +92,7 @@ def rigid_free():
     return scene, cube
 
 
-def rigid_on_plane(friction: str):
+def rigid_on_plane(friction: str, initial_velocity=(0.5, 0.0, 0.0)):
     """A cube sliding on a static ground plane. Returns (scene, cube)."""
     scene = physics.create_scene(f"diffsim_rigid_on_plane_{friction}")
     scene.set_gravity(GRAVITY)
@@ -110,7 +110,7 @@ def rigid_on_plane(friction: str):
         contact=cp,
         world_from_local=physics.TransformRT([0.0, 0.0, 0.099]),
     )
-    cube.set_velocity([0.5, 0.0, 0.0], [0.0, 0.0, 0.0])
+    cube.set_velocity(list(initial_velocity), [0.0, 0.0, 0.0])
     return scene, cube
 
 
