@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Validation of ``diffsim.set_gravity_backward`` (parameter gradients, part 1).
+"""Validation of the parameter gradients: ``diffsim.set_gravity_backward`` and
+``diffsim.set_contact_params_backward``.
 
 Ground truth comes from two independent sources, per the project's
 anti-cheating discipline:
@@ -207,6 +208,198 @@ class GravityGradientTest(unittest.TestCase):
         zeroed = np.ones(3)
         diffsim.set_gravity_backward(scene, zeroed)
         np.testing.assert_array_equal(zeroed, np.zeros(3))
+        scene.release_all_states()
+
+
+CONTACT_PARAM_FIELDS = (
+    "penalty_coefficient",
+    "coulomb_friction_coefficient",
+    "viscous_friction_coefficient",
+    "normal_viscous_damping_coefficient",
+)
+
+
+def adjoint_contact_grads(scene, losses, actors) -> dict:
+    """Sweep the adjoint and read each actor's contact-parameter gradient."""
+    pre, post = [], []
+    for _ in range(NUM_STEPS):
+        pre.append(scene.capture_state())
+        scene.step(DT)
+        post.append(scene.capture_state())
+    diffsim.reset_back_propagation(scene)
+    diffsim.prepare_back_propagate(scene, post[-1], pre[-1])
+    for loss in losses:
+        loss.accumulate_output_grad()
+    for i in range(NUM_STEPS, 0, -1):
+        if i != NUM_STEPS:
+            diffsim.prepare_back_propagate(scene, post[i - 1], pre[i - 1])
+        diffsim.back_propagate(scene)
+    out = {}
+    for name, actor in actors.items():
+        grad = np.zeros(len(CONTACT_PARAM_FIELDS))
+        diffsim.set_contact_params_backward(actor, grad)
+        out[name] = grad
+    for handle in pre + post:
+        scene.release_state(handle)
+    return out
+
+
+def fd_contact_grads(scene, losses, actor, state_init) -> np.ndarray:
+    """Independent ground truth: central differences over set_contact_params."""
+    fd = np.zeros(len(CONTACT_PARAM_FIELDS))
+    for f_i, field in enumerate(CONTACT_PARAM_FIELDS):
+        base = getattr(actor.get_contact_params(), field)
+        eps = FD_EPS * (1.0 + abs(base))
+        values = []
+        for sign in (+1.0, -1.0):
+            scene.restore_state(state_init, False)
+            perturbed = actor.get_contact_params()
+            setattr(perturbed, field, base + sign * eps)
+            actor.set_contact_params(perturbed)
+            for _ in range(NUM_STEPS):
+                scene.step(DT)
+            values.append(sum(loss.value() for loss in losses))
+            restored = actor.get_contact_params()
+            setattr(restored, field, base)
+            actor.set_contact_params(restored)
+        fd[f_i] = (values[0] - values[1]) / (2.0 * eps)
+    return fd
+
+
+def _rich_contact_scene():
+    """Cube sliding on a plane with every differentiated parameter active."""
+    scene = physics.create_scene("contact_params_rich")
+    scene.set_gravity([0.0, 0.0, -9.81])
+    cp = physics.ContactParams(
+        penalty_coefficient=1e8,
+        coulomb_friction_coefficient=0.4,
+        viscous_friction_coefficient=0.1,
+        normal_viscous_damping_coefficient=5.0,
+    )
+    ground = scene.create_rigid_actor(
+        name="ground",
+        shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+        is_static=True,
+        contact=cp,
+    )
+    cube = scene.create_rigid_actor(
+        name="cube",
+        shape=physics.create_tet_mesh_shape(
+            coordinates=scenes.CUBE_COORDS, connectivity=scenes.CUBE_CONN
+        ),
+        density=1000.0,
+        contact=cp,
+        world_from_local=physics.TransformRT([0.0, 0.0, 0.099]),
+    )
+    cube.set_velocity([0.5, 0.0, 0.0], [0.0, 0.0, 0.0])
+    return scene, cube, ground
+
+
+class ContactParamsGradientTest(unittest.TestCase):
+    def _compare_per_field(self, adjoint, fd, tol) -> None:
+        """Per-field comparison so the hugely different scales (a penalty
+        gradient of ~1e-11 next to a friction gradient of ~1e-2) each get
+        checked instead of the small one hiding inside a vector norm."""
+        floor = 1e-13
+        for f_i, field in enumerate(CONTACT_PARAM_FIELDS):
+            denom = max(abs(adjoint[f_i]), abs(fd[f_i]))
+            if denom <= floor:
+                continue  # both zero at working precision - consistent
+            rel = abs(adjoint[f_i] - fd[f_i]) / denom
+            self.assertLessEqual(
+                rel,
+                tol,
+                f"{field}: adjoint={adjoint[f_i]:.6e}, fd={fd[f_i]:.6e}",
+            )
+
+    def test_rigid_on_plane_all_fields_vs_fd(self) -> None:
+        scene, cube, _ground = _rich_contact_scene()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        loss = TranslationErrorLoss(cube)
+        state_init = scene.capture_state()
+        grads = adjoint_contact_grads(scene, [loss], {"cube": cube})
+        fd = fd_contact_grads(scene, [loss], cube, state_init)
+        scene.release_all_states()
+        self.assertTrue(np.any(np.abs(fd) > 0.0), "test is vacuous")
+        self._compare_per_field(grads["cube"], fd, 1e-2)
+
+    def test_static_collider_read_is_an_error(self) -> None:
+        """Static colliders are not island members; reading must fail loudly,
+        never return a silent zero."""
+        scene, cube, ground = _rich_contact_scene()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        adjoint_contact_grads(scene, [TranslationErrorLoss(cube)], {"cube": cube})
+        with self.assertRaises(physics.Error):
+            out = np.zeros(len(CONTACT_PARAM_FIELDS))
+            diffsim.set_contact_params_backward(ground, out)
+        scene.release_all_states()
+
+    def test_no_contact_gives_exact_zeros(self) -> None:
+        """An actor in a swept island with no contacts has an exactly zero
+        gradient (the component exists - distinct from the never-swept error)."""
+        scene, cube = scenes.rigid_free()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        grads = adjoint_contact_grads(
+            scene, [TranslationErrorLoss(cube)], {"cube": cube}
+        )
+        scene.release_all_states()
+        np.testing.assert_array_equal(
+            grads["cube"], np.zeros(len(CONTACT_PARAM_FIELDS))
+        )
+
+    def test_read_before_any_sweep_is_an_error(self) -> None:
+        scene, cube = scenes.rigid_free()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        diffsim.reset_back_propagation(scene)
+        with self.assertRaises(physics.Error):
+            out = np.zeros(len(CONTACT_PARAM_FIELDS))
+            diffsim.set_contact_params_backward(cube, out)
+
+    def test_articulated_link_params_vs_fd(self) -> None:
+        """Contact parameters live on nested link actors for articulations."""
+        # "rich" params: all differentiated fields strictly positive so the
+        # central FD ground truth never crosses the non-negativity validation.
+        # root_z=0.105: the links start essentially on the plane so contact
+        # (and therefore a nonzero parameter gradient) exists from step one.
+        scene, chain = scenes.free_chain_on_plane("rich", root_z=0.105)
+        # Tilted gravity makes the chain slide, so tangential velocity (and
+        # with it the friction-coefficient gradient) is genuinely nonzero
+        # instead of sitting at the epsilon noise floor of a vertical drop.
+        scene.set_gravity([2.0, 0.0, -9.81])
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        links = []
+        scene.for_each_actor(
+            lambda a: links.append(a) if a.is_nested_link_actor() else None
+        )
+        self.assertGreaterEqual(len(links), 2)
+        link = links[0]
+        ref = np.zeros(chain.get_num_dofs())
+        ref[-1] = 0.3
+        loss = ArticulatedPoseErrorLoss(chain, ref)
+        state_init = scene.capture_state()
+        grads = adjoint_contact_grads(scene, [loss], {"link": link})
+        fd = fd_contact_grads(scene, [loss], link, state_init)
+        scene.release_all_states()
+        self.assertTrue(np.any(np.abs(fd) > 0.0), "test is vacuous")
+        self._compare_per_field(grads["link"], fd, 3e-2)
+
+    def test_reset_zeroes_contact_grads(self) -> None:
+        scene, cube, _ground = _rich_contact_scene()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        grads = adjoint_contact_grads(
+            scene, [TranslationErrorLoss(cube)], {"cube": cube}
+        )
+        self.assertTrue(np.any(np.abs(grads["cube"]) > 0.0))
+        diffsim.reset_back_propagation(scene)
+        out = np.ones(len(CONTACT_PARAM_FIELDS))
+        diffsim.set_contact_params_backward(cube, out)
+        np.testing.assert_array_equal(out, np.zeros(len(CONTACT_PARAM_FIELDS)))
         scene.release_all_states()
 
 

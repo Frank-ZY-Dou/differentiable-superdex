@@ -75,6 +75,15 @@ def contact_params(friction: str) -> physics.ContactParams:
         return physics.ContactParams(
             penalty_coefficient=1e8, coulomb_friction_coefficient=0.4
         )
+    if friction == "rich":
+        # Every differentiated contact parameter strictly positive, so central
+        # finite differences never cross the engine's non-negativity checks.
+        return physics.ContactParams(
+            penalty_coefficient=1e8,
+            coulomb_friction_coefficient=0.4,
+            viscous_friction_coefficient=0.1,
+            normal_viscous_damping_coefficient=5.0,
+        )
     raise ValueError(f"unknown friction regime: {friction}")
 
 
@@ -192,7 +201,7 @@ def pendulum(with_controller: bool):
     return scene, chain
 
 
-def free_chain_on_plane(friction: str):
+def free_chain_on_plane(friction: str, root_z: float = 0.15):
     """A free-floating root link with one revolute child, falling onto a plane."""
     scene = physics.create_scene(f"diffsim_free_chain_{friction}")
     scene.set_gravity(GRAVITY)
@@ -235,7 +244,7 @@ def free_chain_on_plane(friction: str):
             name="free_chain",
             joints=joints,
             links=links,
-            world_from_root=physics.TransformRT([0.0, 0.0, 0.15]),
+            world_from_root=physics.TransformRT([0.0, 0.0, root_z]),
         )
     )
     return scene, chain

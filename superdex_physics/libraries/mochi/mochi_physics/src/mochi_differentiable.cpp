@@ -32,6 +32,7 @@
 #include <mochi_core/utils/assembly_params.h>
 #include <mochi_core/utils/task_scheduler.h>
 
+#include <cmath>
 #include <limits>
 #include <unordered_set>
 
@@ -717,12 +718,15 @@ static void StackForceAdjoint(
   outLambda.MiddleRows(offset.dofsOffset, info.dofsSize) = forceGrad;
 }
 
-// Accumulate this island's contribution to dL/d(gravity): -lambda^T dR/dg by central
-// finite differences of the assembled residual, where lambda is the generalized-force
-// adjoint (CDiffForceGrad) that BackPropagationSolveIslandAsync just computed. Runs
-// after the island solves and sequentially across islands: it perturbs the scene-global
-// CSceneGravity context, which parallel island tasks must not race on.
-static void AccumulateGravityGradientIsland(
+// Accumulate this island's contribution to the parameter gradients: -lambda^T dR/dtheta
+// by central finite differences of the assembled residual under a perturbed parameter,
+// where lambda is the generalized-force adjoint (CDiffForceGrad) that
+// BackPropagationSolveIslandAsync just computed. Runs after the island solves and
+// sequentially across islands: it perturbs scene-global and per-entity parameter state,
+// which parallel island tasks must not race on. Parameters covered: the scene gravity
+// vector and, per contact-parameter owner (actors and nested links), the contact
+// parameters listed in kNumContactParamGradients order.
+static void AccumulateParameterGradientsIsland(
     entt::registry& reg,
     entt::entity island,
     CIslandDescendants const& descendants,
@@ -735,6 +739,16 @@ static void AccumulateGravityGradientIsland(
   }
 
   MOCHI_FILO_STACK_ALLOCATOR(allocator, 4 * 256 * sizeof(real));
+
+  // Record zero gradients up front for every contact-parameter owner in this island,
+  // so a legitimately zero result is distinguishable from "never accumulated" (the
+  // readout treats a missing component as a contract error).
+  for (auto const e : descendants.actors) {
+    if (reg.try_get<CContactParams const>(e) != nullptr &&
+        reg.try_get<CDiffContactParamsGrad>(e) == nullptr) {
+      reg.emplace<CDiffContactParamsGrad>(e);
+    }
+  }
 
   // Stack the per-actor force adjoints into one island vector. Entities in the
   // descendants list without the differentiability components contribute nothing.
@@ -772,38 +786,70 @@ static void AccumulateGravityGradientIsland(
     out = problem.GetResidual();
   };
 
+  auto const& solverParams = reg.ctx<CBackPropagationSolverParams const>();
+
+  // Gravity vector.
   auto& gravity = reg.ctx<CSceneGravity>();
   Vec4r const savedAccel = gravity.accel;
   Real3 const gravityRef = ToReal3(savedAccel);
-  auto const& solverParams = reg.ctx<CBackPropagationSolverParams const>();
-  real const eps = solverParams.epsFiniteDiff * (1_r + Sqrt(NormSqr(gravityRef)));
+  real const gravityEps = solverParams.epsFiniteDiff * (1_r + Sqrt(NormSqr(gravityRef)));
   for (int i = 0; i < 3; ++i) {
     Real3 gravityPerturbed = gravityRef;
-    gravityPerturbed[i] = gravityRef[i] + eps;
+    gravityPerturbed[i] = gravityRef[i] + gravityEps;
     gravity.accel = ToSimd(gravityPerturbed, 0_r);
     evalResidual(AsView(residualPlus));
-    gravityPerturbed[i] = gravityRef[i] - eps;
+    gravityPerturbed[i] = gravityRef[i] - gravityEps;
     gravity.accel = ToSimd(gravityPerturbed, 0_r);
     evalResidual(AsView(residualMinus));
     residualPlus -= residualMinus;
-    outGradient[i] += -lambda.Dot(residualPlus) / (2_r * eps);
+    outGradient[i] += -lambda.Dot(residualPlus) / (2_r * gravityEps);
   }
   gravity.accel = savedAccel;
+
+  // Contact parameters, per owner (standalone actors and nested links alike).
+  for (auto const e : descendants.actors) {
+    auto* contactParams = reg.try_get<CContactParams>(e);
+    if (contactParams == nullptr) {
+      continue;
+    }
+    auto& outContactGrad = reg.get<CDiffContactParamsGrad>(e); // created above
+    real* const fields[kNumContactParamGradients] = {
+        &contactParams->penaltyCoefficient,
+        &contactParams->coulombFrictionCoefficient,
+        &contactParams->viscousFrictionCoefficient,
+        &contactParams->normalViscousDampingCoefficient,
+    };
+    for (int f = 0; f < kNumContactParamGradients; ++f) {
+      real const saved = *fields[f];
+      real const eps = solverParams.epsFiniteDiff * (1_r + std::abs(saved));
+      *fields[f] = saved + eps;
+      evalResidual(AsView(residualPlus));
+      *fields[f] = saved - eps;
+      evalResidual(AsView(residualMinus));
+      *fields[f] = saved;
+      residualPlus -= residualMinus;
+      outContactGrad.value[f] += -lambda.Dot(residualPlus) / (2_r * eps);
+    }
+  }
 }
 
-void mochi::AccumulateGravityGradient(entt::registry& reg) {
+void mochi::AccumulateParameterGradients(entt::registry& reg) {
   MOCHI_PROFILE_SCOPE();
   if (reg.try_ctx<CDiffGravityGrad>() == nullptr) {
-    // ResetBackPropagation has not run yet; SetGravityBackward reports this as an
+    // ResetBackPropagation has not run yet; the parameter readouts report this as an
     // error at read time rather than returning a silent zero.
     return;
   }
   Real3 gradient{};
   reg.view<CIslandDescendants const>().each(
       [&](entt::entity island, CIslandDescendants const& descendants) {
-        AccumulateGravityGradientIsland(reg, island, descendants, gradient);
+        AccumulateParameterGradientsIsland(reg, island, descendants, gradient);
       });
   reg.ctx<CDiffGravityGrad>().value += gradient;
+}
+
+void mochi::ResetContactParamsGradContainers(CDiffContactParamsGrad& outGrad) {
+  outGrad.value.fill(0_r);
 }
 
 void mochi::BackPropagationSolve(entt::registry& reg) {
@@ -822,8 +868,9 @@ void mochi::BackPropagationSolve(entt::registry& reg) {
 
   eachTask.Wait();
 
-  // Parameter adjoints, sequentially: they perturb scene-global context.
-  AccumulateGravityGradient(reg);
+  // Parameter adjoints, sequentially: they perturb scene-global and per-entity
+  // parameter state.
+  AccumulateParameterGradients(reg);
 }
 
 // Assign/Acquire to global Jacobian matrices, using CSceneStateOffset to determine block offset

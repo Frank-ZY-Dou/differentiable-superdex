@@ -1171,6 +1171,7 @@ void SceneImpl::WarnIfNotImprovedConvergenceSettings() const {
 
 void SceneImpl::ResetBackPropagation() {
   ecs::InvokeForEachGlobal(&ResetBackPropagationContainers, _registry);
+  ecs::InvokeForEachGlobal(&ResetContactParamsGradContainers, _registry);
   if (_registry.try_ctx<CDiffGravityGrad>() == nullptr) {
     _registry.set<CDiffGravityGrad>();
   }

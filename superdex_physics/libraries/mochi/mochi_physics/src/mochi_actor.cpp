@@ -2999,6 +2999,33 @@ void diffsim::SetArticulatedJointVelocitiesBackward(
   ConvertArticulatedGradientLieToRotationVectorImpl(actor, /*useTarget*/ false, outGradVelocities);
 }
 
+void diffsim::SetContactParamsBackward(
+    Actor const* actor,
+    Span<real> outGradContactParams,
+    Error& error) {
+  MOCHI_ERROR_RETURN_IF_BACKWARD_NOT_SUPPORTED(const);
+  MOCHI_ERROR_IF_NOT(
+      isize(outGradContactParams) == kNumContactParamGradients,
+      error,
+      "outGradContactParams size must be 4.");
+  MOCHI_ERROR_IF(
+      reg.try_get<CContactParams const>(e) == nullptr,
+      error,
+      "The actor has no contact parameters.");
+  MOCHI_ERROR_RETURN(error);
+
+  auto const* accumulated = reg.try_get<CDiffContactParamsGrad const>(e);
+  MOCHI_ERROR_IF(
+      accumulated == nullptr,
+      error,
+      "No contact-parameter gradient was accumulated for this actor: it was not part "
+      "of a back-propagated island since ResetBackPropagation.");
+  MOCHI_ERROR_RETURN(error);
+  for (int i = 0; i < kNumContactParamGradients; ++i) {
+    outGradContactParams[i] = accumulated->value[i];
+  }
+}
+
 void diffsim::SetVelocityBackward(
     Actor const* actor,
     Span<real> outGradLinearVel,

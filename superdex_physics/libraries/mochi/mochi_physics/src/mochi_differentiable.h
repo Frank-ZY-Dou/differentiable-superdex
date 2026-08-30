@@ -22,6 +22,8 @@
 #include "mochi_simulation.h"
 #include "mochi_snle.h"
 
+#include <array>
+
 namespace mochi::diffsim {
 // Forward declarations: this header only aliases these types as ECS components.
 struct BackPropagationSolverParams;
@@ -175,6 +177,26 @@ struct CDiffGravityGrad {
   Real3 value{};
 };
 
+// Number of per-owner contact-parameter gradients accumulated by the parameter
+// adjoint, and their fixed order:
+//   0 penaltyCoefficient, 1 coulombFrictionCoefficient, 2 viscousFrictionCoefficient,
+//   3 normalViscousDampingCoefficient.
+// frictionFalloffVel is deliberately excluded: it is consumed through data precomputed
+// during contact preparation, so re-assembling the residual under a perturbed value
+// does not observe it (measured: residual-FD gradient identically zero while the
+// rollout gradient is nonzero). A correct falloff gradient requires re-running contact
+// preparation per perturbation - future work, not a silent zero.
+inline constexpr int kNumContactParamGradients = 4;
+
+// Per-entity component accumulating dL/d(contact params) across BackPropagate calls,
+// for every contact-parameter owner (standalone actors and nested links) of a
+// back-propagated island. Created zeroed during the sweep so that "accumulated, zero"
+// is distinguishable from "never part of a back-propagated island"; zeroed by
+// ResetBackPropagation.
+struct CDiffContactParamsGrad {
+  std::array<real, kNumContactParamGradients> value{};
+};
+
 struct CForwardPropContainerDerivedStateJac {
   Matrix<real> data;
   // The following two fields are used to store the island this actor belongs to,
@@ -225,9 +247,13 @@ void PrepareBackPropagation(entt::registry& reg);
 
 void BackPropagationSolve(entt::registry& reg);
 
-// Accumulate every island's contribution to dL/d(gravity) into CDiffGravityGrad.
+// Accumulate every island's contribution to the parameter gradients (gravity into
+// CDiffGravityGrad, contact parameters into per-owner CDiffContactParamsGrad).
 // Runs inside BackPropagate, after the island adjoint solves.
-void AccumulateGravityGradient(entt::registry& reg);
+void AccumulateParameterGradients(entt::registry& reg);
+
+// Zeroes one entity's accumulated contact-parameter gradient (ResetBackPropagation).
+void ResetContactParamsGradContainers(CDiffContactParamsGrad& outGrad);
 
 void ComputeHqx(
     int numIslandDofs,

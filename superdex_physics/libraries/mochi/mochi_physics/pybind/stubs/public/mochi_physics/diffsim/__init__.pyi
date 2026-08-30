@@ -201,6 +201,44 @@ def set_gravity_backward(
         :class:`~superdex.physics.Error`: If an error occurs.
     """
 
+def set_contact_params_backward(
+    actor: mochi_physics.Actor,
+    out_grad_contact_params: mochi_physics.ArrayLikeReal,
+) -> None:
+    """Backward pass for :meth:`~superdex.physics.Actor.set_contact_params`.
+
+    Reads the gradient of the loss with respect to this actor's own contact
+    parameters, accumulated by the engine over every
+    :func:`~superdex.physics.diffsim.back_propagate` call since
+    :func:`~superdex.physics.diffsim.reset_back_propagation` (contact
+    parameters act at every step, so no caller-side accumulation is needed).
+    Works for standalone actors and nested link actors alike; pair combination
+    rules (geometric means, collider selection) are differentiated through the
+    full residual assembly. Each step contributes ``-lambda^T dR/dtheta`` by
+    central finite differences of the assembled residual, with ``lambda`` the
+    generalized-force adjoint and a per-parameter relative step scaled by
+    :attr:`~superdex.physics.diffsim.BackPropagationSolverParams.eps_finite_diff`.
+
+    Gradient order (size 4): ``[penalty_coefficient,
+    coulomb_friction_coefficient, viscous_friction_coefficient,
+    normal_viscous_damping_coefficient]``. ``friction_falloff_vel`` is
+    deliberately excluded (it is consumed through contact-preparation-time
+    data, which residual re-assembly cannot observe), and static colliders'
+    own parameters are not differentiated (they are not part of any island;
+    for a static collider the penalty coefficient and falloff velocity are
+    taken from the dynamic partner by the pair rules anyway).
+
+    Args:
+        actor (Actor): The dynamic actor (or nested link actor) owning the
+            parameters.
+        out_grad_contact_params (ArrayLikeReal): Gradient in the order above.
+            Must be of size 4. Overwritten, not accumulated into.
+
+    Raises:
+        :class:`~superdex.physics.Error`: If the actor was not part of any
+            back-propagated island since the last reset, or on invalid input.
+    """
+
 def reset_back_propagation(scene: mochi_physics.Scene) -> None:
     """Reset back-propagation state.
 

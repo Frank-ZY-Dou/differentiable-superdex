@@ -92,6 +92,29 @@ fn diffsim::MakeSceneDifferentiable(Scene* scene) -> void [mochi_error];
 // not accumulated into.
 fn diffsim::SetGravityBackward(Scene* scene, Span<real> outGradGravity) -> void [mochi_error];
 
+// @brief Backward pass for @ref Actor::SetContactParams.
+//
+// @details Reads the gradient of the loss with respect to this actor's own contact parameters,
+// accumulated by the engine over every @ref BackPropagate call since @ref ResetBackPropagation
+// (contact parameters act at every step, so no caller-side accumulation is needed). Works for
+// standalone actors and nested link actors alike; pair combination rules (geometric means,
+// collider selection) are differentiated through the full residual assembly. Each step
+// contributes -lambda^T dR/dtheta by central finite differences of the assembled residual, with
+// lambda the generalized-force adjoint and a per-parameter relative step scaled by
+// @ref BackPropagationSolverParams::epsFiniteDiff.
+//
+// Gradient order (size 4): [penaltyCoefficient, coulombFrictionCoefficient,
+// viscousFrictionCoefficient, normalViscousDampingCoefficient]. frictionFalloffVel is
+// deliberately excluded (it is consumed through contact-preparation-time data, which residual
+// re-assembly cannot observe), and static colliders' own parameters are not differentiated (they
+// are not part of any island; for a static collider the penalty coefficient and falloff velocity
+// are taken from the dynamic partner by the pair rules anyway).
+//
+// @param[in] actor The dynamic actor (or nested link actor) owning the parameters.
+// @param[out] outGradContactParams Gradient in the order above. Must be of size 4. Overwritten,
+// not accumulated into.
+fn diffsim::SetContactParamsBackward(Actor const* actor, Span<real> outGradContactParams) -> void [mochi_error];
+
 // @brief Get solver parameters.
 //
 // @param[in] scene The differentiable scene.
