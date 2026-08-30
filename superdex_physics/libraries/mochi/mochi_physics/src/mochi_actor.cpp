@@ -3026,6 +3026,30 @@ void diffsim::SetContactParamsBackward(
   }
 }
 
+void diffsim::SetDensityBackward(
+    Actor const* actor,
+    Span<real> outGradDensity,
+    Error& error) {
+  MOCHI_ERROR_RETURN_IF_BACKWARD_NOT_SUPPORTED(const);
+  MOCHI_ERROR_IF_NOT(
+      isize(outGradDensity) == 1, error, "outGradDensity size must be 1.");
+  MOCHI_ERROR_IF(
+      reg.try_get<CRigidBodyInertia const>(e) == nullptr,
+      error,
+      "The actor has no rigid-body inertia (density gradients cover standalone rigid "
+      "actors and articulated link actors).");
+  MOCHI_ERROR_RETURN(error);
+
+  auto const* accumulated = reg.try_get<CDiffDensityGrad const>(e);
+  MOCHI_ERROR_IF(
+      accumulated == nullptr,
+      error,
+      "No density gradient was accumulated for this actor: it was not part of a "
+      "back-propagated island since ResetBackPropagation.");
+  MOCHI_ERROR_RETURN(error);
+  outGradDensity[0] = accumulated->value;
+}
+
 void diffsim::SetVelocityBackward(
     Actor const* actor,
     Span<real> outGradLinearVel,

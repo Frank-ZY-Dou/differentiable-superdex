@@ -239,6 +239,36 @@ def set_contact_params_backward(
             back-propagated island since the last reset, or on invalid input.
     """
 
+def set_density_backward(
+    actor: mochi_physics.Actor,
+    out_grad_density: mochi_physics.ArrayLikeReal,
+) -> None:
+    """Backward pass for :meth:`~superdex.physics.Actor.set_density`.
+
+    Reads the gradient of the loss with respect to this actor's density,
+    accumulated by the engine over every
+    :func:`~superdex.physics.diffsim.back_propagate` call since
+    :func:`~superdex.physics.diffsim.reset_back_propagation`. Density rescales
+    mass and moment of inertia proportionally about the inertia reference with
+    the center of mass unchanged, exactly matching the forward
+    :meth:`~superdex.physics.Actor.set_density`. Covers rigid-body-inertia
+    owners: standalone rigid actors and articulated link actors (soft actors
+    are outside diffsim's scope). Each step contributes
+    ``-lambda^T dR/drho`` by central finite differences of the assembled
+    residual with a relative step scaled by
+    :attr:`~superdex.physics.diffsim.BackPropagationSolverParams.eps_finite_diff`.
+
+    Args:
+        actor (Actor): The rigid actor or articulated link actor.
+        out_grad_density (ArrayLikeReal): Gradient wrt density. Must be of
+            size 1. Overwritten, not accumulated into.
+
+    Raises:
+        :class:`~superdex.physics.Error`: If the actor has no rigid-body
+            inertia, or was not part of any back-propagated island since the
+            last reset.
+    """
+
 def reset_back_propagation(scene: mochi_physics.Scene) -> None:
     """Reset back-propagation state.
 

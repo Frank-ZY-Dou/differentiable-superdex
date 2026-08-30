@@ -115,6 +115,21 @@ fn diffsim::SetGravityBackward(Scene* scene, Span<real> outGradGravity) -> void 
 // not accumulated into.
 fn diffsim::SetContactParamsBackward(Actor const* actor, Span<real> outGradContactParams) -> void [mochi_error];
 
+// @brief Backward pass for @ref Actor::SetDensity.
+//
+// @details Reads the gradient of the loss with respect to this actor's density, accumulated by
+// the engine over every @ref BackPropagate call since @ref ResetBackPropagation. Density rescales
+// mass and moment of inertia proportionally about the inertia reference with the center of mass
+// unchanged, exactly matching the forward @ref Actor::SetDensity. Covers rigid-body-inertia
+// owners: standalone rigid actors and articulated link actors (soft actors are outside diffsim's
+// scope). Each step contributes -lambda^T dR/drho by central finite differences of the assembled
+// residual with a relative step scaled by @ref BackPropagationSolverParams::epsFiniteDiff.
+//
+// @param[in] actor The rigid actor or articulated link actor.
+// @param[out] outGradDensity Gradient wrt density. Must be of size 1. Overwritten, not
+// accumulated into.
+fn diffsim::SetDensityBackward(Actor const* actor, Span<real> outGradDensity) -> void [mochi_error];
+
 // @brief Get solver parameters.
 //
 // @param[in] scene The differentiable scene.

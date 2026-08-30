@@ -46,6 +46,8 @@ MOCHI_API void SetContactParamsBackward(
     Span<real> outGradContactParams,
     Error& error);
 
+MOCHI_API void SetDensityBackward(Actor const* actor, Span<real> outGradDensity, Error& error);
+
 MOCHI_API void
 PrepareBackPropagate(Scene* scene, StateHandle stateNew, StateHandle stateOld, Error& error);
 

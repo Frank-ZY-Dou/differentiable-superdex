@@ -1172,6 +1172,7 @@ void SceneImpl::WarnIfNotImprovedConvergenceSettings() const {
 void SceneImpl::ResetBackPropagation() {
   ecs::InvokeForEachGlobal(&ResetBackPropagationContainers, _registry);
   ecs::InvokeForEachGlobal(&ResetContactParamsGradContainers, _registry);
+  ecs::InvokeForEachGlobal(&ResetDensityGradContainers, _registry);
   if (_registry.try_ctx<CDiffGravityGrad>() == nullptr) {
     _registry.set<CDiffGravityGrad>();
   }
@@ -1284,6 +1285,18 @@ void SceneImpl::BackPropagate(Error& error) {
   // - CDiffContainerDerivedState stores z * ∂r_k/∂Δx_{k-1}
   Timer timer;
   BackPropagationSolve(_registry);
+
+  // Parameter adjoints, sequentially (they perturb scene-global and per-entity
+  // parameter state), evaluated at the exact step states: the finite-difference
+  // Hessian-vector products of the solve leave the actors at their last perturbed
+  // evaluation point, and an O(eps)-drifted evaluation state contaminates
+  // mass-proportional parameter derivatives.
+  {
+    auto const& statePair = _registry.ctx<CStatePair const>();
+    RestoreStatePair(statePair.stateNew, statePair.stateOld, error);
+    MOCHI_ERROR_RETURN(error);
+    AccumulateParameterGradients(_registry);
+  }
   auto& backPropStats = _registry.ctx<CBackPropagationSceneStats>();
   backPropStats.solveDurationSec = ToSeconds(timer.GetElapsed());
 

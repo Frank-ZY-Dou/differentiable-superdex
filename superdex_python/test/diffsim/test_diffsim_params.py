@@ -403,5 +403,195 @@ class ContactParamsGradientTest(unittest.TestCase):
         scene.release_all_states()
 
 
+def _sweep(scene, losses, apply_inputs=None):
+    """Forward rollout + full reverse sweep (terminal losses only)."""
+    pre, post = [], []
+    for step in range(NUM_STEPS):
+        if apply_inputs is not None:
+            apply_inputs(step)
+        pre.append(scene.capture_state())
+        scene.step(DT)
+        post.append(scene.capture_state())
+    diffsim.reset_back_propagation(scene)
+    diffsim.prepare_back_propagate(scene, post[-1], pre[-1])
+    for loss in losses:
+        loss.accumulate_output_grad()
+    for i in range(NUM_STEPS, 0, -1):
+        if i != NUM_STEPS:
+            diffsim.prepare_back_propagate(scene, post[i - 1], pre[i - 1])
+        diffsim.back_propagate(scene)
+    for handle in pre + post:
+        scene.release_state(handle)
+
+
+def adjoint_density_grad(scene, losses, actor, apply_inputs=None) -> float:
+    _sweep(scene, losses, apply_inputs)
+    grad = np.zeros(1)
+    diffsim.set_density_backward(actor, grad)
+    return float(grad[0])
+
+
+def fd_density_grad(scene, losses, actor, state_init, apply_inputs=None) -> float:
+    density0 = actor.get_density()
+    eps = 1e-4 * density0  # relative step; density is strictly positive
+    values = []
+    for sign in (+1.0, -1.0):
+        scene.restore_state(state_init, False)
+        actor.set_density(density0 + sign * eps)
+        for step in range(NUM_STEPS):
+            if apply_inputs is not None:
+                apply_inputs(step)
+            scene.step(DT)
+        values.append(sum(loss.value() for loss in losses))
+        actor.set_density(density0)
+    return (values[0] - values[1]) / (2.0 * eps)
+
+
+class DensityGradientTest(unittest.TestCase):
+    def _free_cube(self, gravity):
+        scene = physics.create_scene("density_test")
+        scene.set_gravity(gravity)
+        cube = scene.create_rigid_actor(
+            name="cube",
+            shape=physics.create_tet_mesh_shape(
+                coordinates=scenes.CUBE_COORDS, connectivity=scenes.CUBE_CONN
+            ),
+            density=1000.0,
+            world_from_local=physics.TransformRT([0.0, 0.0, 1.0]),
+        )
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        return scene, cube
+
+    def test_free_fall_mass_invariance(self) -> None:
+        """Under gravity alone every residual term is proportional to the
+        density, so at a converged step dR/drho = R/rho ~ (solver residual)/rho
+        and the density gradient must vanish - a sharp analytic invariance, not
+        a tolerance tuned to pass. The same sweep's gravity gradient is checked
+        to be nonzero so the test cannot pass vacuously."""
+        scene, cube = self._free_cube([0.0, 0.0, -9.81])
+        cube.set_velocity([0.3, -0.2, 0.1], [0.0, 0.0, 0.0])
+        loss = TranslationErrorLoss(cube)
+        state_init = scene.capture_state()
+        grad = adjoint_density_grad(scene, [loss], cube)
+        gravity_grad = np.zeros(3)
+        diffsim.set_gravity_backward(scene, gravity_grad)
+        self.assertGreater(np.linalg.norm(gravity_grad), 1e-4)
+        self.assertLessEqual(abs(grad), 1e-8, f"free-fall density gradient {grad}")
+        fd = fd_density_grad(scene, [loss], cube, state_init)
+        scene.release_all_states()
+        self.assertLessEqual(abs(fd), 1e-8, f"free-fall FD density gradient {fd}")
+
+    def test_external_force_closed_form_and_fd(self) -> None:
+        """Zero gravity, constant per-step force F: a = F/m, so under Backward
+        Euler p_N - p_0 = dt^2 N(N+1)/2 F/m and
+
+            dL/drho = -(dt^2 N(N+1)/2) F^T (p_N - ref) / (m rho).
+        """
+        scene, cube = self._free_cube([0.0, 0.0, 0.0])
+        force_dofs = np.array([0, 1, 2], dtype=np.int32)
+        force = np.array([2.0, 0.0, 0.0])
+
+        def apply_inputs(_step: int) -> None:
+            cube.set_external_forces_on_dofs(force_dofs, force)
+
+        loss = TranslationErrorLoss(cube)
+        state_init = scene.capture_state()
+        grad = adjoint_density_grad(scene, [loss], cube, apply_inputs)
+
+        scene.restore_state(state_init, False)
+        for step in range(NUM_STEPS):
+            apply_inputs(step)
+            scene.step(DT)
+        p_final = np.asarray(
+            cube.get_center_of_mass_transform().translation, dtype=np.float64
+        )
+        mass = cube.get_mass()
+        density = cube.get_density()
+        closed_form = (
+            -(DT * DT * NUM_STEPS * (NUM_STEPS + 1) / 2.0)
+            * float(force @ (p_final - loss.ref))
+            / (mass * density)
+        )
+        rel = abs(grad - closed_form) / abs(closed_form)
+        self.assertLessEqual(
+            rel, 1e-5, f"closed-form mismatch: adjoint={grad}, closed={closed_form}"
+        )
+        fd = fd_density_grad(scene, [loss], cube, state_init, apply_inputs)
+        scene.release_all_states()
+        self.assertLessEqual(
+            abs(grad - fd) / abs(fd), 1e-4, f"FD mismatch: adjoint={grad}, fd={fd}"
+        )
+
+    def test_rigid_contact_vs_fd(self) -> None:
+        scene, cube = scenes.rigid_on_plane("rich")
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        loss = TranslationErrorLoss(cube)
+        state_init = scene.capture_state()
+        grad = adjoint_density_grad(scene, [loss], cube)
+        fd = fd_density_grad(scene, [loss], cube, state_init)
+        scene.release_all_states()
+        self.assertGreater(abs(fd), 0.0, "test is vacuous")
+        self.assertLessEqual(
+            abs(grad - fd) / max(abs(grad), abs(fd)),
+            1e-2,
+            f"adjoint={grad}, fd={fd}",
+        )
+
+    def test_articulated_link_vs_fd(self) -> None:
+        scene, chain = scenes.free_chain_on_plane("rich", root_z=0.105)
+        scene.set_gravity([2.0, 0.0, -9.81])
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        links = []
+        scene.for_each_actor(
+            lambda a: links.append(a) if a.is_nested_link_actor() else None
+        )
+        link = links[0]
+        ref = np.zeros(chain.get_num_dofs())
+        ref[-1] = 0.3
+        loss = ArticulatedPoseErrorLoss(chain, ref)
+        state_init = scene.capture_state()
+        grad = adjoint_density_grad(scene, [loss], link)
+        fd = fd_density_grad(scene, [loss], link, state_init)
+        scene.release_all_states()
+        self.assertGreater(abs(fd), 0.0, "test is vacuous")
+        self.assertLessEqual(
+            abs(grad - fd) / max(abs(grad), abs(fd)),
+            1e-2,
+            f"adjoint={grad}, fd={fd}",
+        )
+
+    def test_compound_actor_has_no_inertia_error(self) -> None:
+        """The articulated compound itself carries no rigid-body inertia; the
+        inertia (and so the density gradient) lives on its links."""
+        scene, chain = scenes.free_chain_on_plane("rich", root_z=0.105)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        ref = np.zeros(chain.get_num_dofs())
+        _sweep(scene, [ArticulatedPoseErrorLoss(chain, ref)])
+        with self.assertRaises(physics.Error):
+            out = np.zeros(1)
+            diffsim.set_density_backward(chain, out)
+        scene.release_all_states()
+
+    def test_reset_and_never_swept_contracts(self) -> None:
+        scene, cube = scenes.rigid_on_plane("rich")
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        diffsim.reset_back_propagation(scene)
+        with self.assertRaises(physics.Error):
+            out = np.zeros(1)
+            diffsim.set_density_backward(cube, out)
+        grad = adjoint_density_grad(scene, [TranslationErrorLoss(cube)], cube)
+        self.assertNotEqual(grad, 0.0)
+        diffsim.reset_back_propagation(scene)
+        out = np.ones(1)
+        diffsim.set_density_backward(cube, out)
+        self.assertEqual(out[0], 0.0)
+        scene.release_all_states()
+
+
 if __name__ == "__main__":
     unittest.main()

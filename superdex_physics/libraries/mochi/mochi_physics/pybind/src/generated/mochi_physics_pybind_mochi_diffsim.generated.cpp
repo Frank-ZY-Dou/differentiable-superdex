@@ -192,6 +192,18 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
       , "Backward pass for :meth:`~superdex.physics.Actor.set_contact_params`.\n\nReads the gradient of the loss with respect to this actor's own contact\nparameters, accumulated by the engine over every\n:func:`~superdex.physics.diffsim.back_propagate` call since\n:func:`~superdex.physics.diffsim.reset_back_propagation` (contact parameters\nact at every step, so no caller-side accumulation is needed). Works for\nstandalone actors and nested link actors alike; pair combination rules\n(geometric means, collider selection) are differentiated through the full\nresidual assembly. Each step contributes -lambda^T dR/dtheta by central\nfinite differences of the assembled residual, with lambda the\ngeneralized-force adjoint and a per-parameter relative step scaled by\n:attr:`~superdex.physics.diffsim.BackPropagationSolverParams.eps_finite_diff`.\n\nGradient order (size 4): [penalty_coefficient, coulomb_friction_coefficient,\nviscous_friction_coefficient, normal_viscous_damping_coefficient].\nfriction_falloff_vel is deliberately excluded (it is consumed through\ncontact-preparation-time data, which residual re-assembly cannot observe),\nand static colliders' own parameters are not differentiated (they are not\npart of any island; for a static collider the penalty coefficient and\nfalloff velocity are taken from the dynamic partner by the pair rules\nanyway).\n\nArgs:\n    actor (Actor): The dynamic actor (or nested link actor) owning the\n        parameters.\n    out_grad_contact_params (ArrayLikeReal): Gradient in the order above.\n        Must be of size 4. Overwritten, not accumulated into.\n\nRaises:\n    :class:`~superdex.physics.Error`: If the actor was not part of any\n        back-propagated island since the last reset, or on invalid input."
     );
 
+    m_diffsim.def("set_density_backward", [](mochi::Actor const* actor, mochi::Span<mochi::real> out_grad_density) {
+      mochi::Error error;
+      mochi::diffsim::SetDensityBackward(actor, out_grad_density, error);
+      if (!error.IsOK()) {
+        throw MochiErrorException(error);
+      }
+    }
+      , py::arg("actor")
+      , py::arg("out_grad_density")
+      , "Backward pass for :meth:`~superdex.physics.Actor.set_density`.\n\nReads the gradient of the loss with respect to this actor's density,\naccumulated by the engine over every\n:func:`~superdex.physics.diffsim.back_propagate` call since\n:func:`~superdex.physics.diffsim.reset_back_propagation`. Density rescales\nmass and moment of inertia proportionally about the inertia reference with\nthe center of mass unchanged, exactly matching the forward\n:meth:`~superdex.physics.Actor.set_density`. Covers rigid-body-inertia\nowners: standalone rigid actors and articulated link actors (soft actors\nare outside diffsim's scope). Each step contributes -lambda^T dR/drho by\ncentral finite differences of the assembled residual with a relative step\nscaled by\n:attr:`~superdex.physics.diffsim.BackPropagationSolverParams.eps_finite_diff`.\n\nArgs:\n    actor (Actor): The rigid actor or articulated link actor.\n    out_grad_density (ArrayLikeReal): Gradient wrt density. Must be of size\n        1. Overwritten, not accumulated into.\n\nRaises:\n    :class:`~superdex.physics.Error`: If the actor has no rigid-body\n        inertia, or was not part of any back-propagated island since the\n        last reset."
+    );
+
     m_diffsim.def("prepare_back_propagate", [](mochi::Scene* scene, mochi::StateHandle state_new, mochi::StateHandle state_old) {
       mochi::Error error;
       mochi::diffsim::PrepareBackPropagate(scene, state_new, state_old, error);

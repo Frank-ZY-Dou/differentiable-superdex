@@ -748,6 +748,10 @@ static void AccumulateParameterGradientsIsland(
         reg.try_get<CDiffContactParamsGrad>(e) == nullptr) {
       reg.emplace<CDiffContactParamsGrad>(e);
     }
+    if (reg.try_get<CRigidBodyInertia const>(e) != nullptr &&
+        reg.try_get<CDiffDensityGrad>(e) == nullptr) {
+      reg.emplace<CDiffDensityGrad>(e);
+    }
   }
 
   // Stack the per-actor force adjoints into one island vector. Entities in the
@@ -763,6 +767,8 @@ static void AccumulateParameterGradientsIsland(
   // Residual-only assembly problem at the prepared step states.
   SnleProblemFunctions<real> functions; // dummy; the assembly function is set below
   SnleProblem<real> problem(dofsSize, solutionSize, std::move(functions));
+  // The caller (SceneImpl::BackPropagate) restored the exact step-state pair before
+  // invoking the parameter stage, so the ECS holds the true, undrifted states here.
   GetSolutions(problem.solution, reg, descendants.actors, /*baseOffset*/ 0);
   AssemblyParams params = {.assemObj = false, .assemRes = true, .assemDRes = false};
   problem.SetAssemblyFunction([&](SnleProblem<real>& p, AssemblyParams const& /*unused*/) {
@@ -785,6 +791,10 @@ static void AccumulateParameterGradientsIsland(
     problem.UpdateResidual();
     out = problem.GetResidual();
   };
+  // One-time re-anchor of the ECS state to the true solution (zero increment takes
+  // the PostNewSolution path); the parameter perturbations below never move the
+  // state, so subsequent evaluations stay anchored.
+  solver::PostNewIncrementLocalPipeline(reg, island, delta, problem.solution);
 
   auto const& solverParams = reg.ctx<CBackPropagationSolverParams const>();
 
@@ -831,6 +841,27 @@ static void AccumulateParameterGradientsIsland(
       outContactGrad.value[f] += -lambda.Dot(residualPlus) / (2_r * eps);
     }
   }
+
+  // Density, per rigid-body-inertia owner (standalone rigid actors and articulated
+  // links). SetDensity rescales mass and moment of inertia proportionally about the
+  // inertia reference and restores bit-exactly (see RigidBodyInertia), which is what
+  // makes this perturbation safe.
+  for (auto const e : descendants.actors) {
+    auto* inertia = reg.try_get<CRigidBodyInertia>(e);
+    if (inertia == nullptr) {
+      continue;
+    }
+    auto& outDensityGrad = reg.get<CDiffDensityGrad>(e); // created above
+    real const density0 = inertia->GetDensity();
+    real const eps = solverParams.epsFiniteDiff * density0; // relative; density > 0
+    inertia->SetDensity(density0 + eps);
+    evalResidual(AsView(residualPlus));
+    inertia->SetDensity(density0 - eps);
+    evalResidual(AsView(residualMinus));
+    inertia->SetDensity(density0);
+    residualPlus -= residualMinus;
+    outDensityGrad.value += -lambda.Dot(residualPlus) / (2_r * eps);
+  }
 }
 
 void mochi::AccumulateParameterGradients(entt::registry& reg) {
@@ -852,6 +883,10 @@ void mochi::ResetContactParamsGradContainers(CDiffContactParamsGrad& outGrad) {
   outGrad.value.fill(0_r);
 }
 
+void mochi::ResetDensityGradContainers(CDiffDensityGrad& outGrad) {
+  outGrad.value = 0_r;
+}
+
 void mochi::BackPropagationSolve(entt::registry& reg) {
   MOCHI_PROFILE_SCOPE();
   // Emplace CIslandBackPropSolverStats for all islands.
@@ -867,10 +902,6 @@ void mochi::BackPropagationSolve(entt::registry& reg) {
       });
 
   eachTask.Wait();
-
-  // Parameter adjoints, sequentially: they perturb scene-global and per-entity
-  // parameter state.
-  AccumulateParameterGradients(reg);
 }
 
 // Assign/Acquire to global Jacobian matrices, using CSceneStateOffset to determine block offset

@@ -197,6 +197,14 @@ struct CDiffContactParamsGrad {
   std::array<real, kNumContactParamGradients> value{};
 };
 
+// Per-entity component accumulating dL/d(density) across BackPropagate calls, for
+// every rigid-body-inertia owner (standalone rigid actors and articulated links) of a
+// back-propagated island. Same existence semantics as CDiffContactParamsGrad.
+struct CDiffDensityGrad {
+  real value = 0_r;
+};
+
+
 struct CForwardPropContainerDerivedStateJac {
   Matrix<real> data;
   // The following two fields are used to store the island this actor belongs to,
@@ -248,12 +256,20 @@ void PrepareBackPropagation(entt::registry& reg);
 void BackPropagationSolve(entt::registry& reg);
 
 // Accumulate every island's contribution to the parameter gradients (gravity into
-// CDiffGravityGrad, contact parameters into per-owner CDiffContactParamsGrad).
-// Runs inside BackPropagate, after the island adjoint solves.
+// CDiffGravityGrad, contact parameters into per-owner CDiffContactParamsGrad,
+// density into per-owner CDiffDensityGrad). Called by SceneImpl::BackPropagate after
+// the island adjoint solves AND after re-restoring the exact step-state pair: the
+// finite-difference Hessian-vector products leave the actors at their last perturbed
+// evaluation point, and evaluating d(residual)/d(parameter) at that O(eps)-drifted
+// state contaminates mass-proportional parameters (measured density-gradient error
+// of 0.575 * eps/dt).
 void AccumulateParameterGradients(entt::registry& reg);
 
 // Zeroes one entity's accumulated contact-parameter gradient (ResetBackPropagation).
 void ResetContactParamsGradContainers(CDiffContactParamsGrad& outGrad);
+
+// Zeroes one entity's accumulated density gradient (ResetBackPropagation).
+void ResetDensityGradContainers(CDiffDensityGrad& outGrad);
 
 void ComputeHqx(
     int numIslandDofs,
