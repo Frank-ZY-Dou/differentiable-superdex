@@ -24,7 +24,8 @@ low-level. :class:`DifferentiableRollout` wraps it into one object that
 - runs the reverse sweep newest-step-first, optionally truncated to the last
   ``truncation_window`` steps (truncated BPTT),
 - collects gradients w.r.t. the initial pose and velocity, per-step
-  pose-controller targets, and per-step external forces on single-DoF joints,
+  pose-controller targets, and per-step external forces (all six DoFs of a
+  standalone rigid actor; the single-DoF joints of an articulated one),
 - optionally clips each gradient block to a maximum L2 norm, and
 - aggregates the solver diagnostics (finite-difference validity, worst
   adjoint residual, summed solve time) across the sweep.
@@ -91,12 +92,17 @@ def _collect_actors(scene) -> list[_ActorEntry]:
         articulated = actor.get_type() == physics.ActorType.ARTICULATED
         dofs = actor.get_num_dofs()
         has_controller = articulated and actor.has_articulated_pose_controller()
-        force_dofs = []
         if articulated:
+            force_dofs = []
             info = actor.get_articulated_shape_info()
             for entry in info.dof_info:
                 if entry.get_size() == 1:
                     force_dofs.append(entry.offset)
+        else:
+            # Standalone rigid actors take world-frame external forces (DoFs
+            # 0-2) and torques (DoFs 3-5); the backward reads the generalized
+            # force adjoint for all six.
+            force_dofs = list(range(RIGID_DOF_SIZE))
         name = actor.get_name()
         if any(e.name == name for e in entries):
             raise ValueError(
@@ -135,8 +141,9 @@ class ActorGradients:
     ones); ``initial_velocity`` stacks linear+angular for rigid actors and
     joint velocities for articulated ones. ``control_targets`` is
     ``(num_dofs, num_steps)`` for actors with a pose controller, otherwise
-    ``None``; ``external_forces`` is ``(len(force_dofs), num_steps)`` for the
-    actor's single-DoF joints, otherwise ``None``. Truncated sweeps leave the
+    ``None``; ``external_forces`` is ``(len(force_dofs), num_steps)`` -
+    ``force_dofs`` being all six DoFs for a standalone rigid actor and the
+    single-DoF joints for an articulated one - otherwise ``None``. Truncated sweeps leave the
     initial-state gradients as ``None`` (they would be incomplete) and only
     fill the steps the sweep visited.
     """

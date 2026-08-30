@@ -248,6 +248,68 @@ class TruncationAndClippingTest(unittest.TestCase):
             self.assertLessEqual(float(np.linalg.norm(block)), max_norm * (1 + 1e-12))
 
 
+class RigidExternalForceGradientTest(unittest.TestCase):
+    """The driver's rigid-actor force gradients (all six DoFs) vs central FD."""
+
+    def test_rigid_force_grads_vs_fd(self) -> None:
+        num_steps = 4
+        forces = 0.5 * np.sin(np.arange(6 * num_steps, dtype=np.float64)).reshape(
+            6, num_steps
+        )
+
+        def build():
+            scene, cube = scenes.rigid_free()
+            configure_for_differentiability(scene)
+            return scene, cube
+
+        dofs = np.arange(6, dtype=np.int32)
+
+        def apply_factory(cube):
+            def apply_inputs(step: int) -> None:
+                cube.set_external_forces_on_dofs(
+                    dofs, np.ascontiguousarray(forces[:, step])
+                )
+
+            return apply_inputs
+
+        scene, cube = build()
+        self.addCleanup(physics.destroy_scene, scene)
+        loss = TranslationErrorLoss(cube)
+        rollout = DifferentiableRollout(scene, dt=DT, num_steps=num_steps)
+        result = rollout.run(
+            apply_inputs=apply_factory(cube), terminal_losses=[loss]
+        )
+        adjoint = result.gradients[cube.get_name()].external_forces
+        self.assertEqual(adjoint.shape, (6, num_steps))
+        self.assertTrue(result.fd_valid)
+
+        def rollout_loss(perturbed: np.ndarray) -> float:
+            fd_scene, fd_cube = build()
+            try:
+                fd_loss = TranslationErrorLoss(fd_cube)
+                for step in range(num_steps):
+                    fd_cube.set_external_forces_on_dofs(
+                        dofs, np.ascontiguousarray(perturbed[:, step])
+                    )
+                    fd_scene.step(DT)
+                return fd_loss.value()
+            finally:
+                physics.destroy_scene(fd_scene)
+
+        eps = 1e-5
+        fd = np.zeros_like(adjoint)
+        for d in range(6):
+            for step in range(num_steps):
+                plus = forces.copy()
+                plus[d, step] += eps
+                minus = forces.copy()
+                minus[d, step] -= eps
+                fd[d, step] = (rollout_loss(plus) - rollout_loss(minus)) / (2 * eps)
+
+        self.assertTrue(np.any(np.abs(fd) > 0.0), "test is vacuous")
+        np.testing.assert_allclose(adjoint, fd, rtol=1e-6, atol=1e-12)
+
+
 def scene_full_actor(scene):
     """The single dynamic articulated actor of a pendulum scene."""
     actors = []
