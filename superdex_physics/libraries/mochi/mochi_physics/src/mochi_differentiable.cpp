@@ -229,6 +229,47 @@ static void WriteToActorResidual(
   outProblem.actorConvergenceWeights.emplace_back(dofOffset.dofsOffset, &weights.values);
 }
 
+// Assemble the exact (non-PSD-projected) Hessian d2merit/dq2 of the island at the
+// prepared states, as an owned dense copy. This is the same assembly the forward-mode
+// step-Jacobian path relies on (psdDRes = false). The problem's cached dresidual is
+// left holding this exact assembly; re-assemble before using it for anything else.
+static Matrix<real> AssembleExactHessian(
+    entt::registry& reg,
+    entt::entity island,
+    SnleProblem<real>& problemForward) {
+  AssemblyParams params = {
+      .assemObj = false,
+      .assemRes = false,
+      .assemDRes = true,
+      .psdDRes = false,
+      // Exact saturation Hessians as well: the fitted variants are Newton
+      // stabilization devices, not derivatives of the actual residual.
+      .fittedSaturationHessian = SaturationHessianParams::All(false)};
+  solver::AssembleIslandPipeline(reg, island, params, problemForward);
+  return ToMatrix(problemForward.GetDResidual());
+}
+
+// out = matrix * in, written out explicitly against the column-major storage so the
+// Krylov operator has no dependency on expression-template overloads.
+static void ApplyDense(
+    MatrixView<real const> matrix,
+    ColumnVectorView<real const> in,
+    ColumnVectorView<real> out) {
+  MOCHI_ASSERT(matrix.Cols() == in.Rows(), "ApplyDense: dimension mismatch");
+  MOCHI_ASSERT(matrix.Rows() == out.Rows(), "ApplyDense: dimension mismatch");
+  out.SetZero();
+  for (int j = 0; j < matrix.Cols(); ++j) {
+    real const x = in[j];
+    if (x == 0_r) {
+      continue;
+    }
+    auto const col = matrix.Col(j);
+    for (int i = 0; i < matrix.Rows(); ++i) {
+      out[i] += col[i] * x;
+    }
+  }
+}
+
 // Use a Krylov solver for the linear problem dres * z = rhs, where dres is approximated.
 // The approximate Hessian hat(dres) is used as preconditioner, and dres * v products
 // are computed via finite differences in GetHessianVectorProduct.
@@ -259,6 +300,14 @@ static void KrylovSolveZ(
   KrylovSolverParams& innerLParams = newtonParamsForward.lParams;
   innerLParams.absTol = backpropParams.innerSolverAbsTol;
 
+  // Analytic outer operator: assemble the exact Hessian once, before the PSD
+  // preconditioner assembly below reuses the problem's dresidual storage.
+  bool const useAnalyticHvp = backpropParams.useAnalyticHvp;
+  Matrix<real> exactHessian;
+  if (useAnalyticHvp) {
+    exactHessian = AssembleExactHessian(reg, island, problemForward);
+  }
+
   // Assemble approximate Hessian hat(dres) for preconditioning
   AssemblyParams paramsDRes = {
       .assemObj = false, .assemRes = false, .assemDRes = true, .psdDRes = true};
@@ -274,6 +323,10 @@ static void KrylovSolveZ(
   // Create callable operator for matrix-vector product via finite differences
   // This is used by krylov::Apply which calls A(v, Av) for non-matrix types
   auto hessianOp = [&](ColumnVectorView<real const> in, ColumnVectorView<real> out) {
+    if (useAnalyticHvp) {
+      ApplyDense(AsConstView(exactHessian), in, out);
+      return;
+    }
     GetHessianVectorProduct(reg, island, GradTarget::Current, problemForward, in, out);
   };
 
@@ -372,6 +425,30 @@ static void KrylovSolveZ(
         outerResult.numIterDone,
         outerResult.residualNorm,
         outerResult.converged);
+  }
+
+  // With both flags set, cross-check the analytic operator against one central
+  // finite difference at the solution; mismatches are reported through the same
+  // finiteDiffValid diagnostic the FD path uses for its epsilon-robustness check.
+  if (useAnalyticHvp && backpropParams.validateFiniteDiff && !IsZero(outZ)) {
+    MOCHI_FILO_STACK_ALLOCATOR(validationAllocator, 2 * 256 * sizeof(real));
+    ColumnVector<real> analyticHz(rhs.Rows(), &validationAllocator);
+    ColumnVector<real> fdHz(rhs.Rows(), &validationAllocator);
+    ApplyDense(AsConstView(exactHessian), AsConstView(outZ), AsView(analyticHz));
+    GetHessianVectorProduct(
+        reg, island, GradTarget::Current, problemForward, AsConstView(outZ), AsView(fdHz));
+    fdHz -= analyticHz;
+    real constexpr kAnalyticVsFdTol = 1e-2_r;
+    real const relError =
+        fdHz.Norm() / (analyticHz.Norm() + std::numeric_limits<real>::min());
+    if (relError > kAnalyticVsFdTol) {
+      islandBackPropSolverStats.finiteDiffValid = false;
+      if (backpropParams.verbosity >= VerbosityLevel::Warning) {
+        MOCHI_LOG_WARNING(
+            "Analytic Hvp vs finite-difference cross-check: rel error = %e",
+            static_cast<double>(relError));
+      }
+    }
   }
 
   // Record statistics

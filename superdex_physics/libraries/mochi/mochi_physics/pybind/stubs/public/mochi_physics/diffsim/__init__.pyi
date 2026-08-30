@@ -49,6 +49,15 @@ class BackPropagationSolverParams:
     """Validate analytic Hessian-vector products against finite differences
     (diagnostic; slower).
     """
+    use_analytic_hvp: bool
+    """[Experimental] Use the analytically assembled Hessian as the outer-solve
+    operator instead of finite-difference Hessian-vector products (Krylov outer
+    solver only). Valid only for islands of rigid actors contacting static
+    colliders; articulated terms and dynamic-dynamic contact coupling are
+    Gauss-Newton-grade in the assembly, so those islands need the FD operator.
+    With :attr:`validate_finite_diff` also set, each solve cross-checks the
+    analytic operator against one finite-difference product.
+    """
     @overload
     def __init__(self) -> None: ...
     @overload
@@ -63,6 +72,7 @@ class BackPropagationSolverParams:
         inner_solver_abs_tol: float = ...,
         eps_finite_diff: float = ...,
         validate_finite_diff: bool = ...,
+        use_analytic_hvp: bool = ...,
     ) -> None: ...
 
 class BackPropagationSceneStats:

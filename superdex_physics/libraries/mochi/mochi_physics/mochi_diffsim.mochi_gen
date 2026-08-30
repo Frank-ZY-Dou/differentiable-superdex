@@ -31,6 +31,14 @@ struct diffsim::BackPropagationSolverParams [no_reflection] {
   // @brief Validate analytic Hessian-vector products against finite differences (diagnostic;
   // slower).
   bool validateFiniteDiff = false;
+
+  // @brief [Experimental] Use the analytically assembled Hessian as the outer-solve operator
+  // instead of finite-difference Hessian-vector products (Krylov outer solver only). Valid only
+  // for islands of rigid actors contacting static colliders; the assembly is Gauss-Newton-grade
+  // for articulated terms and dynamic-dynamic contact coupling, so those islands need the
+  // finite-difference operator. With @ref validateFiniteDiff also set, each solve cross-checks
+  // the analytic operator against one finite-difference product.
+  bool useAnalyticHvp = false;
 }
 
 // @brief Performance metrics for the last back-propagation step.

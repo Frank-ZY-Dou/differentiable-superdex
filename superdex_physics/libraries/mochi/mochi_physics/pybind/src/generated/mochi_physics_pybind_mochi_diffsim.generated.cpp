@@ -42,7 +42,7 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
   auto m_diffsim = m.def_submodule("diffsim");
 
   registry.GetClass<mochi::diffsim::BackPropagationSolverParams>()
-    .def(py::init([](py::object verbosity, py::object use_newton_outer_solver, py::object outer_solver_max_iter, py::object outer_solver_abs_tol, py::object outer_solver_rel_tol, py::object outer_solver_convergence_mode, py::object inner_solver_abs_tol, py::object eps_finite_diff, py::object validate_finite_diff) {
+    .def(py::init([](py::object verbosity, py::object use_newton_outer_solver, py::object outer_solver_max_iter, py::object outer_solver_abs_tol, py::object outer_solver_rel_tol, py::object outer_solver_convergence_mode, py::object inner_solver_abs_tol, py::object eps_finite_diff, py::object validate_finite_diff, py::object use_analytic_hvp) {
       mochi::diffsim::BackPropagationSolverParams result;
       result.verbosity = py::cast<mochi::VerbosityLevel>(verbosity);
       result.useNewtonOuterSolver = py::cast<bool>(use_newton_outer_solver);
@@ -53,6 +53,7 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
       result.innerSolverAbsTol = py::cast<mochi::real>(inner_solver_abs_tol);
       result.epsFiniteDiff = py::cast<mochi::real>(eps_finite_diff);
       result.validateFiniteDiff = py::cast<bool>(validate_finite_diff);
+      result.useAnalyticHvp = py::cast<bool>(use_analytic_hvp);
       return result;
     })
       , py::kw_only()
@@ -65,6 +66,7 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
       , py::arg("inner_solver_abs_tol") = mochi::diffsim::BackPropagationSolverParams{}.innerSolverAbsTol
       , py::arg("eps_finite_diff") = mochi::diffsim::BackPropagationSolverParams{}.epsFiniteDiff
       , py::arg("validate_finite_diff") = mochi::diffsim::BackPropagationSolverParams{}.validateFiniteDiff
+      , py::arg("use_analytic_hvp") = mochi::diffsim::BackPropagationSolverParams{}.useAnalyticHvp
     )
     .def(py::init<>())
     .def("__copy__", [](mochi::diffsim::BackPropagationSolverParams const& self) { return mochi::diffsim::BackPropagationSolverParams(self); })
@@ -78,6 +80,7 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
     .def_readwrite("inner_solver_abs_tol", &mochi::diffsim::BackPropagationSolverParams::innerSolverAbsTol, "Absolute convergence tolerance for the inner (linear) solver.")
     .def_readwrite("eps_finite_diff", &mochi::diffsim::BackPropagationSolverParams::epsFiniteDiff, "Finite-difference step size used for Hessian-vector products in the adjoint\nsolve.")
     .def_readwrite("validate_finite_diff", &mochi::diffsim::BackPropagationSolverParams::validateFiniteDiff, "Validate analytic Hessian-vector products against finite differences\n(diagnostic; slower).")
+    .def_readwrite("use_analytic_hvp", &mochi::diffsim::BackPropagationSolverParams::useAnalyticHvp, "[Experimental] Use the analytically assembled Hessian as the outer-solve\noperator instead of finite-difference Hessian-vector products (Krylov outer\nsolver only). Valid only for islands of rigid actors contacting static\ncolliders; articulated terms and dynamic-dynamic contact coupling are\nGauss-Newton-grade in the assembly, so those islands need the FD operator.\nWith validate_finite_diff also set, each solve cross-checks the analytic\noperator against one finite-difference product.")
   ;
 
   registry.GetClass<mochi::diffsim::BackPropagationSceneStats>()

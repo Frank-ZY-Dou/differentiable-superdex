@@ -35,6 +35,7 @@ whole rollout loss, restarted from a captured initial state.
 from __future__ import annotations
 
 import dataclasses
+import os
 
 import numpy as np
 import superdex.physics as physics
@@ -134,6 +135,10 @@ def configure_for_differentiability(scene) -> None:
     # correctness, so solve the adjoint tightly.
     dp.outer_solver_abs_tol = 1e-10
     dp.outer_solver_max_iter = 100
+    if bool(int(os.environ.get("SUPERDEX_DIFFSIM_ANALYTIC_HVP", "0"))):
+        # A/B switch for the analytic outer-solve operator (source builds with
+        # the useAnalyticHvp field only; fails loudly on older wheels).
+        dp.use_analytic_hvp = True
     diffsim.set_back_propagation_solver_params(scene, dp)
 
 
@@ -418,6 +423,7 @@ class GradientCheckCase:
         grad_force = np.zeros((self.total_dofs, self.num_steps))
         fd_valid_all = True
         max_residual = 0.0
+        solve_time = 0.0
         for i in range(self.num_steps, 0, -1):
             if i != self.num_steps:
                 diffsim.prepare_back_propagate(self.scene, post[i - 1], pre[i - 1])
@@ -476,6 +482,7 @@ class GradientCheckCase:
             "init_vel": grad_init_vel,
             "fd_valid_all": fd_valid_all,
             "max_residual": max_residual,
+            "solve_time": solve_time,
         }
 
     # -- finite differences -------------------------------------------------
@@ -581,5 +588,6 @@ class GradientCheckCase:
                 )
         self.fd_valid_all = grads["fd_valid_all"]
         self.max_residual = grads["max_residual"]
+        self.solve_time = grads["solve_time"]
         self.scene.release_all_states()
         return reports

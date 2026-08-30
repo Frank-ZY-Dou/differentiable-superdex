@@ -42,6 +42,17 @@ struct BackPropagationSolverParams {
   real innerSolverAbsTol = 1e-10_r;
   real epsFiniteDiff = kDefaultBackPropagationEpsFiniteDiff;
   bool validateFiniteDiff = false;
+  // Experimental: use the analytically assembled Hessian (psdDRes = false, exact
+  // saturation Hessians) as the outer-solve operator instead of finite-difference
+  // Hessian-vector products (Krylov outer solver only). Measured validity (see
+  // test/diffsim/test_analytic_hvp.py): gradients match rollout finite differences
+  // only for islands of rigid actors contacting static colliders. The assembly is
+  // Gauss-Newton-grade elsewhere - articulated terms and dynamic-dynamic contact
+  // coupling are not the true residual derivative - so those islands need the FD
+  // operator. With validateFiniteDiff also set, each solve cross-checks the analytic
+  // operator against one finite-difference product and reports mismatches through
+  // BackPropagationSceneStats::finiteDiffValid.
+  bool useAnalyticHvp = false;
 };
 
 } // namespace mochi::diffsim

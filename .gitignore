@@ -30,3 +30,4 @@ audit_reports/
 default.profraw
 *.egg-info/
 __pycache__/
+.venv/
