@@ -17,6 +17,7 @@
 #include "mochi_differentiable.h"
 
 #include "mochi_actor_convergence.h"
+#include "mochi_common_components.h"
 #include "mochi_articulated_body.h"
 #include "mochi_constraint.h"
 #include "mochi_rigid.h"
@@ -705,6 +706,106 @@ static void BackPropagationSolveIslandAsync(
   }
 }
 
+// Stack one actor's generalized-force adjoint into the island lambda vector.
+// Invoked through ecs::InvokeForEach so entities without differentiability
+// components (e.g. nested link actors in the descendants list) are skipped.
+static void StackForceAdjoint(
+    ColumnVectorView<real> outLambda,
+    CActorDofInfo const& info,
+    CDofOffset const& offset,
+    CDiffForceGrad const& forceGrad) {
+  outLambda.MiddleRows(offset.dofsOffset, info.dofsSize) = forceGrad;
+}
+
+// Accumulate this island's contribution to dL/d(gravity): -lambda^T dR/dg by central
+// finite differences of the assembled residual, where lambda is the generalized-force
+// adjoint (CDiffForceGrad) that BackPropagationSolveIslandAsync just computed. Runs
+// after the island solves and sequentially across islands: it perturbs the scene-global
+// CSceneGravity context, which parallel island tasks must not race on.
+static void AccumulateGravityGradientIsland(
+    entt::registry& reg,
+    entt::entity island,
+    CIslandDescendants const& descendants,
+    Real3& outGradient) {
+  auto const& islandDofInfo = reg.get<CIslandDofInfo const>(island);
+  int const dofsSize = islandDofInfo.dofsSize;
+  int const solutionSize = islandDofInfo.poseSize;
+  if (dofsSize <= 0) {
+    return;
+  }
+
+  MOCHI_FILO_STACK_ALLOCATOR(allocator, 4 * 256 * sizeof(real));
+
+  // Stack the per-actor force adjoints into one island vector. Entities in the
+  // descendants list without the differentiability components contribute nothing.
+  ColumnVector<real> lambda(dofsSize, &allocator);
+  lambda.SetZero();
+  ecs::InvokeForEach<ecs::policy::AllowMutableExternalParams>(
+      &StackForceAdjoint, reg, descendants.actors, AsView(lambda));
+  if (IsZero(lambda)) {
+    return;
+  }
+
+  // Residual-only assembly problem at the prepared step states.
+  SnleProblemFunctions<real> functions; // dummy; the assembly function is set below
+  SnleProblem<real> problem(dofsSize, solutionSize, std::move(functions));
+  GetSolutions(problem.solution, reg, descendants.actors, /*baseOffset*/ 0);
+  AssemblyParams params = {.assemObj = false, .assemRes = true, .assemDRes = false};
+  problem.SetAssemblyFunction([&](SnleProblem<real>& p, AssemblyParams const& /*unused*/) {
+    solver::AssembleIslandPipeline(reg, island, params, p);
+  });
+  // A fresh SnleProblem's per-actor storage is created by its first dresidual
+  // assembly (every existing user - KrylovSolveZ, the step-Jacobian path - starts
+  // with one); residual-only assembly on an uninitialized problem crashes.
+  AssemblyParams dresInit = {
+      .assemObj = false, .assemRes = false, .assemDRes = true, .psdDRes = true};
+  solver::AssembleIslandPipeline(reg, island, dresInit, problem);
+
+  ColumnVector<real> delta(dofsSize, &allocator);
+  delta.SetZero();
+  ColumnVector<real> residualPlus(dofsSize, &allocator);
+  ColumnVector<real> residualMinus(dofsSize, &allocator);
+  auto evalResidual = [&](ColumnVectorView<real> out) {
+    solver::PostNewIncrementLocalPipeline(reg, island, delta, problem.solution);
+    problem.InvalidateCachedData();
+    problem.UpdateResidual();
+    out = problem.GetResidual();
+  };
+
+  auto& gravity = reg.ctx<CSceneGravity>();
+  Vec4r const savedAccel = gravity.accel;
+  Real3 const gravityRef = ToReal3(savedAccel);
+  auto const& solverParams = reg.ctx<CBackPropagationSolverParams const>();
+  real const eps = solverParams.epsFiniteDiff * (1_r + Sqrt(NormSqr(gravityRef)));
+  for (int i = 0; i < 3; ++i) {
+    Real3 gravityPerturbed = gravityRef;
+    gravityPerturbed[i] = gravityRef[i] + eps;
+    gravity.accel = ToSimd(gravityPerturbed, 0_r);
+    evalResidual(AsView(residualPlus));
+    gravityPerturbed[i] = gravityRef[i] - eps;
+    gravity.accel = ToSimd(gravityPerturbed, 0_r);
+    evalResidual(AsView(residualMinus));
+    residualPlus -= residualMinus;
+    outGradient[i] += -lambda.Dot(residualPlus) / (2_r * eps);
+  }
+  gravity.accel = savedAccel;
+}
+
+void mochi::AccumulateGravityGradient(entt::registry& reg) {
+  MOCHI_PROFILE_SCOPE();
+  if (reg.try_ctx<CDiffGravityGrad>() == nullptr) {
+    // ResetBackPropagation has not run yet; SetGravityBackward reports this as an
+    // error at read time rather than returning a silent zero.
+    return;
+  }
+  Real3 gradient{};
+  reg.view<CIslandDescendants const>().each(
+      [&](entt::entity island, CIslandDescendants const& descendants) {
+        AccumulateGravityGradientIsland(reg, island, descendants, gradient);
+      });
+  reg.ctx<CDiffGravityGrad>().value += gradient;
+}
+
 void mochi::BackPropagationSolve(entt::registry& reg) {
   MOCHI_PROFILE_SCOPE();
   // Emplace CIslandBackPropSolverStats for all islands.
@@ -720,6 +821,9 @@ void mochi::BackPropagationSolve(entt::registry& reg) {
       });
 
   eachTask.Wait();
+
+  // Parameter adjoints, sequentially: they perturb scene-global context.
+  AccumulateGravityGradient(reg);
 }
 
 // Assign/Acquire to global Jacobian matrices, using CSceneStateOffset to determine block offset

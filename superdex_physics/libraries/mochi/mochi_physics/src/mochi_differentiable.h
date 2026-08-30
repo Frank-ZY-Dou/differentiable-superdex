@@ -169,6 +169,11 @@ struct CDiffTargetPoseGrad : NoCopy {
 struct CDiffForceGrad : public ColumnVector<real> {
   using ColumnVector<real>::ColumnVector;
 };
+// Global context component accumulating the loss gradient with respect to the scene
+// gravity vector across BackPropagate calls. Created/zeroed by ResetBackPropagation.
+struct CDiffGravityGrad {
+  Real3 value{};
+};
 
 struct CForwardPropContainerDerivedStateJac {
   Matrix<real> data;
@@ -219,6 +224,10 @@ Real3 const& GetCollidingPosition(ContactDetectionResult const& data, int contac
 void PrepareBackPropagation(entt::registry& reg);
 
 void BackPropagationSolve(entt::registry& reg);
+
+// Accumulate every island's contribution to dL/d(gravity) into CDiffGravityGrad.
+// Runs inside BackPropagate, after the island adjoint solves.
+void AccumulateGravityGradient(entt::registry& reg);
 
 void ComputeHqx(
     int numIslandDofs,

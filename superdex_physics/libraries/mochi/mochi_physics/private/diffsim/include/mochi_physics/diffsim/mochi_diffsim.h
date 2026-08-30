@@ -39,6 +39,8 @@ GetBackPropagationSceneStats(Scene const* scene, Error& error);
 
 MOCHI_API void ResetBackPropagation(Scene* scene, Error& error);
 
+MOCHI_API void SetGravityBackward(Scene* scene, Span<real> outGradGravity, Error& error);
+
 MOCHI_API void
 PrepareBackPropagate(Scene* scene, StateHandle stateNew, StateHandle stateOld, Error& error);
 

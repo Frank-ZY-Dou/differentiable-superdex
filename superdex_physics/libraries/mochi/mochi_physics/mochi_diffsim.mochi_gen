@@ -78,6 +78,20 @@ struct diffsim::BackPropagationSceneStats [no_reflection] {
 // @param[in] scene The scene to make differentiable.
 fn diffsim::MakeSceneDifferentiable(Scene* scene) -> void [mochi_error];
 
+// @brief Backward pass for @ref Scene::SetGravity.
+//
+// @details Reads the gradient of the loss with respect to the scene gravity vector, accumulated
+// by the engine over every @ref BackPropagate call since @ref ResetBackPropagation. Gravity acts
+// at every step, so unlike the per-step input backward functions no caller-side accumulation is
+// needed. Each step contributes -lambda^T dR/dg, evaluated by central finite differences of the
+// assembled residual with a step size scaled by @ref BackPropagationSolverParams::epsFiniteDiff,
+// where lambda is the generalized-force adjoint of that step.
+//
+// @param[in] scene The differentiable scene.
+// @param[out] outGradGravity Gradient wrt the gravity vector. Must be of size 3. Overwritten,
+// not accumulated into.
+fn diffsim::SetGravityBackward(Scene* scene, Span<real> outGradGravity) -> void [mochi_error];
+
 // @brief Get solver parameters.
 //
 // @param[in] scene The differentiable scene.

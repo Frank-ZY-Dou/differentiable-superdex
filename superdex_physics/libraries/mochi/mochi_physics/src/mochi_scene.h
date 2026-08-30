@@ -221,6 +221,8 @@ class SceneImpl final : public Scene {
   // consecutive states.
   void RestoreStatePair(StateHandle curr, StateHandle prev, Error& err);
   void ResetBackPropagation();
+
+  void SetGravityBackward(Span<real> outGradGravity, Error& error);
   void PrepareBackPropagate(StateHandle stateNew, StateHandle stateOld, Error& error);
   void BackPropagate(Error& error);
   void GetStepJacobian(

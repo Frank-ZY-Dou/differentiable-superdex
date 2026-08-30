@@ -175,6 +175,32 @@ def get_back_propagation_scene_stats(
         :class:`~superdex.physics.Error`: If an error occurs.
     """
 
+def set_gravity_backward(
+    scene: mochi_physics.Scene,
+    out_grad_gravity: mochi_physics.ArrayLikeReal,
+) -> None:
+    """Backward pass for :meth:`~superdex.physics.Scene.set_gravity`.
+
+    Reads the gradient of the loss with respect to the scene gravity vector,
+    accumulated by the engine over every
+    :func:`~superdex.physics.diffsim.back_propagate` call since
+    :func:`~superdex.physics.diffsim.reset_back_propagation`. Gravity acts at
+    every step, so unlike the per-step input backward functions no caller-side
+    accumulation is needed. Each step contributes ``-lambda^T dR/dg``, evaluated
+    by central finite differences of the assembled residual with a step size
+    scaled by
+    :attr:`~superdex.physics.diffsim.BackPropagationSolverParams.eps_finite_diff`,
+    where ``lambda`` is the generalized-force adjoint of that step.
+
+    Args:
+        scene (Scene): The differentiable scene.
+        out_grad_gravity (ArrayLikeReal): Gradient wrt the gravity vector. Must
+            be of size 3. Overwritten, not accumulated into.
+
+    Raises:
+        :class:`~superdex.physics.Error`: If an error occurs.
+    """
+
 def reset_back_propagation(scene: mochi_physics.Scene) -> None:
     """Reset back-propagation state.
 

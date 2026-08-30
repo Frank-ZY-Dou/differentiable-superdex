@@ -168,6 +168,18 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
       , "Reset back-propagation state.\n\nMust be called once before a backward pass.\n\nArgs:\n    scene (Scene): The differentiable scene.\n\nRaises:\n    :class:`~superdex.physics.Error`: If an error occurs."
     );
 
+    m_diffsim.def("set_gravity_backward", [](mochi::Scene* scene, mochi::Span<mochi::real> out_grad_gravity) {
+      mochi::Error error;
+      mochi::diffsim::SetGravityBackward(scene, out_grad_gravity, error);
+      if (!error.IsOK()) {
+        throw MochiErrorException(error);
+      }
+    }
+      , py::arg("scene")
+      , py::arg("out_grad_gravity")
+      , "Backward pass for :meth:`~superdex.physics.Scene.set_gravity`.\n\nReads the gradient of the loss with respect to the scene gravity vector,\naccumulated by the engine over every\n:func:`~superdex.physics.diffsim.back_propagate` call since\n:func:`~superdex.physics.diffsim.reset_back_propagation`. Gravity acts at\nevery step, so unlike the per-step input backward functions no caller-side\naccumulation is needed. Each step contributes -lambda^T dR/dg, evaluated by\ncentral finite differences of the assembled residual with a step size scaled\nby :attr:`~superdex.physics.diffsim.BackPropagationSolverParams.eps_finite_diff`,\nwhere lambda is the generalized-force adjoint of that step.\n\nArgs:\n    scene (Scene): The differentiable scene.\n    out_grad_gravity (ArrayLikeReal): Gradient wrt the gravity vector. Must be\n        of size 3. Overwritten, not accumulated into.\n\nRaises:\n    :class:`~superdex.physics.Error`: If an error occurs."
+    );
+
     m_diffsim.def("prepare_back_propagate", [](mochi::Scene* scene, mochi::StateHandle state_new, mochi::StateHandle state_old) {
       mochi::Error error;
       mochi::diffsim::PrepareBackPropagate(scene, state_new, state_old, error);

@@ -1171,7 +1171,25 @@ void SceneImpl::WarnIfNotImprovedConvergenceSettings() const {
 
 void SceneImpl::ResetBackPropagation() {
   ecs::InvokeForEachGlobal(&ResetBackPropagationContainers, _registry);
+  if (_registry.try_ctx<CDiffGravityGrad>() == nullptr) {
+    _registry.set<CDiffGravityGrad>();
+  }
+  _registry.ctx<CDiffGravityGrad>().value = Real3{};
   _registry.unset<TagBackPropagationPrepared>();
+}
+
+void SceneImpl::SetGravityBackward(Span<real> outGradGravity, Error& error) {
+  MOCHI_ERROR_RETURN(error);
+  MOCHI_ERROR_IF(isize(outGradGravity) != 3, error, "outGradGravity must have size 3");
+  auto const* accumulated = _registry.try_ctx<CDiffGravityGrad>();
+  MOCHI_ERROR_IF(
+      accumulated == nullptr,
+      error,
+      "ResetBackPropagation must be called before reading the gravity gradient");
+  MOCHI_ERROR_RETURN(error);
+  for (int i = 0; i < 3; ++i) {
+    outGradGravity[i] = accumulated->value[i];
+  }
 }
 
 void SceneImpl::PrepareBackPropagate(StateHandle stateNew, StateHandle stateOld, Error& error) {
@@ -3223,6 +3241,15 @@ MOCHI_API void diffsim::SetBackPropagationSolverParams(
 MOCHI_API void diffsim::ResetBackPropagation(Scene* scene, Error& error) {
   MOCHI_RETURN_IF_NOT_DIFFERENTIABLE(, );
   sceneImpl->ResetBackPropagation();
+}
+
+// [Differentiability] Backward pass for Scene::SetGravity.
+MOCHI_API void diffsim::SetGravityBackward(
+    Scene* scene,
+    Span<real> outGradGravity,
+    Error& error) {
+  MOCHI_RETURN_IF_NOT_DIFFERENTIABLE(, );
+  sceneImpl->SetGravityBackward(outGradGravity, error);
 }
 
 MOCHI_API void diffsim::PrepareBackPropagate(
