@@ -322,7 +322,9 @@ class ContactParamsGradientTest(unittest.TestCase):
         fd = fd_contact_grads(scene, [loss], cube, state_init)
         scene.release_all_states()
         self.assertTrue(np.any(np.abs(fd) > 0.0), "test is vacuous")
-        self._compare_per_field(grads["cube"], fd, 1e-2)
+        # Measured worst per-field disagreement 1.04e-4 under the tight
+        # forward Newton solve (2026-08-30); 1e-3 keeps ~10x headroom.
+        self._compare_per_field(grads["cube"], fd, 1e-3)
 
     def test_static_collider_read_is_an_error(self) -> None:
         """Static colliders are not island members; reading must fail loudly,
@@ -386,7 +388,10 @@ class ContactParamsGradientTest(unittest.TestCase):
         fd = fd_contact_grads(scene, [loss], link, state_init)
         scene.release_all_states()
         self.assertTrue(np.any(np.abs(fd) > 0.0), "test is vacuous")
-        self._compare_per_field(grads["link"], fd, 3e-2)
+        # Measured worst per-field disagreement 4.0e-3 under the tight
+        # forward Newton solve (2026-08-30, the viscous field: adjoint and FD
+        # both ~3.7e-6, i.e. near the FD truncation floor for this scene).
+        self._compare_per_field(grads["link"], fd, 1e-2)
 
     def test_reset_zeroes_contact_grads(self) -> None:
         scene, cube, _ground = _rich_contact_scene()

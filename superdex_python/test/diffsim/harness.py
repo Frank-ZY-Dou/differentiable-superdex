@@ -113,9 +113,15 @@ def configure_for_differentiability(scene) -> None:
     bp_defaults = diffsim.BackPropagationSolverParams()
     sp = scene.get_solver_params()
     nl = sp.non_linear_solver
-    nl.max_iter = 15
-    nl.abs_tol = bp_defaults.outer_solver_abs_tol
-    nl.rel_tol = bp_defaults.outer_solver_rel_tol
+    # Deviation from the C++ driver (which reuses the adjoint defaults, i.e.
+    # abs_tol = 1e-3): the adjoint assumes the step equations hold exactly, so
+    # the FORWARD Newton tolerance bounds gradient fidelity. At abs_tol = 1e-3
+    # friction-parameter gradients disagreed with rollout finite differences
+    # by 4-16 percent in stick-slip regimes; at 1e-12 they agree to ~1e-6
+    # relative (measured on single-cube contact scenes, 2026-08-30).
+    nl.max_iter = 200
+    nl.abs_tol = 1e-12
+    nl.rel_tol = 1e-12
     nl.convergence_mode = bp_defaults.outer_solver_convergence_mode
     sp.non_linear_solver = nl
     ls = sp.linear_solver
