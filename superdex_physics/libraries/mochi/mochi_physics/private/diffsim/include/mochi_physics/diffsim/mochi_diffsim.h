@@ -48,6 +48,18 @@ MOCHI_API void SetContactParamsBackward(
 
 MOCHI_API void SetDensityBackward(Actor const* actor, Span<real> outGradDensity, Error& error);
 
+MOCHI_API void GetDisplacementsBackward(Actor* actor, Span<real const> gradOutput, Error& error);
+
+MOCHI_API void SetDisplacementsBackward(
+    Actor const* actor,
+    Span<real> outGradDisplacements,
+    Error& error);
+
+MOCHI_API void SetNodeVelocitiesLocalBackward(
+    Actor const* actor,
+    Span<real> outGradVelocities,
+    Error& error);
+
 MOCHI_API void
 PrepareBackPropagate(Scene* scene, StateHandle stateNew, StateHandle stateOld, Error& error);
 

@@ -152,6 +152,39 @@ def two_cubes_on_plane(friction: str):
     return scene, bottom
 
 
+def soft_cube(
+    mass_damping: float = 0.0,
+    initial_velocity=(0.3, 0.0, 0.0),
+    squash: float = 0.0,
+):
+    """A free-floating FEM cube (5-tet mesh). Returns (scene, cube).
+
+    ``squash`` scales the initial z-displacements by ``-squash`` (e.g. 0.1
+    compresses the cube by 10% so elastic forces are active from step one);
+    ``mass_damping`` sets the material's mass-damping coefficient [1/s].
+    Recentering is force-disabled by ``make_scene_differentiable``, so the
+    displacements carry the full motion in the fixed local frame.
+    """
+    scene = physics.create_scene("diffsim_soft_cube")
+    scene.set_gravity(GRAVITY)
+    material = physics.SoftMaterialParams(mass_damping_coefficient=mass_damping)
+    cube = scene.create_soft_actor(
+        name="jelly",
+        shape=cube_shape(),
+        material=material,
+        world_from_local=physics.TransformRT([0.0, 0.0, 1.0]),
+    )
+    num_nodes = cube.get_num_dofs() // 3
+    if squash != 0.0:
+        rest_z = CUBE_COORDS.reshape(-1, 3)[:, 2]
+        displacements = np.zeros(3 * num_nodes)
+        displacements[2::3] = -squash * rest_z
+        cube.set_displacements(displacements)
+    velocities = np.tile(np.asarray(initial_velocity, dtype=np.float64), num_nodes)
+    cube.set_node_velocities_local(velocities)
+    return scene, cube
+
+
 def _chain_params() -> tuple[list, list]:
     joints = [
         physics.ArticulatedJointParams(

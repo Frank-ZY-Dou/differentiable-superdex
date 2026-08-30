@@ -18,6 +18,7 @@
 
 #include "mochi_common_components.h"
 #include "mochi_contact.h"
+#include "mochi_differentiable.h"
 #include "mochi_discretization_components.h"
 #include "mochi_ecs.h"
 #include "mochi_ecs_utils.h"
@@ -783,6 +784,49 @@ void InitializeOnce(entt::registry& reg);
 
 // Get the mass of a soft actor.
 [[nodiscard]] real GetActorMass(entt::registry const& reg, entt::entity actor);
+
+/**************************************************************************
+  [Differentiability] Standalone soft actors
+*/
+
+/*
+ * Validate that a soft actor supports the implemented differentiable paths. Rejected (loudly):
+ * nested/skinned soft actors, reduced-order models, actors without inertia, stiffness damping
+ * (its previous-state viscous-stress derivative is not implemented), and Dirichlet boundary
+ * conditions. Contact is checked dynamically at BackPropagate time (an actor may carry contact
+ * components without ever touching anything).
+ */
+void ValidateDifferentiabilitySupport(entt::registry const& reg, entt::entity e, Error& error);
+
+/*
+ * Emplace the differentiability components of a standalone soft actor.
+ */
+void InitDifferentiableSoftActor(entt::registry& reg, entt::entity e);
+
+/*
+ * [Differentiability] System to project a derived state gradient to a state gradient.
+ * It computes dg/dq = dg/dx * dx/dq. A soft actor's derived state (the nodal displacement
+ * step) lives in the same coordinates as its state, so the projection is the identity.
+ */
+MOCHI_FORCE_INLINE void ProjectDerivedStateGradient(
+    ecs::Included<TagSoftActor>,
+    ecs::Excluded<TagNestedSoftActor>,
+    CDiffContainerDerivedState const& derivedStateGrad,
+    CDiffContainerState& outStateGrad) {
+  AsView(outStateGrad) = derivedStateGrad;
+}
+
+/*
+ * [Differentiability] System to shift a derived state gradient.
+ * It computes dg/duold = dg/dDeltau * dDeltau/duold. With Deltau = u - uold the Jacobian
+ * dDeltau/duold is minus the identity.
+ */
+MOCHI_FORCE_INLINE void ShiftDerivedStateGradient(
+    ecs::Included<TagSoftActor>,
+    ecs::Excluded<TagNestedSoftActor>,
+    CDiffContainerDerivedState& outDerivedStateGrad) {
+  AsView(outDerivedStateGrad) *= -1_r;
+}
 
 } // namespace soft
 } // namespace mochi

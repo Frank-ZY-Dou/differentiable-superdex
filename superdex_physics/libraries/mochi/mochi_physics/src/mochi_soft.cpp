@@ -317,6 +317,105 @@ void mochi::soft::AssembleBodyImpl(
       });
 }
 
+// [Differentiability] Assemble the derivative of the step objective with respect to a
+// previous-step quantity (the "residual" output for non-Current gradient targets):
+//   GradTarget::Previous       -> d f / d u_prev (previous displacements, fixed step delta)
+//   GradTarget::PreviousDelta  -> d f / d Delta_u_prev (previous displacement step = dt * v_prev)
+//   GradTarget::*Input         -> nothing; soft actors have no differentiable inputs.
+// Only the inertia and mass-damping terms depend on the previous state:
+//   f_inertia = rho/(2 dt^2) |u - (u_prev + dt v_prev)|^2_M
+//       -> d/d u_prev = d/d Delta_u_prev = -R_inertia
+//   f_massdamping = rho alpha/(2 dt) |u - u_prev|^2_M
+//       -> d/d u_prev = -R_massdamping, d/d Delta_u_prev = 0
+// Elastic stress and gravity depend only on the current state. Stiffness damping does depend
+// on u_prev, but is rejected by ValidateDifferentiabilitySupport (its viscous-stress
+// previous-state derivative is not implemented).
+static void AssembleBodyGradTarget(
+    AssemblyParams const& params,
+    bool hasInertia,
+    CLocal2GlobalMap const& l2g,
+    CNodalBasedStructure const& nbs,
+    CFemVolumeDiscretizationP1Q1 const& femLowVolDisc,
+    CFemVolumeDiscretizationP1Q4 const& femHighVolDisc,
+    CSoftMaterialParams const& materialParams,
+    CTimeIntegratorState const& intState,
+    ColumnVectorView<real const> currDispl,
+    ColumnVectorView<real const> stageStartDispl,
+    ColumnVectorView<real const> stageStartVel,
+    ActorSnle& outSnle,
+    CActiveVolumeElements const* activeVolElems) {
+  MOCHI_PROFILE_SCOPE();
+  MOCHI_ASSERT_VERBOSE(
+      !params.assemObj && params.assemRes && !params.assemDRes, "Invalid request");
+
+  auto const gradTarget = params.gradTarget;
+  if (gradTarget == GradTarget::CurrentInput || gradTarget == GradTarget::PreviousInput) {
+    // Soft actors have no differentiable inputs: contribute no input rows.
+    outSnle.fullResidual.Resize(0);
+    return;
+  }
+  MOCHI_ASSERT_VERBOSE(
+      gradTarget == GradTarget::Previous || gradTarget == GradTarget::PreviousDelta,
+      "Unexpected gradient target");
+
+  outSnle.fullResidual.Resize(currDispl.Rows());
+  outSnle.fullResidual.SetZero();
+  if (!hasInertia) {
+    // Without inertia there is no previous-state dependence (differentiable soft actors
+    // require inertia; this keeps the assembly well-defined for any caller).
+    return;
+  }
+
+  // Mass damping depends on the previous displacements but not on the previous step delta,
+  // so it contributes to GradTarget::Previous only.
+  auto const dampingScales = soft::ComputeSoftDampingScales(
+      materialParams, intState.dtStage, /*hasInertia*/ true, /*hasStress*/ false);
+  real const massDampingScale =
+      gradTarget == GradTarget::Previous ? dampingScales.massDampingScale : 0_r;
+
+  AssemblyActiveSubset activeSubset = activeVolElems
+      ? AssemblyActiveSubset{activeVolElems->ViewIndices(), activeVolElems->ViewIsActive()}
+      : AssemblyActiveSubset{};
+  Span<real const> activeVolWeights =
+      activeVolElems ? activeVolElems->ViewWeights() : Span<real const>{};
+
+  soft::details::VisitPerElementMaterialParams(
+      materialParams, [&]<typename ParamsT>(auto const& perElem) {
+        auto batchedConstitutive = materials::MakeBatchedConstitutiveResponse<ParamsT>(perElem);
+        auto bodyOp = soft::MakeBatchedBodyOp(
+            MakeConstSpan(femLowVolDisc.femElements),
+            MakeConstSpan(femHighVolDisc.femElements),
+            batchedConstitutive,
+            materialParams.referenceMaterialStiffness,
+            /*hasStress*/ false,
+            /*hasGravity*/ false,
+            /*hasInertia*/ true,
+            Real3{},
+            materialParams.density,
+            stageStartDispl.GetConstSpan(),
+            stageStartVel.GetConstSpan(),
+            intState.dtStage,
+            massDampingScale,
+            /*stiffnessDampingFactor*/ 0_r,
+            /*includeStiffnessDampingGeometricTerm*/ false,
+            activeVolWeights);
+        AssembleObjResDRes<soft::SoftStencilElement>(
+            l2g,
+            nbs,
+            bodyOp,
+            currDispl,
+            AssemblyResults<real>{
+                .outObj = &outSnle.objective,
+                .outRes = AsView(outSnle.fullResidual),
+                .outDRes = AsView(outSnle.fullDResidual),
+                .params = params},
+            activeSubset);
+      });
+
+  // d f / d(previous quantity) = -(assembled inertia [+ mass damping] residual).
+  AsView(outSnle.fullResidual) *= -1_r;
+}
+
 void mochi::soft::AssembleBody(
     AssemblyParams const& params, // external parameter
     ecs::Included<TagSoftActor>,
@@ -348,6 +447,30 @@ void mochi::soft::AssembleBody(
   static_assert(
       static_cast<int>(experimental::RomProjectionStrategy::Count) == 2,
       "Please update logic below if RomProjectionStrategy enum changes");
+
+  // [Differentiability] Non-Current gradient targets ask for the derivative of the step
+  // objective with respect to a previous-step quantity instead of the standard residual.
+  if (params.gradTarget != GradTarget::Current) {
+    MOCHI_ASSERT_VERBOSE(
+        !isRom && !isNestedSoft.hasTag,
+        "Non-Current gradient targets are only reachable in validated differentiable scenes, "
+        "which reject ROM and nested soft actors.");
+    AssembleBodyGradTarget(
+        params,
+        hasInertia,
+        l2g,
+        nbs,
+        femLowVolDisc,
+        femHighVolDisc,
+        materialParams,
+        intState,
+        currDispl.value,
+        stageStartDispl.value,
+        stageStartVel.value,
+        outActorSnle,
+        activeVolElems);
+    return;
+  }
 
   if (!hasGravity && !hasInertia && !hasStress) {
     // Only nested soft actors may reach here. Note their Dresidual in this case must NOT be
@@ -383,6 +506,67 @@ void mochi::soft::AssembleBody(
       activeVolElems);
 }
 
+void mochi::soft::ValidateDifferentiabilitySupport(
+    entt::registry const& reg,
+    entt::entity e,
+    Error& error) {
+  MOCHI_ERROR_RETURN(error);
+  MOCHI_ASSERT_VERBOSE(reg.all_of<TagSoftActor>(e), "Expected a soft actor.");
+  MOCHI_ERROR_IF(
+      reg.any_of<TagNestedSoftActor>(e),
+      error,
+      "Differentiable scenes do not support nested (skinned) soft actors.");
+  MOCHI_ERROR_IF(
+      reg.any_of<TagRomActor>(e),
+      error,
+      "Differentiable scenes do not support reduced-order soft actors.");
+  MOCHI_ERROR_IF_NOT(
+      reg.all_of<TagUseInertia>(e),
+      error,
+      "Differentiable soft actors require inertia (create the actor with hasInertia): the "
+      "adjoint propagates between steps through the inertial terms.");
+  MOCHI_ERROR_RETURN(error);
+  auto const& material = reg.get<CSoftMaterialParams const>(e);
+  MOCHI_ERROR_IF(
+      material.stiffnessDampingCoefficient > 0_r,
+      error,
+      "Differentiable soft actors do not support stiffness damping: the previous-state "
+      "derivative of the viscous stress is not implemented. Set stiffnessDampingCoefficient "
+      "to zero.");
+  auto const* bc = reg.try_get<CDofPositionsBC const>(e);
+  MOCHI_ERROR_IF(
+      bc && !bc->dofIndices.empty(),
+      error,
+      "Differentiable soft actors do not support Dirichlet boundary conditions yet.");
+}
+
+void mochi::soft::InitDifferentiableSoftActor(entt::registry& reg, entt::entity e) {
+  MOCHI_ASSERT_VERBOSE(!reg.any_of<TagStaticActor>(e), "Do not call on static actors");
+
+  // Recentering rebases the nodal state into a moving root frame after every step, which
+  // is outside the state mapping the adjoint differentiates (the displacement vector
+  // would no longer be the state carried between steps). Force it off, matching how
+  // MakeSceneDifferentiable already forces other solver behaviors; the root transform
+  // then stays fixed and the displacements carry the full motion.
+  if (auto* recentering = reg.try_get<CRecenteringParams>(e)) {
+    if (recentering->useRecentering) {
+      MOCHI_LOG_WARNING(
+          "Differentiable soft actors do not support recentering; disabling it for this "
+          "actor (the root transform stays fixed and displacements carry the motion).");
+      recentering->useRecentering = false;
+    }
+  }
+
+  // The derived state of a soft actor is its nodal displacement step, one value per DoF.
+  int const numDofs = reg.get<CActorDofInfo const>(e).dofsSize;
+  ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
+      &EmplaceDifferentiabilityComponents, reg, e, numDofs);
+  // Contact-force adjoint containers: the generic backward accumulation reads them for every
+  // dynamic actor (they stay zero until soft contact adjoints are implemented).
+  ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
+      &EmplaceDifferentiableContactComponents, reg, e);
+}
+
 void mochi::soft::AssembleAsyncContact(
     AssemblyParams const& params,
     entt::entity e,
@@ -407,6 +591,13 @@ void mochi::soft::AssembleAsyncContact(
   MOCHI_PROFILE_SCOPE();
   MOCHI_ASSERT(params.assemObj || params.assemRes || params.assemDRes, "Must assemble something");
   MOCHI_ASSERT_VERBOSE(!isRom || romProjectionStrategy, "Missing ROM projection strategy.");
+
+  // [Differentiability] Contact previous-state/input derivatives are not implemented for
+  // soft actors; SceneImpl::BackPropagate rejects differentiable soft actors with active
+  // contacts, so for non-Current gradient targets there is nothing to assemble here.
+  if (params.gradTarget != GradTarget::Current) {
+    return;
+  }
 
   static_assert(
       static_cast<int>(experimental::RomProjectionStrategy::Count) == 2,

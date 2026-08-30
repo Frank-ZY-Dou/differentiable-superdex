@@ -204,6 +204,42 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
       , "Backward pass for :meth:`~superdex.physics.Actor.set_density`.\n\nReads the gradient of the loss with respect to this actor's density,\naccumulated by the engine over every\n:func:`~superdex.physics.diffsim.back_propagate` call since\n:func:`~superdex.physics.diffsim.reset_back_propagation`. Density rescales\nmass and moment of inertia proportionally about the inertia reference with\nthe center of mass unchanged, exactly matching the forward\n:meth:`~superdex.physics.Actor.set_density`. Covers rigid-body-inertia\nowners: standalone rigid actors and articulated link actors (soft actors\nare outside diffsim's scope). Each step contributes -lambda^T dR/drho by\ncentral finite differences of the assembled residual with a relative step\nscaled by\n:attr:`~superdex.physics.diffsim.BackPropagationSolverParams.eps_finite_diff`.\n\nArgs:\n    actor (Actor): The rigid actor or articulated link actor.\n    out_grad_density (ArrayLikeReal): Gradient wrt density. Must be of size\n        1. Overwritten, not accumulated into.\n\nRaises:\n    :class:`~superdex.physics.Error`: If the actor has no rigid-body\n        inertia, or was not part of any back-propagated island since the\n        last reset."
     );
 
+    m_diffsim.def("get_displacements_backward", [](mochi::Actor* actor, mochi::Span<mochi::real const> grad_output) {
+      mochi::Error error;
+      mochi::diffsim::GetDisplacementsBackward(actor, grad_output, error);
+      if (!error.IsOK()) {
+        throw MochiErrorException(error);
+      }
+    }
+      , py::arg("actor")
+      , py::arg("grad_output")
+      , "Backward pass for :meth:`~superdex.physics.Actor.get_displacements`\n(standalone soft actors).\n\nAccumulates the gradient of the loss with respect to this soft actor's\ncurrent nodal displacements into the engine's state adjoint. A soft\nactor's solver state is its nodal displacement vector, so the chain from\nthe displacement output to the state is the identity. Call between\n:func:`~superdex.physics.diffsim.prepare_back_propagate` and\n:func:`~superdex.physics.diffsim.back_propagate`, exactly like the\nrigid-body output-gradient functions.\n\nArgs:\n    actor (Actor): The standalone soft actor.\n    grad_output (ArrayLikeReal): Gradient of the loss wrt the current\n        displacements. Must be of size 3 x number of nodes. Accumulated\n        into the state adjoint.\n\nRaises:\n    :class:`~superdex.physics.Error`: If an error occurs."
+    );
+
+    m_diffsim.def("set_displacements_backward", [](mochi::Actor const* actor, mochi::Span<mochi::real> out_grad_displacements) {
+      mochi::Error error;
+      mochi::diffsim::SetDisplacementsBackward(actor, out_grad_displacements, error);
+      if (!error.IsOK()) {
+        throw MochiErrorException(error);
+      }
+    }
+      , py::arg("actor")
+      , py::arg("out_grad_displacements")
+      , "Backward pass for :meth:`~superdex.physics.Actor.set_displacements`\n(standalone soft actors).\n\nReads the gradient of the loss with respect to the nodal displacements\nthis soft actor started the back-propagated window with (the\ndisplacements that :meth:`~superdex.physics.Actor.set_displacements`\nwould have written before the first step). Valid after the reverse sweep\nhas reached the first step.\n\nArgs:\n    actor (Actor): The standalone soft actor.\n    out_grad_displacements (ArrayLikeReal): Gradient wrt the initial\n        displacements. Must be of size 3 x number of nodes. Overwritten,\n        not accumulated into.\n\nRaises:\n    :class:`~superdex.physics.Error`: If an error occurs."
+    );
+
+    m_diffsim.def("set_node_velocities_local_backward", [](mochi::Actor const* actor, mochi::Span<mochi::real> out_grad_velocities) {
+      mochi::Error error;
+      mochi::diffsim::SetNodeVelocitiesLocalBackward(actor, out_grad_velocities, error);
+      if (!error.IsOK()) {
+        throw MochiErrorException(error);
+      }
+    }
+      , py::arg("actor")
+      , py::arg("out_grad_velocities")
+      , "Backward pass for :meth:`~superdex.physics.Actor.set_node_velocities_local`\n(standalone soft actors).\n\nReads the gradient of the loss with respect to the nodal velocities this\nsoft actor started the back-propagated window with. The velocities\ndetermine the derived displacement step ``Delta_u = v * dt``, so\n``dL/dv = dt * dL/dDelta_u``. Valid after the reverse sweep has reached\nthe first step.\n\nArgs:\n    actor (Actor): The standalone soft actor.\n    out_grad_velocities (ArrayLikeReal): Gradient wrt the initial nodal\n        velocities. Must be of size 3 x number of nodes. Overwritten, not\n        accumulated into.\n\nRaises:\n    :class:`~superdex.physics.Error`: If an error occurs."
+    );
+
     m_diffsim.def("prepare_back_propagate", [](mochi::Scene* scene, mochi::StateHandle state_new, mochi::StateHandle state_old) {
       mochi::Error error;
       mochi::diffsim::PrepareBackPropagate(scene, state_new, state_old, error);

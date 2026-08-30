@@ -89,6 +89,12 @@ def _collect_actors(scene) -> list[_ActorEntry]:
     for actor in actors:
         if actor.is_static() or actor.is_nested_link_actor():
             continue
+        if actor.get_type() == physics.ActorType.SOFT:
+            raise NotImplementedError(
+                "DifferentiableRollout does not drive soft actors yet; use the "
+                "per-step diffsim API (prepare_back_propagate/back_propagate with "
+                "get_displacements_backward etc.) directly"
+            )
         articulated = actor.get_type() == physics.ActorType.ARTICULATED
         dofs = actor.get_num_dofs()
         has_controller = articulated and actor.has_articulated_pose_controller()

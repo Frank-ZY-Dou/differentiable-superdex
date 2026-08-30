@@ -3081,6 +3081,70 @@ void diffsim::SetVelocityBackward(
   }
 }
 
+void diffsim::GetDisplacementsBackward(Actor* actor, Span<real const> gradOutput, Error& error) {
+  MOCHI_ERROR_RETURN_IF_BACKWARD_NOT_SUPPORTED();
+  MOCHI_ERROR_IF_NOT(
+      actor->GetType() == ActorType::Soft && !reg.any_of<TagNestedSoftActor>(e),
+      error,
+      "Only standalone soft actors are supported.");
+  MOCHI_ERROR_RETURN(error);
+  int const numDofs = reg.get<CActorDofInfo const>(e).dofsSize;
+  MOCHI_ERROR_IF_NOT(
+      isize(gradOutput) == numDofs, error, "gradOutput size must be 3 x number of nodes.");
+  MOCHI_ERROR_IF_NOT(IsFinite(gradOutput), error, "gradOutput must be finite.");
+  MOCHI_ERROR_RETURN(error);
+
+  // A soft actor's solver state is its nodal displacement vector, so the chain from the
+  // displacement output to the state is the identity.
+  AsView(reg.get<CDiffStateGrad>(e).value) += AsConstView(gradOutput);
+}
+
+void diffsim::SetDisplacementsBackward(
+    Actor const* actor,
+    Span<real> outGradDisplacements,
+    Error& error) {
+  MOCHI_ERROR_RETURN_IF_BACKWARD_NOT_SUPPORTED(const);
+  MOCHI_ERROR_IF_NOT(
+      actor->GetType() == ActorType::Soft && !reg.any_of<TagNestedSoftActor>(e),
+      error,
+      "Only standalone soft actors are supported.");
+  MOCHI_ERROR_RETURN(error);
+  int const numDofs = reg.get<CActorDofInfo const>(e).dofsSize;
+  MOCHI_ERROR_IF_NOT(
+      isize(outGradDisplacements) == numDofs,
+      error,
+      "outGradDisplacements size must be 3 x number of nodes.");
+  MOCHI_ERROR_RETURN(error);
+
+  // SetDisplacements writes the nodal displacement vector, which is the solver state, so
+  // the gradient is the accumulated state adjoint itself.
+  AsView(outGradDisplacements) = AsConstView(reg.get<CDiffStateGrad const>(e).value);
+}
+
+void diffsim::SetNodeVelocitiesLocalBackward(
+    Actor const* actor,
+    Span<real> outGradVelocities,
+    Error& error) {
+  MOCHI_ERROR_RETURN_IF_BACKWARD_NOT_SUPPORTED(const);
+  MOCHI_ERROR_IF_NOT(
+      actor->GetType() == ActorType::Soft && !reg.any_of<TagNestedSoftActor>(e),
+      error,
+      "Only standalone soft actors are supported.");
+  MOCHI_ERROR_RETURN(error);
+  int const numDofs = reg.get<CActorDofInfo const>(e).dofsSize;
+  MOCHI_ERROR_IF_NOT(
+      isize(outGradVelocities) == numDofs,
+      error,
+      "outGradVelocities size must be 3 x number of nodes.");
+  MOCHI_ERROR_RETURN(error);
+
+  // SetNodeVelocitiesLocal sets the nodal velocities v, which determine the derived
+  // displacement step Delta_u = v * dt. Therefore dL/dv = dt * dL/dDelta_u.
+  auto const dt = static_cast<real>(reg.ctx<CSceneTime const>().DeltaTime());
+  AsView(outGradVelocities) = AsConstView(reg.get<CDiffDerivedStepGrad const>(e).value);
+  AsView(outGradVelocities) *= dt;
+}
+
 void diffsim::SetCenterOfMassTransformBackward(
     Actor const* actor,
     Span<real> outGradTransform,

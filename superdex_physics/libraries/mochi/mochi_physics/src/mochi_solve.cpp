@@ -613,13 +613,20 @@ void mochi::solver::AssembleIslandPipeline(
   TaskSemaphore startOtherAssemblySemaphore;
   bool hasSolutionChanged = problem.HasSolutionChangedSinceLastAssembly();
   if (hasSolutionChanged) {
-    for (auto e : descendants.actors) {
-      if (reg.all_of<TagUseContact>(e)) {
-        if (auto* comp = reg.try_get<CActorAsyncContactSemaphore>(e)) {
-          MOCHI_ASSERT(
-              comp->asyncContactUpToDate->IsDone(),
-              "Should be incremented and decremented exactly once per assembly");
-          comp->asyncContactUpToDate->Add(1);
+    // The async-contact semaphore is only released by the collision-detection pipeline,
+    // which UpdateDerivedStateBeforeAssembly runs under exactly this condition. Gradient
+    // targets that skip collision detection (e.g. GradTarget::PreviousDelta, whose terms
+    // are second-order) must not arm the semaphore, or the next actor-assembly task that
+    // waits on it deadlocks.
+    if (IsAssemblyNeeded(StateDependency::FirstOrder, false /*inputDependency*/, params.gradTarget)) {
+      for (auto e : descendants.actors) {
+        if (reg.all_of<TagUseContact>(e)) {
+          if (auto* comp = reg.try_get<CActorAsyncContactSemaphore>(e)) {
+            MOCHI_ASSERT(
+                comp->asyncContactUpToDate->IsDone(),
+                "Should be incremented and decremented exactly once per assembly");
+            comp->asyncContactUpToDate->Add(1);
+          }
         }
       }
     }

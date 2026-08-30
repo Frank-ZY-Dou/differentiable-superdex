@@ -1236,14 +1236,15 @@ void SceneImpl::BackPropagate(Error& error) {
   FindState(stateOld, error);
   MOCHI_ERROR_RETURN(error);
 
-  // Differentiable actors. Currently only rigid and articulated actors are supported.
+  // Differentiable actors: rigid, articulated, and standalone soft actors.
   MOCHI_FILO_STACK_ALLOCATOR(allocator, 100 * sizeof(entt::entity)); // Stack mem for 100 actors
   DynamicArray<entt::entity> actors(&allocator);
   actors.reserve(GetNumActors()); // Conservative
   bool allActorsValid = true;
   ForEachActor([&](Actor* actor) {
     allActorsValid &=
-        (actor->GetType() == ActorType::Rigid || actor->GetType() == ActorType::Articulated);
+        (actor->GetType() == ActorType::Rigid || actor->GetType() == ActorType::Articulated ||
+         actor->GetType() == ActorType::Soft);
     if (!allActorsValid) {
       return;
     }
@@ -1251,8 +1252,25 @@ void SceneImpl::BackPropagate(Error& error) {
       actors.push_back(GetEntity(_registry, actor->GetHandle(), ErrorAssert{}));
     }
   });
-  MOCHI_ERROR_IF(!allActorsValid, error, "All actors must be rigid or articulated");
+  MOCHI_ERROR_IF(!allActorsValid, error, "All actors must be rigid, articulated or soft");
   MOCHI_ERROR_RETURN(error);
+
+  // Soft-body contact adjoints are not implemented. The previous-state derivative of the
+  // contact terms would be silently missing from the backward sweep, so an active contact
+  // on a differentiable soft actor is a loud error instead of a wrong gradient.
+  for (auto const e : actors) {
+    if (!_registry.all_of<TagSoftActor>(e)) {
+      continue;
+    }
+    auto const* collisions =
+        _registry.try_get<CActiveCollisions<ContactType::Async, TimeStep::Current> const>(e);
+    MOCHI_ERROR_IF(
+        collisions && !collisions->empty(),
+        error,
+        "Soft-body contact adjoints are not implemented: a differentiable soft actor has "
+        "active contacts in the prepared step.");
+    MOCHI_ERROR_RETURN(error);
+  }
 
   // Enforce scheduler binding to this thread, for parallel work.
   ScopedSchedulerBinding schedulerBinding(*_context);
@@ -1271,6 +1289,7 @@ void SceneImpl::BackPropagate(Error& error) {
         _registry.get<CDiffDerivedStepGrad const>(e).value;
 
     ecs::TryInvokeOnEntity(rigid::ProjectDerivedStateGradient, _registry, e);
+    ecs::TryInvokeOnEntity(soft::ProjectDerivedStateGradient, _registry, e);
     ecs::TryInvokeOnEntity(articulated::compound::ProjectDerivedStateGradient, _registry, e);
     ecs::TryInvokeOnEntity<ecs::policy::AllowReadWriteSameComponent>(
         articulated::compound::ProjectContactForceAdjoints<GradTarget::Current>, _registry, e);
@@ -1315,6 +1334,7 @@ void SceneImpl::BackPropagate(Error& error) {
     gradDerivedStep = temp;
 
     ecs::TryInvokeOnEntity(rigid::ShiftDerivedStateGradient, _registry, e);
+    ecs::TryInvokeOnEntity(soft::ShiftDerivedStateGradient, _registry, e);
     ecs::TryInvokeOnEntity(articulated::compound::ShiftDerivedStateGradient, _registry, e);
 
     _registry.get<CDiffStateGrad>(e).value = _registry.get<CDiffContainerState const>(e);
@@ -1329,6 +1349,7 @@ void SceneImpl::BackPropagate(Error& error) {
   // Also add the contact-force adjoints wrt the previous state.
   ParallelForEach("UpdateAdjointsStep3", actors, 1, [&](entt::entity e) {
     ecs::TryInvokeOnEntity(rigid::ProjectDerivedStateGradient, _registry, e);
+    ecs::TryInvokeOnEntity(soft::ProjectDerivedStateGradient, _registry, e);
     ecs::TryInvokeOnEntity(articulated::compound::ProjectDerivedStateGradient, _registry, e);
     ecs::TryInvokeOnEntity<ecs::policy::AllowReadWriteSameComponent>(
         articulated::compound::ProjectContactForceAdjoints<GradTarget::Previous>, _registry, e);
@@ -3154,6 +3175,8 @@ void MakeSceneDifferentiableInternal(Scene* scene, Error& error) {
       return;
     } else if (actor->GetType() == ActorType::Articulated) {
       articulated::compound::ValidateDifferentiabilitySupport(reg, e, error);
+    } else if (actor->GetType() == ActorType::Soft) {
+      soft::ValidateDifferentiabilitySupport(reg, e, error);
     } else {
       MOCHI_ERROR_SET(error, "Actor type is not differentiable.");
     }
@@ -3172,6 +3195,9 @@ void MakeSceneDifferentiableInternal(Scene* scene, Error& error) {
     } else if (actor->GetType() == ActorType::Rigid) {
       // Handle rigid actor
       InitDifferentiableRigidActor(reg, e, reg.all_of<TagArticulatedLinkActor>(e));
+    } else if (actor->GetType() == ActorType::Soft) {
+      // Handle standalone soft actor
+      soft::InitDifferentiableSoftActor(reg, e);
     } else {
       // Handle articulated actor
       MOCHI_ASSERT(actor->GetType() == ActorType::Articulated);
