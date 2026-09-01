@@ -319,3 +319,62 @@ def soft_cube_on_plane(
     velocities = np.tile(np.asarray(initial_velocity, dtype=np.float64), num_nodes)
     cube.set_node_velocities_local(velocities)
     return scene, cube
+
+
+def chain_pushing_cube(friction: str = "rich"):
+    """A fixed-base two-link chain whose lower link rests on the ground beside a
+    dynamic cube and, driven by its pose controller, pushes the cube along the
+    plane: articulated-vs-dynamic-rigid *sync* contact (same island), the one
+    contact combination the other scenes do not exercise. Returns (scene, chain,
+    cube); the loss target is the cube."""
+    scene = physics.create_scene(f"diffsim_chain_pushing_cube_{friction}")
+    scene.set_gravity(GRAVITY)
+    cp = contact_params(friction)
+    scene.create_rigid_actor(
+        name="ground",
+        shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+        is_static=True,
+        contact=cp,
+    )
+    cube = scene.create_rigid_actor(
+        name="cube",
+        shape=cube_shape(),
+        density=500.0,
+        contact=cp,
+        world_from_local=physics.TransformRT([0.25, 0.0, 0.099]),
+    )
+    joints = [
+        physics.ArticulatedJointParams(
+            name="j0", type=physics.ArticulatedJointType.REVOLUTE, axis=[0, 1, 0]
+        ),
+        physics.ArticulatedJointParams(
+            name="j1",
+            type=physics.ArticulatedJointType.REVOLUTE,
+            axis=[0, 1, 0],
+            parent_link_from_joint=physics.TransformRT([0.0, 0.0, -0.25]),
+        ),
+    ]
+    links = [
+        physics.ArticulatedLinkParams(
+            name="l0", parent_link=-1, shape=cube_shape(), density=1000.0, contact=cp
+        ),
+        physics.ArticulatedLinkParams(
+            name="l1", parent_link=0, shape=cube_shape(), density=1000.0, contact=cp
+        ),
+    ]
+    chain = scene.create_articulated_actor(
+        physics.ArticulatedActorParams(
+            name="chain",
+            joints=joints,
+            links=links,
+            world_from_root=physics.TransformRT([0.0, 0.0, 0.352]),
+        )
+    )
+    chain.add_articulated_pose_controller(
+        physics.PoseControllerParams(
+            joint_tracking=[
+                physics.PoseTrackingParams(stiffness=80.0, damping=8.0, saturation=-1.0)
+            ]
+        )
+    )
+    return scene, chain, cube

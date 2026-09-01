@@ -93,6 +93,7 @@ class DiffsimGradientTest(unittest.TestCase):
             "gradient blocks above tolerance "
             f"{tol}:\n" + "\n".join(failures),
         )
+        return reports
 
     # -- rigid ---------------------------------------------------------------
 
@@ -119,6 +120,32 @@ class DiffsimGradientTest(unittest.TestCase):
     def test_two_cubes_on_plane_coulomb(self) -> None:
         scene, bottom = scenes.two_cubes_on_plane("coulomb")
         self._check(scene, [TranslationErrorLoss(bottom)], TOL_CONTACT)
+
+    def test_chain_pushing_cube_sync_contact(self) -> None:
+        """Articulated link vs dynamic rigid cube in one island (sync contact),
+        with the loss on the pushed cube: gradients w.r.t. the chain's initial
+        state and per-step controller targets. Measured 2026-09-01 on the
+        torch-bridge probe: 1.4e-5..2.6e-3 relative against central FD that was
+        self-consistent to 2e-6 - the same class as the other contact scenes."""
+        scene, chain, cube = scenes.chain_pushing_cube("rich")
+        reports = self._check(
+            scene,
+            [TranslationErrorLoss(cube, ref=np.array([0.5, 0.0, 0.1]))],
+            TOL_CONTACT,
+            num_steps=30,
+            dt=0.01,
+            control_speed=np.array([-1.5, 0.0]),  # swing the root joint only
+            force_speed=0.0,
+        )
+        # Vacuousness guard: the loss lives on the cube, so a nonzero control
+        # gradient proves the chain actually pushed it during the rollout.
+        control_reports = [r for r in reports if r.name.startswith("control")]
+        self.assertTrue(control_reports)
+        self.assertGreater(
+            max(float(np.abs(r.finite_diff).max()) for r in control_reports),
+            1e-6,
+            "test is vacuous: the chain never moved the cube",
+        )
 
     # -- articulated ---------------------------------------------------------
 

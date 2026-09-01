@@ -387,8 +387,12 @@ class GradientCheckCase:
                 self.control[
                     entry.input_offset : entry.input_offset + entry.input_size, 0
                 ] = pose
+        # control_speed may be a scalar or one value per controlled DoF.
+        speed = np.broadcast_to(
+            np.asarray(control_speed, dtype=np.float64), (self.total_input,)
+        )
         for j in range(num_steps):
-            self.control[:, j] = self.control[:, 0] + control_speed * dt * j
+            self.control[:, j] = self.control[:, 0] + speed * dt * j
 
         # External-force trajectory: a ramp on the valid force DoFs.
         self.forces = np.zeros((self.total_dofs, num_steps))
