@@ -562,7 +562,9 @@ void mochi::soft::InitDifferentiableSoftActor(entt::registry& reg, entt::entity 
   ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
       &EmplaceDifferentiabilityComponents, reg, e, numDofs);
   // Contact-force adjoint containers: the generic backward accumulation reads them for every
-  // dynamic actor (they stay zero until soft contact adjoints are implemented).
+  // dynamic actor. They stay zero for soft actors: they carry the adjoints of contact-force
+  // *queries* (GetContactForceWorldBackward), which are rigid-only; the contact terms of the
+  // step residual are differentiated through the assembly (AssembleAsyncContact) instead.
   ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
       &EmplaceDifferentiableContactComponents, reg, e);
 }
@@ -592,11 +594,22 @@ void mochi::soft::AssembleAsyncContact(
   MOCHI_ASSERT(params.assemObj || params.assemRes || params.assemDRes, "Must assemble something");
   MOCHI_ASSERT_VERBOSE(!isRom || romProjectionStrategy, "Missing ROM projection strategy.");
 
-  // [Differentiability] Contact previous-state/input derivatives are not implemented for
-  // soft actors; SceneImpl::BackPropagate rejects differentiable soft actors with active
-  // contacts, so for non-Current gradient targets there is nothing to assemble here.
-  if (params.gradTarget != GradTarget::Current) {
+  // [Differentiability] Contact is first-order: the merit depends on the current and on the
+  // stage-start (previous) sample positions, but not on the previous step delta, and soft actors
+  // have no differentiable inputs. GradTarget::Current assembles the usual contact terms;
+  // GradTarget::Previous assembles d(contact merit)/d(u_prev) into the residual through the same
+  // sample-to-node map (see deformable::ComputeAsyncContactResponse); the remaining targets have
+  // no contact contribution. Sync (dynamic-dynamic) soft contact is not assembled here; its
+  // previous-state derivative is not implemented and SceneImpl::BackPropagate rejects it.
+  if (!IsAssemblyNeeded(StateDependency::FirstOrder, false /*inputDependency*/, params.gradTarget)) {
     return;
+  }
+  if (params.gradTarget == GradTarget::Previous) {
+    MOCHI_ASSERT_VERBOSE(
+        !params.assemObj && params.assemRes && !params.assemDRes,
+        "GradTarget::Previous async contact assembly supports the residual only.");
+    MOCHI_ASSERT_VERBOSE(
+        !isRom, "Non-Current gradient targets are only reachable for validated (non-ROM) actors.");
   }
 
   static_assert(

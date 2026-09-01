@@ -1255,22 +1255,23 @@ void SceneImpl::BackPropagate(Error& error) {
   MOCHI_ERROR_IF(!allActorsValid, error, "All actors must be rigid, articulated or soft");
   MOCHI_ERROR_RETURN(error);
 
-  // Soft-body contact adjoints are not implemented. The previous-state derivative of the
-  // contact terms would be silently missing from the backward sweep, so an active contact
-  // on a differentiable soft actor is a loud error instead of a wrong gradient.
-  for (auto const e : actors) {
-    if (!_registry.all_of<TagSoftActor>(e)) {
-      continue;
-    }
-    auto const* collisions =
-        _registry.try_get<CActiveCollisions<ContactType::Async, TimeStep::Current> const>(e);
-    MOCHI_ERROR_IF(
-        collisions && !collisions->empty(),
-        error,
-        "Soft-body contact adjoints are not implemented: a differentiable soft actor has "
-        "active contacts in the prepared step.");
+  // Soft-body contact adjoints cover async contact (against static colliders) only. Sync
+  // contact - a soft actor and a dynamic actor of the same island, in either role - has no
+  // previous-state derivative on the soft side yet, so it must fail loudly instead of
+  // silently dropping a term. Islands are formed from overlapping conservative step bounds,
+  // i.e. from potential sync contact, and island membership is part of the restored state,
+  // so "a soft actor shares its island with another actor" is the exact, state-consistent
+  // criterion (the active-collision lists are not captured with the state).
+  _registry.view<CIslandDescendants const>().each([&](CIslandDescendants const& descendants) {
     MOCHI_ERROR_RETURN(error);
-  }
+    MOCHI_ERROR_IF(
+        !descendants.softActors.empty() && descendants.actors.size() > 1,
+        error,
+        "Soft-body sync contact adjoints are not implemented: a differentiable soft actor "
+        "shares an island with another dynamic actor (potential dynamic-dynamic contact) in "
+        "the prepared step. Only contact against static colliders is supported.");
+  });
+  MOCHI_ERROR_RETURN(error);
 
   // Enforce scheduler binding to this thread, for parallel work.
   ScopedSchedulerBinding schedulerBinding(*_context);

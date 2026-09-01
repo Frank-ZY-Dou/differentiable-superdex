@@ -33,9 +33,24 @@ any loss on a free-floating body:
 Scenes intentionally cover: pure free fall (inertia-only previous-state
 coupling), a squashed cube (elastic oscillation, so the previous-state
 transport is exercised with active stress), and mass damping (the
-GradTarget::Previous mass-damping term). Loud-contract tests pin every 5a
-exclusion: soft contact, stiffness damping, missing inertia, Dirichlet BCs,
-the rollout-driver gate, and the forced recentering disable.
+GradTarget::Previous mass-damping term).
+
+Contact (phase 5b): a soft cube sliding on a static plane exercises the
+async-contact adjoint - the GradTarget::Previous contact assembly on the soft
+side (d merit / d u_prev through the friction/damping terms) plus collision
+detection inside the finite-difference Hessian-vector products. Every
+friction regime, the sticking regime, a long rollout and a cube that lands
+mid-rollout are checked against rollout finite differences; so are the
+contact-parameter and gravity gradients on the contact scene. One test pins
+the approximation the adjoint shares with the rigid path: the derivative of
+the stage-start colliding normal (explicit normals) with respect to the
+previous state is dropped, which is exact for flat contact and O(sin(tilt) /
+(max_alignment_normals + 1)) otherwise - a probe with amplified alignment
+fading on a tilted cube must show that error (upper AND lower bound).
+
+Loud-contract tests pin the remaining exclusions: sync (dynamic-dynamic)
+contact involving a soft actor, stiffness damping, missing inertia, Dirichlet
+BCs, the rollout-driver gate, and the forced recentering disable.
 
 Requires SUPERDEX_PRECISION=double and a native build with the soft adjoint.
 """
@@ -87,6 +102,7 @@ def _configure(scene) -> None:
 
 
 REF = np.array([0.05, -0.02, 0.11])  # per-axis loss reference offsets
+V0 = (0.3, 0.0, 0.0)  # default initial nodal velocity of the scene factories
 
 
 def _loss_grad(cube, num_nodes: int) -> np.ndarray:
@@ -132,7 +148,9 @@ def _adjoint_sweep(scene, cube, num_steps: int):
     return grad_u0, grad_v0, grad_gravity, grad_out, fd_valid
 
 
-def _fd_initial_grads(scene_factory, num_steps: int, eps: float = 1e-6):
+def _fd_initial_grads(
+    scene_factory, num_steps: int, eps: float = 1e-6, initial_velocity=V0
+):
     """Central FD of the rollout loss wrt every u0 and v0 component."""
 
     def rollout_loss(u0, v0) -> float:
@@ -151,9 +169,9 @@ def _fd_initial_grads(scene_factory, num_steps: int, eps: float = 1e-6):
     u0_base = np.array(cube.get_displacements())
     num_dofs = cube.get_num_dofs()
     physics.destroy_scene(scene)
-    # The scene factory always applies the same initial velocities; recover
-    # them the same way the factory built them (uniform per axis).
-    v0_base = np.tile(np.array([0.3, 0.0, 0.0]), num_dofs // 3)
+    # The scene factories apply uniform per-axis initial velocities; rebuild
+    # the same vector here (the state read-back is not needed for that).
+    v0_base = np.tile(np.asarray(initial_velocity, dtype=np.float64), num_dofs // 3)
 
     fd_u0 = np.zeros(num_dofs)
     fd_v0 = np.zeros(num_dofs)
@@ -169,20 +187,28 @@ def _fd_initial_grads(scene_factory, num_steps: int, eps: float = 1e-6):
     return fd_u0, fd_v0
 
 
-class SoftInitialStateGradientTest(unittest.TestCase):
+class _InitialStateFdMixin:
     """Per-node dL/du0 and dL/dv0 against independent rollout FD."""
 
-    def _run_case(self, scene_factory, tol: float) -> None:
+    def _run_case(
+        self, scene_factory, tol: float, num_steps: int = NUM_STEPS, initial_velocity=V0
+    ) -> None:
         scene, cube = scene_factory()
         self.addCleanup(physics.destroy_scene, scene)
         _configure(scene)
-        grad_u0, grad_v0, _, _, fd_valid = _adjoint_sweep(scene, cube, NUM_STEPS)
+        grad_u0, grad_v0, _, _, fd_valid = _adjoint_sweep(scene, cube, num_steps)
         self.assertTrue(fd_valid)
-        fd_u0, fd_v0 = _fd_initial_grads(scene_factory, NUM_STEPS)
+        fd_u0, fd_v0 = _fd_initial_grads(
+            scene_factory, num_steps, initial_velocity=initial_velocity
+        )
         self.assertGreater(np.abs(fd_u0).max(), 0.0, "test is vacuous")
         self.assertGreater(np.abs(fd_v0).max(), 0.0, "test is vacuous")
         np.testing.assert_allclose(grad_u0, fd_u0, rtol=tol, atol=1e-12)
         np.testing.assert_allclose(grad_v0, fd_v0, rtol=tol, atol=1e-12)
+
+
+class SoftInitialStateGradientTest(_InitialStateFdMixin, unittest.TestCase):
+    """Free-floating cubes: inertia, elastic stress and mass-damping transport."""
 
     def test_free_fall_vs_fd(self) -> None:
         # Measured agreement 6e-11 relative (2026-08-30); 1e-7 keeps large
@@ -332,37 +358,55 @@ class SoftContractTest(unittest.TestCase):
         with self.assertRaisesRegex(physics.Error, "boundary conditions"):
             diffsim.make_scene_differentiable(scene)
 
-    def test_active_soft_contact_rejected_at_back_propagate(self) -> None:
-        scene = physics.create_scene("soft_contact")
-        self.addCleanup(physics.destroy_scene, scene)
-        scene.set_gravity(scenes.GRAVITY)
+    def _soft_on_plane_with_rigid(self, rigid_position):
+        """Soft cube on the plane plus a dynamic rigid cube at `rigid_position`."""
+        scene, cube = scenes.soft_cube_on_plane("rich")
         scene.create_rigid_actor(
-            name="ground",
-            shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
-            is_static=True,
-            contact=scenes.contact_params("rich"),
-        )
-        cube = scene.create_soft_actor(
-            name="jelly",
+            name="rigid",
             shape=scenes.cube_shape(),
-            material=physics.SoftMaterialParams(),
+            density=1000.0,
             contact=scenes.contact_params("rich"),
-            world_from_local=physics.TransformRT([0.0, 0.0, 0.099]),
+            world_from_local=physics.TransformRT(list(rigid_position)),
         )
+        return scene, cube
+
+    def _one_step_backward(self, scene, cube) -> np.ndarray:
         _configure(scene)
         diffsim.reset_back_propagation(scene)
         pre = scene.capture_state()
         scene.step(DT)
         post = scene.capture_state()
-        # The cube rests on the plane: contacts are active, so the backward
-        # must refuse (its previous-state contact derivative is missing).
         diffsim.prepare_back_propagate(scene, post, pre)
         diffsim.get_displacements_backward(
             cube, _loss_grad(cube, cube.get_num_dofs() // 3)
         )
-        with self.assertRaisesRegex(physics.Error, "contact"):
-            diffsim.back_propagate(scene)
+        diffsim.back_propagate(scene)
+        grad_u0 = np.zeros(cube.get_num_dofs())
+        diffsim.set_displacements_backward(cube, grad_u0)
         scene.release_all_states()
+        return grad_u0
+
+    def test_sync_contact_with_dynamic_actor_rejected(self) -> None:
+        # A rigid cube resting on the soft cube: both share an island (sync
+        # contact), whose soft-side previous-state derivative is missing, so
+        # the backward must refuse instead of dropping the term.
+        scene, cube = self._soft_on_plane_with_rigid((0.0, 0.0, 0.298))
+        self.addCleanup(physics.destroy_scene, scene)
+        with self.assertRaisesRegex(physics.Error, "sync contact"):
+            self._one_step_backward(scene, cube)
+
+    def test_dynamic_actor_in_separate_island_is_allowed(self) -> None:
+        # The same rigid cube far away lives in its own island: the soft
+        # cube's contact against the static plane is async contact, which is
+        # supported, and the bystander must not change the soft gradient.
+        scene_alone, cube_alone = scenes.soft_cube_on_plane("rich")
+        self.addCleanup(physics.destroy_scene, scene_alone)
+        grad_alone = self._one_step_backward(scene_alone, cube_alone)
+        scene, cube = self._soft_on_plane_with_rigid((3.0, 0.0, 0.099))
+        self.addCleanup(physics.destroy_scene, scene)
+        grad = self._one_step_backward(scene, cube)
+        self.assertGreater(np.abs(grad_alone).max(), 0.0, "test is vacuous")
+        np.testing.assert_allclose(grad, grad_alone, rtol=1e-12, atol=0.0)
 
     def test_rollout_driver_gates_soft_actors(self) -> None:
         from superdex.physics.diffsim_rollout import DifferentiableRollout
@@ -372,6 +416,245 @@ class SoftContractTest(unittest.TestCase):
         _configure(scene)
         with self.assertRaisesRegex(NotImplementedError, "soft actors"):
             DifferentiableRollout(scene, dt=DT, num_steps=2)
+
+
+def _final_displacements(scene_factory, num_steps: int = NUM_STEPS) -> np.ndarray:
+    scene, cube = scene_factory()
+    try:
+        _configure(scene)
+        for _ in range(num_steps):
+            scene.step(DT)
+        return np.array(cube.get_displacements())
+    finally:
+        physics.destroy_scene(scene)
+
+
+class SoftContactGradientTest(_InitialStateFdMixin, unittest.TestCase):
+    """dL/du0 and dL/dv0 of a soft cube sliding on a static plane, vs rollout FD.
+
+    Static colliders are async contact in the engine: this is the regime the
+    soft contact adjoint implements (GradTarget::Previous contact assembly on
+    the soft side plus collision detection inside the FD Hessian-vector
+    products). Measured agreement on 2026-09-01: 1.3e-6..5.3e-6 relative
+    across the four regimes at 3 steps, 1.2e-5 at 8 steps, 5.8e-7 in the
+    sticking regime, 2.4e-6 for a cube landing mid-rollout. The tolerance of
+    1e-4 keeps >= 8x headroom above the worst measurement; the FD truncation
+    floor at eps = 1e-6 is ~1e-6 relative.
+    """
+
+    TOL = 1e-4
+
+    def test_contact_is_active_and_friction_matters(self) -> None:
+        """Vacuousness guards for the whole class, checked once explicitly."""
+        on_plane = _final_displacements(lambda: scenes.soft_cube_on_plane("rich"))
+        free = _final_displacements(
+            lambda: scenes.soft_cube(initial_velocity=V0)
+        )
+        # Contact must change the trajectory (free fall would sink ~6 mm).
+        self.assertGreater(np.abs(on_plane - free).max(), 1e-3)
+        # Friction must decelerate the slide: the bottom nodes travel less in
+        # x than the frictionless kinematic prediction v0 * N * dt.
+        rest_z = scenes.CUBE_COORDS.reshape(-1, 3)[:, 2]
+        bottom = rest_z < 0.0
+        travel_x = on_plane.reshape(-1, 3)[bottom, 0].mean()
+        self.assertLess(travel_x, 0.95 * V0[0] * NUM_STEPS * DT)
+        self.assertGreater(travel_x, 0.0)
+
+    def test_penalty_only_regime_vs_fd(self) -> None:
+        self._run_case(lambda: scenes.soft_cube_on_plane("none"), self.TOL)
+
+    def test_viscous_friction_vs_fd(self) -> None:
+        self._run_case(lambda: scenes.soft_cube_on_plane("viscous"), self.TOL)
+
+    def test_coulomb_friction_vs_fd(self) -> None:
+        self._run_case(lambda: scenes.soft_cube_on_plane("coulomb"), self.TOL)
+
+    def test_all_dissipation_terms_vs_fd(self) -> None:
+        self._run_case(lambda: scenes.soft_cube_on_plane("rich"), self.TOL)
+
+    def test_sticking_regime_vs_fd(self) -> None:
+        # Tangential motion per step far below friction_falloff_vel * dt: the
+        # regularized Coulomb term is in its quadratic (sticking) branch.
+        v0 = (0.002, 0.001, 0.0)
+        self._run_case(
+            lambda: scenes.soft_cube_on_plane("rich", initial_velocity=v0),
+            self.TOL,
+            initial_velocity=v0,
+        )
+
+    def test_long_rollout_vs_fd(self) -> None:
+        self._run_case(lambda: scenes.soft_cube_on_plane("rich"), self.TOL, num_steps=8)
+
+    def test_landing_mid_rollout_vs_fd(self) -> None:
+        # Starts 6 mm above the plane and lands after a few steps, so the
+        # contact set changes inside the differentiated window.
+        self._run_case(
+            lambda: scenes.soft_cube_on_plane("rich", height=0.106),
+            self.TOL,
+            num_steps=6,
+        )
+
+
+CONTACT_PARAM_FIELDS = (
+    "penalty_coefficient",
+    "coulomb_friction_coefficient",
+    "viscous_friction_coefficient",
+    "normal_viscous_damping_coefficient",
+)
+
+
+class SoftContactParameterGradientTest(unittest.TestCase):
+    """Contact-parameter and gravity gradients on the soft contact scene.
+
+    The parameter adjoint re-assembles the island residual under perturbed
+    parameters (-lambda^T dR/dtheta); with contact on a soft island that
+    residual includes the async-contact term, so this validates that the
+    soft contact assembly is exactly the one the state adjoint saw.
+    Measured (2026-09-01, 'rich' regime): per-field 7.6e-7..1.3e-6, gravity
+    2.2e-7 relative; tolerances keep >= 30x headroom.
+    """
+
+    def _adjoint_grads(self, scene, cube):
+        num_nodes = cube.get_num_dofs() // 3
+        diffsim.reset_back_propagation(scene)
+        pre, post = [], []
+        for _ in range(NUM_STEPS):
+            pre.append(scene.capture_state())
+            scene.step(DT)
+            post.append(scene.capture_state())
+        for step in reversed(range(NUM_STEPS)):
+            diffsim.prepare_back_propagate(scene, post[step], pre[step])
+            if step == NUM_STEPS - 1:
+                diffsim.get_displacements_backward(cube, _loss_grad(cube, num_nodes))
+            diffsim.back_propagate(scene)
+        grad_cp = np.zeros(len(CONTACT_PARAM_FIELDS))
+        diffsim.set_contact_params_backward(cube, grad_cp)
+        grad_g = np.zeros(3)
+        diffsim.set_gravity_backward(scene, grad_g)
+        for handle in pre + post:
+            scene.release_state(handle)
+        return grad_cp, grad_g
+
+    @staticmethod
+    def _rollout_loss(gravity=None, field=None, value=None) -> float:
+        scene, cube = scenes.soft_cube_on_plane("rich")
+        try:
+            _configure(scene)
+            if gravity is not None:
+                scene.set_gravity(gravity)
+            if field is not None:
+                params = cube.get_contact_params()
+                setattr(params, field, value)
+                cube.set_contact_params(params)
+            for _ in range(NUM_STEPS):
+                scene.step(DT)
+            return _loss_value(cube, cube.get_num_dofs() // 3)
+        finally:
+            physics.destroy_scene(scene)
+
+    def test_contact_params_and_gravity_vs_fd(self) -> None:
+        scene, cube = scenes.soft_cube_on_plane("rich")
+        self.addCleanup(physics.destroy_scene, scene)
+        _configure(scene)
+        base = {f: getattr(cube.get_contact_params(), f) for f in CONTACT_PARAM_FIELDS}
+        gravity0 = np.asarray(scene.get_gravity(), dtype=np.float64)
+        grad_cp, grad_g = self._adjoint_grads(scene, cube)
+
+        eps = 1e-6
+        for f_i, field in enumerate(CONTACT_PARAM_FIELDS):
+            self.assertGreater(base[field], 0.0)  # central FD stays admissible
+            h = eps * (1.0 + abs(base[field]))
+            fd = (
+                self._rollout_loss(field=field, value=base[field] + h)
+                - self._rollout_loss(field=field, value=base[field] - h)
+            ) / (2.0 * h)
+            denom = max(abs(fd), abs(grad_cp[f_i]))
+            self.assertGreater(denom, 1e-13, f"{field}: test is vacuous")
+            self.assertLessEqual(
+                abs(grad_cp[f_i] - fd) / denom,
+                1e-4,
+                f"{field}: adjoint={grad_cp[f_i]:.6e}, fd={fd:.6e}",
+            )
+
+        fd_g = np.zeros(3)
+        for i in range(3):
+            gp, gm = gravity0.copy(), gravity0.copy()
+            gp[i] += eps
+            gm[i] -= eps
+            fd_g[i] = (
+                self._rollout_loss(gravity=gp) - self._rollout_loss(gravity=gm)
+            ) / (2.0 * eps)
+        self.assertGreater(np.abs(fd_g).max(), 0.0, "test is vacuous")
+        np.testing.assert_allclose(grad_g, fd_g, rtol=1e-5, atol=0.0)
+
+
+def _tilted_soft_cube_on_plane(tilt_deg: float, max_alignment_normals: float):
+    """Soft cube rotated about y so one bottom edge rests on the plane, with
+    the alignment-fading slope amplified through max_alignment_normals."""
+    scene = physics.create_scene("diffsim_soft_tilted")
+    scene.set_gravity(scenes.GRAVITY)
+    cp = scenes.contact_params("rich")
+    cp.max_alignment_normals = max_alignment_normals
+    scene.create_rigid_actor(
+        name="ground",
+        shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+        is_static=True,
+        contact=cp,
+    )
+    theta = np.deg2rad(tilt_deg)
+    rotation = physics.Quaternion(0.0, np.sin(theta / 2.0), 0.0, np.cos(theta / 2.0))
+    height = 0.1 * (np.cos(theta) + np.sin(theta)) - 0.001  # lowest corner 1 mm deep
+    cube = scene.create_soft_actor(
+        name="jelly",
+        shape=scenes.cube_shape(),
+        material=physics.SoftMaterialParams(),
+        contact=cp,
+        world_from_local=physics.TransformRT(rotation, [0.0, 0.0, height]),
+    )
+    cube.set_node_velocities_local(np.tile(np.asarray(V0), cube.get_num_dofs() // 3))
+    return scene, cube
+
+
+class SoftContactApproximationPinTest(unittest.TestCase):
+    """Pins the one approximation of the contact adjoint (shared with the
+    rigid path, which was measured under the identical probe).
+
+    With explicit normals the dissipative terms use the colliding surface
+    normal evaluated at the stage start, which depends on the previous state
+    (nodal displacements here, the rotation for rigid bodies). Both the rigid
+    and the soft GradTarget::Previous assemblies treat that normal as a
+    constant. Where it enters - the alignment-fading factor (max_alignment -
+    n_collider . n_colliding) / (max_alignment + 1) - the dropped term is
+    zero for flat contact (the dot product is stationary at anti-alignment)
+    and O(sin(tilt) / (max_alignment_normals + 1)) otherwise. Measured
+    2026-09-01 on a 5-degree tilt: 2.4e-6 at the default fading (noise
+    floor), 6.9e-5 with max_alignment_normals = -0.9, 6.8e-4 with -0.99
+    (rigid path under the same probe: 8.2e-5 and 8.3e-4). The lower bound
+    below flips this test when the term gets implemented.
+    """
+
+    def _rel_error(self, max_alignment_normals: float) -> float:
+        factory = lambda: _tilted_soft_cube_on_plane(5.0, max_alignment_normals)
+        scene, cube = factory()
+        self.addCleanup(physics.destroy_scene, scene)
+        _configure(scene)
+        grad_u0, grad_v0, _, _, fd_valid = _adjoint_sweep(scene, cube, NUM_STEPS)
+        self.assertTrue(fd_valid)
+        fd_u0, fd_v0 = _fd_initial_grads(factory, NUM_STEPS)
+        self.assertGreater(np.abs(fd_u0).max(), 0.0, "test is vacuous")
+
+        def rel(a, b):
+            return np.abs(a - b).max() / max(np.abs(a).max(), np.abs(b).max())
+
+        return max(rel(grad_u0, fd_u0), rel(grad_v0, fd_v0))
+
+    def test_tilted_contact_default_fading_agrees(self) -> None:
+        self.assertLessEqual(self._rel_error(0.0), 1e-4)
+
+    def test_tilted_contact_amplified_fading_shows_dropped_term(self) -> None:
+        err = self._rel_error(-0.99)
+        self.assertGreater(err, 1e-4, "dropped normal derivative no longer visible")
+        self.assertLess(err, 3e-3)
 
 
 if __name__ == "__main__":

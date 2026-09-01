@@ -75,6 +75,12 @@ void SetupActiveCollisionNormals(
     CContactSamples<TimeStep::Current> const& contactPositions,
     CActiveCollisions<kContactType, TimeStep::Current>& activeCollisions);
 
+// Computes the per-sample async (static-collider) contact response of a deformable actor in the
+// actor's local frame. `params.gradTarget` selects the quantity: GradTarget::Current gives the
+// contact energy/force/force derivative; GradTarget::Previous gives the derivative of the contact
+// merit with respect to the stage-start sample positions (gradient only, for the adjoint's
+// previous-state pass). Other targets are not supported (contact has no dependence on the
+// previous step delta nor on differentiable inputs; callers skip the assembly for those).
 template <typename DiscretizationType, int kNumFields>
 void ComputeAsyncContactResponse(
     ContactAssemblyReg reg,

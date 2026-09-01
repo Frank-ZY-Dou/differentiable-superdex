@@ -225,6 +225,7 @@ static void ComputeAsyncContactResponseImpl(
     TransformRT const& transform,
     [[maybe_unused]] CContactSamples<TimeStep::Current> const& samples,
     ContactEvalConfig const& config,
+    GradTarget gradTarget,
     real dtStage,
     CActiveCollisions<ContactType::Async, TimeStep::Current>& collisions,
     CDeformablePointAsyncCollisionsResponse& outResponse,
@@ -236,6 +237,19 @@ static void ComputeAsyncContactResponseImpl(
 
   static int constexpr kSpaceDim = FemDiscretization<ElementT>::kSpaceDim;
   static_assert(kSpaceDim == 3, "Invalid spatial dimensions");
+
+  // [Differentiability] GradTarget::Previous evaluates the derivative of the contact merit with
+  // respect to the stage-start (previous) sample positions instead of the contact force. The
+  // per-sample core response already implements it (ComputeCollisionResponse<GradTarget::Previous>,
+  // same collider-local frame and sign convention as the force), and the sample-to-node map is the
+  // same linear FEM interpolation at both time steps, so the assembly below is shared. Only the
+  // gradient is supported for that target: the mixed Hessian and an "energy" have no consumer.
+  MOCHI_ASSERT(
+      gradTarget == GradTarget::Current || gradTarget == GradTarget::Previous,
+      "Async contact response supports GradTarget::Current and GradTarget::Previous only.");
+  MOCHI_ASSERT(
+      gradTarget == GradTarget::Current || (!evalEner && !evalHess),
+      "GradTarget::Previous async contact response supports the gradient only.");
 
   int const numColliders = isize(collisions);
 
@@ -281,15 +295,27 @@ static void ComputeAsyncContactResponseImpl(
     auto const rotColliderFromLocal = Dot3x3(rotColliderFromWorld[0], rotWorldFromLocal);
     auto const rotColliderFromLocalT = Transpose3x3(rotColliderFromLocal);
 
-    ComputeCollisionResponse<GradTarget::Current>(
-        contactQuery,
-        contactParams,
-        config,
-        dtStage,
-        evalEner,
-        evalGrad,
-        evalHess,
-        collisionResponse);
+    if (gradTarget == GradTarget::Current) {
+      ComputeCollisionResponse<GradTarget::Current>(
+          contactQuery,
+          contactParams,
+          config,
+          dtStage,
+          evalEner,
+          evalGrad,
+          evalHess,
+          collisionResponse);
+    } else {
+      ComputeCollisionResponse<GradTarget::Previous>(
+          contactQuery,
+          contactParams,
+          config,
+          dtStage,
+          evalEner,
+          evalGrad,
+          evalHess,
+          collisionResponse);
+    }
 
     // Assemble
     for (size_t i = 0; i < numActiveSamples; ++i) {
@@ -311,8 +337,10 @@ static void ComputeAsyncContactResponseImpl(
       outResponse.AddContactSampleResponse(sampleIndex, outEnergy, outForce, outDForce);
     }
 
-    // Optionally store data for queries
-    if (evalGrad && queryActiveContacts) {
+    // Optionally store data for queries. Only the actual contact force (GradTarget::Current) is
+    // query data; during back-propagation `forcePerUnitArea` holds the contact-force adjoints,
+    // which a previous-state evaluation must not overwrite.
+    if (evalGrad && queryActiveContacts && gradTarget == GradTarget::Current) {
       contactQuery.forcePerUnitArea = collisionResponse.force;
     }
   }
@@ -354,6 +382,7 @@ void deformable::ComputeAsyncContactResponse(
         rootTransform.worldFromLocal,
         samples,
         config,
+        params.gradTarget,
         intState.dtStage,
         collisions,
         outResponse,

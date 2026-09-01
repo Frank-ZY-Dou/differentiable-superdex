@@ -281,3 +281,39 @@ def free_chain_on_plane(friction: str, root_z: float = 0.15):
         )
     )
     return scene, chain
+
+
+def soft_cube_on_plane(
+    friction: str,
+    initial_velocity=(0.3, 0.0, 0.0),
+    height: float = 0.099,
+):
+    """A free FEM cube sliding on a static ground plane. Returns (scene, cube).
+
+    ``friction`` selects the contact regime (see :func:`contact_params`); both
+    the plane and the cube carry the same parameters (a contact pair combines
+    both owners' values by geometric mean). ``height`` places the cube's
+    center; the default rests the bottom face 1 mm into the plane, as in
+    :func:`rigid_on_plane`. Contact against a static collider is *async*
+    contact in the engine, the regime the soft contact adjoint covers.
+    """
+    scene = physics.create_scene(f"diffsim_soft_cube_on_plane_{friction}")
+    scene.set_gravity(GRAVITY)
+    cp = contact_params(friction)
+    scene.create_rigid_actor(
+        name="ground",
+        shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+        is_static=True,
+        contact=cp,
+    )
+    cube = scene.create_soft_actor(
+        name="jelly",
+        shape=cube_shape(),
+        material=physics.SoftMaterialParams(),
+        contact=cp,
+        world_from_local=physics.TransformRT([0.0, 0.0, height]),
+    )
+    num_nodes = cube.get_num_dofs() // 3
+    velocities = np.tile(np.asarray(initial_velocity, dtype=np.float64), num_nodes)
+    cube.set_node_velocities_local(velocities)
+    return scene, cube
