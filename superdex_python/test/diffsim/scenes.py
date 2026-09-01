@@ -287,6 +287,7 @@ def soft_cube_on_plane(
     friction: str,
     initial_velocity=(0.3, 0.0, 0.0),
     height: float = 0.099,
+    mass_damping: float = 0.0,
 ):
     """A free FEM cube sliding on a static ground plane. Returns (scene, cube).
 
@@ -294,8 +295,9 @@ def soft_cube_on_plane(
     the plane and the cube carry the same parameters (a contact pair combines
     both owners' values by geometric mean). ``height`` places the cube's
     center; the default rests the bottom face 1 mm into the plane, as in
-    :func:`rigid_on_plane`. Contact against a static collider is *async*
-    contact in the engine, the regime the soft contact adjoint covers.
+    :func:`rigid_on_plane`. ``mass_damping`` sets the material's mass-damping
+    coefficient [1/s]. Contact against a static collider is *async* contact
+    in the engine, the regime the soft contact adjoint covers.
     """
     scene = physics.create_scene(f"diffsim_soft_cube_on_plane_{friction}")
     scene.set_gravity(GRAVITY)
@@ -309,7 +311,7 @@ def soft_cube_on_plane(
     cube = scene.create_soft_actor(
         name="jelly",
         shape=cube_shape(),
-        material=physics.SoftMaterialParams(),
+        material=physics.SoftMaterialParams(mass_damping_coefficient=mass_damping),
         contact=cp,
         world_from_local=physics.TransformRT([0.0, 0.0, height]),
     )

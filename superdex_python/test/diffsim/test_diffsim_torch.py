@@ -32,7 +32,8 @@ validation path on top of the suite's own FD tests.
 - repeated calls are deterministic (bitwise-equal loss and gradients);
 - gradcheck over a soft cube's initial nodal state + gravity + contact
   parameters on the soft-on-plane contact scene (the ``initial_states``
-  group);
+  group), and over the soft material parameters (E, nu, rho, mass damping;
+  the ``soft_materials`` group) through a reparameterization;
 - contract violations (dtype, device via meta, shape, undeclared/missing
   groups, static contact actor, controller-less control actor, soft actors
   in the force/density groups, a rigid actor in the initial-state group)
@@ -389,6 +390,46 @@ class GradcheckSoftTest(unittest.TestCase):
         loss.backward()
         self.assertGreater(float(initial_states.grad.abs().max()), 0.0)
 
+    def test_gradcheck_soft_materials(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        num_steps = 3
+        scene, cube = scenes.soft_cube_on_plane("rich", mass_damping=1.0)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        bridge = diffsim_torch.TorchRollout(
+            scene,
+            dt=DT,
+            num_steps=num_steps,
+            soft_material_actors=[cube],
+            terminal_losses=[DisplacementErrorLoss(cube)],
+        )
+        self.addCleanup(bridge.close)
+        params = cube.get_soft_material_params()
+        base = torch.tensor(
+            [[
+                params.neo_hookean.youngs_modulus,
+                params.neo_hookean.poisson_ratio,
+                params.density,
+                params.mass_damping_coefficient,
+            ]],
+            dtype=torch.float64,
+        )
+        self.assertTrue(bool((base > 0).all()), "every field must be strictly positive")
+
+        # Reparameterize so gradcheck's uniform 1e-6 step is well scaled for
+        # every field (Young's modulus is 1e5 Pa, Poisson's ratio 0.45).
+        def f(scale):
+            return bridge(soft_materials=base * (1.0 + 0.05 * scale))
+
+        scale = torch.zeros((1, 4), dtype=torch.float64, requires_grad=True)
+        self.assertTrue(
+            torch.autograd.gradcheck(f, (scale,), eps=1e-6, atol=1e-8, rtol=1e-4)
+        )
+        self.assertTrue(bridge.last_result.fd_valid)
+        loss = f(scale)
+        loss.backward()
+        self.assertTrue(bool((scale.grad.abs() > 0).all()), "test is vacuous")
+
     def test_soft_actor_group_contracts(self) -> None:
         diffsim_torch = _make_bridge_module()
         scene, cube = scenes.soft_cube_on_plane("rich")
@@ -402,6 +443,17 @@ class GradcheckSoftTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "density"):
             diffsim_torch.TorchRollout(
                 scene, dt=DT, num_steps=2, density_actors=[cube], terminal_losses=losses
+            )
+        rigid_scene, rigid = scenes.rigid_on_plane("rich")
+        self.addCleanup(physics.destroy_scene, rigid_scene)
+        configure_for_differentiability(rigid_scene)
+        with self.assertRaisesRegex(ValueError, "not a soft actor"):
+            diffsim_torch.TorchRollout(
+                rigid_scene,
+                dt=DT,
+                num_steps=2,
+                soft_material_actors=[rigid],
+                terminal_losses=[TranslationErrorLoss(rigid)],
             )
 
     def test_rigid_initial_state_group_not_implemented(self) -> None:

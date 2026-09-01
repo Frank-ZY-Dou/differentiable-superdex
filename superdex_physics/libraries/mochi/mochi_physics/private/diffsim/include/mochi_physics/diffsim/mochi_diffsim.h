@@ -48,6 +48,11 @@ MOCHI_API void SetContactParamsBackward(
 
 MOCHI_API void SetDensityBackward(Actor const* actor, Span<real> outGradDensity, Error& error);
 
+MOCHI_API void SetSoftMaterialParamsBackward(
+    Actor const* actor,
+    Span<real> outGradMaterialParams,
+    Error& error);
+
 MOCHI_API void GetDisplacementsBackward(Actor* actor, Span<real const> gradOutput, Error& error);
 
 MOCHI_API void SetDisplacementsBackward(

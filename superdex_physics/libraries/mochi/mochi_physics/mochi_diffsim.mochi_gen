@@ -130,6 +130,29 @@ fn diffsim::SetContactParamsBackward(Actor const* actor, Span<real> outGradConta
 // accumulated into.
 fn diffsim::SetDensityBackward(Actor const* actor, Span<real> outGradDensity) -> void [mochi_error];
 
+// @brief Backward pass for @ref Actor::SetSoftMaterialParams (standalone soft actors).
+//
+// @details Reads the gradient of the loss with respect to this soft actor's material parameters,
+// accumulated by the engine over every @ref BackPropagate call since @ref ResetBackPropagation.
+// Each step contributes -lambda^T dR/dtheta by finite differences of the assembled residual under
+// perturbed parameters, where every perturbed parameter set goes through the same conversion as the
+// forward setter (the per-element Lame constants are rebuilt from Young's modulus and Poisson's
+// ratio; density and mass damping enter the inertia, gravity and damping terms directly), with a
+// per-parameter relative step scaled by @ref BackPropagationSolverParams::epsFiniteDiff.
+//
+// Gradient order (size 4): [youngsModulus, poissonRatio, density, massDampingCoefficient].
+// Covers homogeneous Lame-type materials (Neo-Hookean, St. Venant-Kirchhoff, linear elastic);
+// other material models and per-element material fields are rejected. Mass damping is gated at
+// zero in the assembly (a non-positive coefficient disables the term), so at
+// massDampingCoefficient == 0 the reported value is the right-sided derivative - the direction an
+// optimizer constrained to non-negative damping can move in. Stiffness damping is not
+// differentiated (differentiable soft actors require it to be zero).
+//
+// @param[in] actor The standalone soft actor owning the material.
+// @param[out] outGradMaterialParams Gradient in the order above. Must be of size 4. Overwritten,
+// not accumulated into.
+fn diffsim::SetSoftMaterialParamsBackward(Actor const* actor, Span<real> outGradMaterialParams) -> void [mochi_error];
+
 // @brief Backward pass for @ref Actor::GetDisplacements (standalone soft actors).
 //
 // @details Accumulates the gradient of the loss with respect to this soft actor's current

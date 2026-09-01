@@ -20,8 +20,10 @@
 #include "mochi_common_components.h"
 #include "mochi_articulated_body.h"
 #include "mochi_constraint.h"
+#include "mochi_materials.h"
 #include "mochi_rigid.h"
 #include "mochi_simulation.h"
+#include "mochi_soft.h"
 #include "mochi_solve.h"
 #include "mochi_step.h"
 
@@ -707,6 +709,51 @@ static void BackPropagationSolveIslandAsync(
   }
 }
 
+bool mochi::IsSoftMaterialGradientSupported(CSoftMaterialParams const& material) {
+  bool const isLame = std::visit(
+      [](auto const& p) { return materials::kIsLameMaterial<std::decay_t<decltype(p)>>; },
+      material.params);
+  bool const homogeneous = std::visit(
+      [](auto const& perElem) {
+        if constexpr (std::is_same_v<std::decay_t<decltype(perElem)>, std::monostate>) {
+          return false;
+        } else {
+          return perElem.size() == 1;
+        }
+      },
+      material.perElementParams);
+  return isLame && homogeneous;
+}
+
+// Read/write one of the differentiated soft material parameters (kSoftMaterialGrad* order) of
+// the public parameter struct. Only valid for the Lame-type material models (see
+// IsSoftMaterialGradientSupported).
+static real& SoftMaterialField(SoftMaterialParams& params, int field) {
+  auto lameField = [&](auto& typed) -> real& {
+    return field == kSoftMaterialGradYoungsModulus ? typed.youngsModulus : typed.poissonRatio;
+  };
+  if (field == kSoftMaterialGradDensity) {
+    return params.density;
+  }
+  if (field == kSoftMaterialGradMassDamping) {
+    return params.massDampingCoefficient;
+  }
+  MOCHI_ASSERT(
+      field == kSoftMaterialGradYoungsModulus || field == kSoftMaterialGradPoissonRatio,
+      "Unexpected soft material gradient field");
+  switch (params.type) {
+    case SoftMaterialType::NeoHookean:
+      return lameField(params.neoHookean);
+    case SoftMaterialType::StVenantKirchhoff:
+      return lameField(params.stVenantKirchhoff);
+    case SoftMaterialType::LinearElastic:
+      return lameField(params.linearElastic);
+    default:
+      MOCHI_ASSERT(false, "Soft material gradients cover Lame-type materials only");
+      return params.density; // unreachable
+  }
+}
+
 // Stack one actor's generalized-force adjoint into the island lambda vector.
 // Invoked through ecs::InvokeForEach so entities without differentiability
 // components (e.g. nested link actors in the descendants list) are skipped.
@@ -751,6 +798,13 @@ static void AccumulateParameterGradientsIsland(
     if (reg.try_get<CRigidBodyInertia const>(e) != nullptr &&
         reg.try_get<CDiffDensityGrad>(e) == nullptr) {
       reg.emplace<CDiffDensityGrad>(e);
+    }
+  }
+  for (auto const e : descendants.softActors) {
+    auto const* material = reg.try_get<CSoftMaterialParams const>(e);
+    if (material != nullptr && IsSoftMaterialGradientSupported(*material) &&
+        reg.try_get<CDiffSoftMaterialGrad>(e) == nullptr) {
+      reg.emplace<CDiffSoftMaterialGrad>(e);
     }
   }
 
@@ -862,6 +916,69 @@ static void AccumulateParameterGradientsIsland(
     residualPlus -= residualMinus;
     outDensityGrad.value += -lambda.Dot(residualPlus) / (2_r * eps);
   }
+
+  // Soft material parameters, per standalone soft actor with a supported (homogeneous
+  // Lame-type) material. Each perturbed parameter set goes through the forward setter's
+  // conversion (soft::SetMaterialParams rebuilds the per-element Lame constants from Young's
+  // modulus and Poisson's ratio; the residual reads density and mass damping directly), and
+  // the component is restored bit-exactly from a copy afterwards. Mass damping is gated at
+  // zero in the assembly (a non-positive coefficient disables the term), so at
+  // massDampingCoefficient == 0 a central difference would straddle the gate and report half
+  // the derivative; the right-sided difference is used there instead - the direction an
+  // optimizer constrained to alpha >= 0 can move in.
+  //
+  // Step sizes: the residual is inertia-dominated (1/dt^2 scaling), so a difference over a
+  // parameter that only moves the comparatively small elastic or damping terms amplifies
+  // round-off by the ratio of the two - at epsFiniteDiff (1e-7) this was measured at 1e-4
+  // relative error over an 8-step elastic oscillation. The Lame-type energies are homogeneous
+  // of degree one in (lambda, mu) and hence linear in Young's modulus, and the inertia,
+  // gravity and mass-damping terms are linear in density and in the damping coefficient, so
+  // for those three a central difference has no truncation error at any step: a 1e-3
+  // relative step removes the amplification. Poisson's ratio enters through
+  // lambda = E nu / ((1 + nu)(1 - 2 nu)) and mu = E / (2 (1 + nu)), with poles at 0.5 and
+  // -1: its step is 1e-2 of the distance to the nearer pole and the central difference is
+  // Richardson-extrapolated (two steps, O(h^4)), which keeps the truncation error near 1e-8
+  // for any admissible ratio while the step stays large enough against round-off.
+  real constexpr kLinearParamRelativeStep = 1e-3_r;
+  real constexpr kPoissonPoleFraction = 1e-2_r;
+  for (auto const e : descendants.softActors) {
+    auto* material = reg.try_get<CSoftMaterialParams>(e);
+    if (material == nullptr || !IsSoftMaterialGradientSupported(*material)) {
+      continue;
+    }
+    auto& outMaterialGrad = reg.get<CDiffSoftMaterialGrad>(e); // created above
+    CSoftMaterialParams const saved = *material;
+    SoftMaterialParams base;
+    soft::GetMaterialParams(*material, base);
+    auto evalAt = [&](int field, real value, ColumnVectorView<real> out) {
+      SoftMaterialParams perturbed = base;
+      SoftMaterialField(perturbed, field) = value;
+      soft::SetMaterialParams(perturbed, *material);
+      evalResidual(out);
+    };
+    // -lambda^T (R(value + h) - R(value - h)) / (2 h), or the right-sided variant.
+    auto centralDifference = [&](int f, real value, real h, bool rightSided) {
+      evalAt(f, value + h, AsView(residualPlus));
+      evalAt(f, rightSided ? value : value - h, AsView(residualMinus));
+      residualPlus -= residualMinus;
+      return -lambda.Dot(residualPlus) / (rightSided ? h : 2_r * h);
+    };
+    for (int f = 0; f < kNumSoftMaterialParamGradients; ++f) {
+      real const value = SoftMaterialField(base, f);
+      if (f == kSoftMaterialGradPoissonRatio) {
+        real const h = kPoissonPoleFraction * Min(0.5_r - value, 1_r + value);
+        MOCHI_ASSERT(h > 0_r, "Poisson's ratio must lie in (-1, 0.5)");
+        real const coarse = centralDifference(f, value, h, false);
+        real const fine = centralDifference(f, value, 0.5_r * h, false);
+        outMaterialGrad.value[f] += (4_r * fine - coarse) / 3_r;
+        continue;
+      }
+      real const h = kLinearParamRelativeStep * (1_r + std::abs(value));
+      bool const rightSided = (f == kSoftMaterialGradMassDamping && value <= 0_r);
+      outMaterialGrad.value[f] += centralDifference(f, value, h, rightSided);
+    }
+    *material = saved;
+  }
 }
 
 void mochi::AccumulateParameterGradients(entt::registry& reg) {
@@ -885,6 +1002,10 @@ void mochi::ResetContactParamsGradContainers(CDiffContactParamsGrad& outGrad) {
 
 void mochi::ResetDensityGradContainers(CDiffDensityGrad& outGrad) {
   outGrad.value = 0_r;
+}
+
+void mochi::ResetSoftMaterialGradContainers(CDiffSoftMaterialGrad& outGrad) {
+  outGrad.value.fill(0_r);
 }
 
 void mochi::BackPropagationSolve(entt::registry& reg) {

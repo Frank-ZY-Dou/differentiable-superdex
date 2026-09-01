@@ -39,12 +39,20 @@ Differentiable inputs (each group is opt-in at construction):
   displacements followed by its nodal velocities (both ``num_dofs`` long).
   Soft actors only for now: their state is a plain vector space, whereas the
   rigid/articulated initial state lives on a manifold (quaternion chart); the
-  driver's ``RolloutResult`` still carries those gradients.
+  driver's ``RolloutResult`` still carries those gradients;
+- ``soft_materials`` - per soft actor its material parameters, shape
+  ``(num_soft_material_actors, 4)`` in the engine's gradient order
+  :data:`SOFT_MATERIAL_FIELDS` (Young's modulus, Poisson's ratio, density,
+  mass-damping coefficient). Homogeneous Lame-type materials only (the
+  engine rejects other models and per-element fields at read time). The
+  mass-damping coefficient is gated at zero in the engine, so its gradient
+  at zero is the right-sided derivative.
 
-Soft actors take part in the ``contact_params`` and ``initial_states`` groups
-and in the gravity gradient; they carry no external forces, no controller
-and no density gradient (the soft material parameters are not differentiable
-yet), so declaring one in those groups is an error.
+Soft actors take part in the ``contact_params``, ``initial_states`` and
+``soft_materials`` groups and in the gravity gradient; they carry no external
+forces, no controller and no rigid-body density (their density is part of
+``soft_materials``), so declaring one in the force, control or density groups
+is an error.
 
 Design and contract:
 
@@ -129,7 +137,43 @@ CONTACT_PARAM_FIELDS = (
     "normal_viscous_damping_coefficient",
 )
 
-__all__ = ["CONTACT_PARAM_FIELDS", "TorchRollout"]
+#: Field order of one row of ``soft_materials``, matching the engine's soft
+#: material gradient layout.
+SOFT_MATERIAL_FIELDS = (
+    "youngs_modulus",
+    "poisson_ratio",
+    "density",
+    "mass_damping_coefficient",
+)
+
+__all__ = ["CONTACT_PARAM_FIELDS", "SOFT_MATERIAL_FIELDS", "TorchRollout"]
+
+
+def _soft_material_get(params, field: str) -> float:
+    if field in ("youngs_modulus", "poisson_ratio"):
+        return float(getattr(params.neo_hookean, field))
+    return float(getattr(params, field))
+
+
+def _soft_material_set(params, field: str, value: float) -> None:
+    """Write one field of a SoftMaterialParams; the elastic constants live in
+    the sub-struct of the material's model (Lame-type models share the names)."""
+    if field in ("youngs_modulus", "poisson_ratio"):
+        model = {
+            physics.SoftMaterialType.NEO_HOOKEAN: "neo_hookean",
+            physics.SoftMaterialType.ST_VENANT_KIRCHHOFF: "st_venant_kirchhoff",
+            physics.SoftMaterialType.LINEAR_ELASTIC: "linear_elastic",
+        }.get(params.type)
+        if model is None:
+            raise ValueError(
+                f"soft material type {params.type} has no Young's modulus / "
+                "Poisson's ratio; soft_materials covers Lame-type materials only"
+            )
+        sub = getattr(params, model)
+        setattr(sub, field, value)
+        setattr(params, model, sub)
+    else:
+        setattr(params, field, value)
 
 
 def _as_numpy(name: str, value: torch.Tensor, shape: tuple[int, ...]) -> np.ndarray:
@@ -154,7 +198,8 @@ class _ForceEntry:
 
 
 class _RolloutLoss(torch.autograd.Function):
-    """(controls, forces, gravity, contact, densities, initial_states) -> loss.
+    """(controls, forces, gravity, contact, densities, initial_states,
+    soft_materials) -> loss.
 
     Forward runs the rollout AND the adjoint sweep (the engine needs the
     captured step states); backward scales the stashed input gradients by
@@ -163,8 +208,12 @@ class _RolloutLoss(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, bridge, controls, forces, gravity, contact, densities, initial_states):
-        grads = bridge._run(controls, forces, gravity, contact, densities, initial_states)
+    def forward(
+        ctx, bridge, controls, forces, gravity, contact, densities, initial_states, soft_materials
+    ):
+        grads = bridge._run(
+            controls, forces, gravity, contact, densities, initial_states, soft_materials
+        )
         ctx.saved_grads = grads
         return torch.tensor(bridge.last_result.loss, dtype=torch.float64)
 
@@ -192,6 +241,7 @@ class TorchRollout:
         contact_actors: Sequence = (),
         density_actors: Sequence = (),
         initial_state_actors: Sequence = (),
+        soft_material_actors: Sequence = (),
         differentiate_gravity: bool = False,
         terminal_losses: Sequence = (),
         step_losses: Callable[[int], Sequence] | None = None,
@@ -276,6 +326,19 @@ class TorchRollout:
             self._initial_state_entries.append(entry)
         self.initial_state_size = 2 * sum(e.dofs_size for e in self._initial_state_entries)
 
+        self._soft_material_actors = []
+        for actor in soft_material_actors:
+            entry = _entry(actor, "soft-material")
+            if not entry.soft:
+                raise ValueError(
+                    f"soft-material actor {entry.name!r} is not a soft actor"
+                )
+            # Fail at construction, not at the first read, for unsupported models.
+            _soft_material_set(
+                actor.get_soft_material_params(), "youngs_modulus", 1.0
+            )
+            self._soft_material_actors.append(actor)
+
         # Names for gradient lookup (rollout results are keyed by name).
         self._control_names = [e.name for e in self._control_actors]
 
@@ -299,6 +362,7 @@ class TorchRollout:
         contact_params: torch.Tensor | None = None,
         densities: torch.Tensor | None = None,
         initial_states: torch.Tensor | None = None,
+        soft_materials: torch.Tensor | None = None,
     ) -> torch.Tensor:
         def check(name, value, declared, shape):
             if declared and value is None:
@@ -315,13 +379,23 @@ class TorchRollout:
         check("contact_params", contact_params, bool(self._contact_actors), None)
         check("densities", densities, bool(self._density_actors), None)
         check("initial_states", initial_states, bool(self._initial_state_entries), None)
+        check("soft_materials", soft_materials, bool(self._soft_material_actors), None)
         return _RolloutLoss.apply(
-            self, controls, forces, gravity, contact_params, densities, initial_states
+            self,
+            controls,
+            forces,
+            gravity,
+            contact_params,
+            densities,
+            initial_states,
+            soft_materials,
         )
 
     # -- engine side -------------------------------------------------------
 
-    def _run(self, controls, forces, gravity, contact, densities, initial_states):
+    def _run(
+        self, controls, forces, gravity, contact, densities, initial_states, soft_materials
+    ):
         """Restore, apply inputs, rollout + adjoint sweep, read gradients.
 
         Returns the gradient arrays in the same order as the tensor inputs
@@ -361,8 +435,23 @@ class TorchRollout:
             if self._initial_state_entries
             else None
         )
+        soft_materials_np = (
+            _as_numpy(
+                "soft_materials",
+                soft_materials,
+                (len(self._soft_material_actors), len(SOFT_MATERIAL_FIELDS)),
+            )
+            if self._soft_material_actors
+            else None
+        )
 
         self.scene.restore_state(self._state_init, False)
+        if soft_materials_np is not None:
+            for actor, row in zip(self._soft_material_actors, soft_materials_np):
+                params = actor.get_soft_material_params()
+                for field, value in zip(SOFT_MATERIAL_FIELDS, row):
+                    _soft_material_set(params, field, float(value))
+                actor.set_soft_material_params(params)
         if initial_states_np is not None:
             offset = 0
             for entry in self._initial_state_entries:
@@ -466,6 +555,14 @@ class TorchRollout:
                 blocks.append(actor_grads.initial_velocity)
             grad_initial_states = np.ascontiguousarray(np.concatenate(blocks))
 
+        grad_soft_materials = None
+        if soft_materials_np is not None:
+            grad_soft_materials = np.zeros(
+                (len(self._soft_material_actors), len(SOFT_MATERIAL_FIELDS))
+            )
+            for i, actor in enumerate(self._soft_material_actors):
+                diffsim.set_soft_material_params_backward(actor, grad_soft_materials[i])
+
         return (
             grad_controls,
             grad_forces,
@@ -473,4 +570,5 @@ class TorchRollout:
             grad_contact,
             grad_densities,
             grad_initial_states,
+            grad_soft_materials,
         )

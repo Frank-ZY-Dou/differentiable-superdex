@@ -1173,6 +1173,7 @@ void SceneImpl::ResetBackPropagation() {
   ecs::InvokeForEachGlobal(&ResetBackPropagationContainers, _registry);
   ecs::InvokeForEachGlobal(&ResetContactParamsGradContainers, _registry);
   ecs::InvokeForEachGlobal(&ResetDensityGradContainers, _registry);
+  ecs::InvokeForEachGlobal(&ResetSoftMaterialGradContainers, _registry);
   if (_registry.try_ctx<CDiffGravityGrad>() == nullptr) {
     _registry.set<CDiffGravityGrad>();
   }

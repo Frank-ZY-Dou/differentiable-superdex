@@ -32,6 +32,8 @@ struct BackPropagationSceneStats;
 
 namespace mochi {
 
+struct CSoftMaterialParams;
+
 /**************************************************************************
   ECS components for differentiable scenes, islands and actors
 */
@@ -204,6 +206,31 @@ struct CDiffDensityGrad {
   real value = 0_r;
 };
 
+// Number of per-actor soft material parameter gradients accumulated by the parameter
+// adjoint, and their fixed order:
+//   0 youngsModulus, 1 poissonRatio, 2 density, 3 massDampingCoefficient.
+// Covers standalone soft actors with a homogeneous Lame-type material (Neo-Hookean,
+// St. Venant-Kirchhoff, linear elastic). Other material models and per-element material
+// fields are not accumulated; the readout reports them as errors. Mass damping is gated
+// at zero in the assembly (a non-positive coefficient disables the term), so at
+// massDampingCoefficient == 0 the accumulated value is the right-sided derivative.
+inline constexpr int kNumSoftMaterialParamGradients = 4;
+inline constexpr int kSoftMaterialGradYoungsModulus = 0;
+inline constexpr int kSoftMaterialGradPoissonRatio = 1;
+inline constexpr int kSoftMaterialGradDensity = 2;
+inline constexpr int kSoftMaterialGradMassDamping = 3;
+
+// Per-entity component accumulating dL/d(soft material parameters) across BackPropagate
+// calls, for every supported soft actor of a back-propagated island. Same existence
+// semantics as CDiffContactParamsGrad.
+struct CDiffSoftMaterialGrad {
+  std::array<real, kNumSoftMaterialParamGradients> value{};
+};
+
+// True when the soft material parameter adjoint covers this material: a homogeneous
+// (single per-element entry) Lame-type parameter set.
+bool IsSoftMaterialGradientSupported(CSoftMaterialParams const& material);
+
 
 struct CForwardPropContainerDerivedStateJac {
   Matrix<real> data;
@@ -270,6 +297,9 @@ void ResetContactParamsGradContainers(CDiffContactParamsGrad& outGrad);
 
 // Zeroes one entity's accumulated density gradient (ResetBackPropagation).
 void ResetDensityGradContainers(CDiffDensityGrad& outGrad);
+
+// Zeroes one entity's accumulated soft material gradient (ResetBackPropagation).
+void ResetSoftMaterialGradContainers(CDiffSoftMaterialGrad& outGrad);
 
 void ComputeHqx(
     int numIslandDofs,

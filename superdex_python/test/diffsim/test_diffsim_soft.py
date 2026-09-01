@@ -48,9 +48,21 @@ previous state is dropped, which is exact for flat contact and O(sin(tilt) /
 (max_alignment_normals + 1)) otherwise - a probe with amplified alignment
 fading on a tilted cube must show that error (upper AND lower bound).
 
+Material parameters (phase 5d): ``diffsim.set_soft_material_params_backward``
+returns dL/d[youngs_modulus, poisson_ratio, density, mass_damping]. Ground
+truth: rollout finite differences (relative steps, Richardson extrapolation
+for Poisson's ratio) on a squashed free cube and on the contact scene, plus
+two closed forms - (a) the free-body equation of motion depends on E and rho
+only through E/rho (gravity is mass-independent), so E dL/dE + rho dL/drho =
+0 exactly for any loss without contact; (b) an undeformed free-falling cube
+has no E, nu or rho sensitivity at all. The mass-damping coefficient is
+gated at zero, so at alpha = 0 the engine reports the right-sided derivative
+and the test compares against a forward difference.
+
 Loud-contract tests pin the remaining exclusions: sync (dynamic-dynamic)
 contact involving a soft actor, stiffness damping, missing inertia, Dirichlet
-BCs, and the forced recentering disable. (The DifferentiableRollout driver
+BCs, the forced recentering disable, and the material-gradient scope
+(homogeneous Lame-type materials only). (The DifferentiableRollout driver
 and the torch bridge drive soft actors since 5c; see test_diffsim_rollout /
 test_diffsim_torch.)
 
@@ -649,6 +661,236 @@ class SoftContactApproximationPinTest(unittest.TestCase):
         err = self._rel_error(-0.99)
         self.assertGreater(err, 1e-4, "dropped normal derivative no longer visible")
         self.assertLess(err, 3e-3)
+
+
+MATERIAL_FIELDS = (
+    "youngs_modulus",
+    "poisson_ratio",
+    "density",
+    "mass_damping_coefficient",
+)
+
+
+def _material_get(params, field: str) -> float:
+    if field in ("youngs_modulus", "poisson_ratio"):
+        return float(getattr(params.neo_hookean, field))
+    return float(getattr(params, field))
+
+
+def _material_set(params, field: str, value: float) -> None:
+    if field in ("youngs_modulus", "poisson_ratio"):
+        nh = params.neo_hookean
+        setattr(nh, field, value)
+        params.neo_hookean = nh
+    else:
+        setattr(params, field, value)
+
+
+def _material_adjoint(scene, cube, num_steps: int) -> np.ndarray:
+    """Forward + reverse sweep with the terminal loss; returns dL/d(material)."""
+    num_nodes = cube.get_num_dofs() // 3
+    diffsim.reset_back_propagation(scene)
+    pre, post = [], []
+    for _ in range(num_steps):
+        pre.append(scene.capture_state())
+        scene.step(DT)
+        post.append(scene.capture_state())
+    for step in reversed(range(num_steps)):
+        diffsim.prepare_back_propagate(scene, post[step], pre[step])
+        if step == num_steps - 1:
+            diffsim.get_displacements_backward(cube, _loss_grad(cube, num_nodes))
+        diffsim.back_propagate(scene)
+    grad = np.zeros(len(MATERIAL_FIELDS))
+    diffsim.set_soft_material_params_backward(cube, grad)
+    for handle in pre + post:
+        scene.release_state(handle)
+    return grad
+
+
+def _material_fd(scene_factory, num_steps: int, base: dict) -> np.ndarray:
+    """Independent ground truth: finite differences of the rollout loss over
+    ``set_soft_material_params``. Relative steps of 1e-4 (the loss is far less
+    sensitive to E than to the state, so a 1e-6 step would be dominated by
+    cancellation); Richardson-extrapolated central differences for Poisson's
+    ratio (step 1e-2 of the distance to the nearer pole); a forward
+    difference for the mass-damping coefficient at zero, where the engine's
+    non-negativity check forbids the negative side."""
+
+    def rollout_loss(field=None, value=None) -> float:
+        scene, cube = scene_factory()
+        try:
+            _configure(scene)
+            if field is not None:
+                params = cube.get_soft_material_params()
+                _material_set(params, field, value)
+                cube.set_soft_material_params(params)
+            for _ in range(num_steps):
+                scene.step(DT)
+            return _loss_value(cube, cube.get_num_dofs() // 3)
+        finally:
+            physics.destroy_scene(scene)
+
+    fd = np.zeros(len(MATERIAL_FIELDS))
+    for i, field in enumerate(MATERIAL_FIELDS):
+        value = base[field]
+        if field == "poisson_ratio":
+            h = 1e-2 * min(0.5 - value, 1.0 + value)
+
+            def central(step):
+                return (
+                    rollout_loss(field, value + step) - rollout_loss(field, value - step)
+                ) / (2.0 * step)
+
+            fd[i] = (4.0 * central(h / 2.0) - central(h)) / 3.0
+            continue
+        h = 1e-4 * (1.0 + abs(value))
+        if field == "mass_damping_coefficient" and value <= 0.0:
+            fd[i] = (rollout_loss(field, value + h) - rollout_loss()) / h
+        else:
+            fd[i] = (rollout_loss(field, value + h) - rollout_loss(field, value - h)) / (
+                2.0 * h
+            )
+    return fd
+
+
+class SoftMaterialGradientTest(unittest.TestCase):
+    """dL/d(Young's modulus, Poisson's ratio, density, mass damping).
+
+    Measured on 2026-09-01 (3 steps): per-field agreement with the rollout
+    FD between 2e-9 and 1.7e-6 relative on the squashed free cube (with and
+    without mass damping) and on the contact scene; the E/rho homogeneity
+    invariant holds to 1e-10 (3 steps) and 1e-7 (8 steps). Tolerances keep
+    >= 50x headroom.
+    """
+
+    def _compare(self, adjoint, fd, tol: float) -> None:
+        for i, field in enumerate(MATERIAL_FIELDS):
+            denom = max(abs(adjoint[i]), abs(fd[i]))
+            self.assertGreater(denom, 1e-13, f"{field}: test is vacuous")
+            self.assertLessEqual(
+                abs(adjoint[i] - fd[i]) / denom,
+                tol,
+                f"{field}: adjoint={adjoint[i]:.6e}, fd={fd[i]:.6e}",
+            )
+
+    def _run(self, scene_factory, num_steps: int = NUM_STEPS):
+        scene, cube = scene_factory()
+        self.addCleanup(physics.destroy_scene, scene)
+        _configure(scene)
+        base = {f: _material_get(cube.get_soft_material_params(), f) for f in MATERIAL_FIELDS}
+        adjoint = _material_adjoint(scene, cube, num_steps)
+        return adjoint, base
+
+    def test_squashed_free_cube_vs_fd_and_homogeneity(self) -> None:
+        factory = lambda: scenes.soft_cube(mass_damping=2.0, squash=0.1)
+        adjoint, base = self._run(factory)
+        fd = _material_fd(factory, NUM_STEPS, base)
+        self._compare(adjoint, fd, 1e-4)
+        # Closed form: without contact the motion depends on E and rho only
+        # through E/rho, so the gradients are homogeneous of degree zero in
+        # (E, rho): E dL/dE + rho dL/drho = 0.
+        e_term = base["youngs_modulus"] * adjoint[0]
+        rho_term = base["density"] * adjoint[2]
+        self.assertGreater(abs(e_term), 0.0, "test is vacuous")
+        self.assertLessEqual(abs(e_term + rho_term), 1e-8 * max(abs(e_term), abs(rho_term)))
+
+    def test_homogeneity_holds_over_long_rollout(self) -> None:
+        adjoint, base = self._run(
+            lambda: scenes.soft_cube(mass_damping=2.0, squash=0.1), num_steps=8
+        )
+        e_term = base["youngs_modulus"] * adjoint[0]
+        rho_term = base["density"] * adjoint[2]
+        self.assertGreater(abs(e_term), 0.0, "test is vacuous")
+        self.assertLessEqual(abs(e_term + rho_term), 1e-5 * max(abs(e_term), abs(rho_term)))
+
+    def test_mass_damping_at_zero_is_the_right_derivative(self) -> None:
+        # alpha = 0 sits on the engine's gate (alpha > 0 enables the term):
+        # the reported value must be the one-sided derivative, matching a
+        # forward difference, and be as large as with damping switched on.
+        factory = lambda: scenes.soft_cube(squash=0.1)
+        adjoint, base = self._run(factory)
+        self.assertEqual(base["mass_damping_coefficient"], 0.0)
+        fd = _material_fd(factory, NUM_STEPS, base)
+        self._compare(adjoint, fd, 1e-4)
+        self.assertGreater(abs(adjoint[3]), 1e-6)
+
+    def test_undeformed_free_fall_has_no_elastic_or_density_sensitivity(self) -> None:
+        # Rigid translation of an undeformed body: E, nu and rho cannot matter
+        # (mass cancels under gravity), while mass damping still does. The
+        # residual differences behind the E/nu/rho entries are pure round-off
+        # here (measured 4e-16 against a damping gradient of 3e-5).
+        adjoint, _base = self._run(lambda: scenes.soft_cube())
+        self.assertGreater(abs(adjoint[3]), 1e-6, "test is vacuous")
+        self.assertLessEqual(np.abs(adjoint[:3]).max(), 1e-9 * abs(adjoint[3]))
+
+    def test_contact_scene_vs_fd(self) -> None:
+        factory = lambda: scenes.soft_cube_on_plane("rich", mass_damping=1.0)
+        adjoint, base = self._run(factory)
+        fd = _material_fd(factory, NUM_STEPS, base)
+        self._compare(adjoint, fd, 1e-4)
+        # Contact forces are density-independent, so the homogeneity closed
+        # form must NOT hold here (it is a free-body property).
+        e_term = base["youngs_modulus"] * adjoint[0]
+        rho_term = base["density"] * adjoint[2]
+        self.assertGreater(abs(e_term + rho_term), 1e-2 * max(abs(e_term), abs(rho_term)))
+
+    def test_contract_errors_and_reset(self) -> None:
+        # Rigid actors have no soft material.
+        scene, cube = scenes.rigid_free()
+        self.addCleanup(physics.destroy_scene, scene)
+        _configure(scene)
+        with self.assertRaisesRegex(physics.Error, "soft actors"):
+            diffsim.set_soft_material_params_backward(cube, np.zeros(4))
+
+        # Read before any sweep.
+        scene, jelly = scenes.soft_cube(squash=0.1)
+        self.addCleanup(physics.destroy_scene, scene)
+        _configure(scene)
+        diffsim.reset_back_propagation(scene)
+        with self.assertRaisesRegex(physics.Error, "not part of a back-propagated island"):
+            diffsim.set_soft_material_params_backward(jelly, np.zeros(4))
+        with self.assertRaisesRegex(physics.Error, "size must be 4"):
+            diffsim.set_soft_material_params_backward(jelly, np.zeros(3))
+
+        # Reset zeroes an accumulated gradient.
+        grad = _material_adjoint(scene, jelly, NUM_STEPS)
+        self.assertGreater(np.abs(grad).max(), 0.0)
+        diffsim.reset_back_propagation(scene)
+        zeroed = np.ones(4)
+        diffsim.set_soft_material_params_backward(jelly, zeroed)
+        np.testing.assert_array_equal(zeroed, np.zeros(4))
+
+        # A per-element material field (heterogeneous parameters) is out of scope.
+        field_params = jelly.get_soft_material_params()
+        _material_set(field_params, "youngs_modulus", 2.0e5)
+        physics.experimental.set_soft_material_params_field(jelly, field_params, 0)
+        with self.assertRaisesRegex(physics.Error, "per-element material field"):
+            diffsim.set_soft_material_params_backward(jelly, np.zeros(4))
+
+    def test_non_lame_material_rejected(self) -> None:
+        scene = physics.create_scene("soft_arap")
+        self.addCleanup(physics.destroy_scene, scene)
+        scene.set_gravity(scenes.GRAVITY)
+        cube = scene.create_soft_actor(
+            name="jelly",
+            shape=scenes.cube_shape(),
+            material=physics.SoftMaterialParams(
+                type=physics.SoftMaterialType.ARAP,
+                arap=physics.ArapMaterialParams(stiffness=1.0e5),
+            ),
+        )
+        _configure(scene)
+        num_nodes = cube.get_num_dofs() // 3
+        diffsim.reset_back_propagation(scene)
+        pre = scene.capture_state()
+        scene.step(DT)
+        post = scene.capture_state()
+        diffsim.prepare_back_propagate(scene, post, pre)
+        diffsim.get_displacements_backward(cube, _loss_grad(cube, num_nodes))
+        diffsim.back_propagate(scene)
+        with self.assertRaisesRegex(physics.Error, "Lame-type"):
+            diffsim.set_soft_material_params_backward(cube, np.zeros(4))
+        scene.release_all_states()
 
 
 if __name__ == "__main__":

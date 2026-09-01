@@ -3050,6 +3050,41 @@ void diffsim::SetDensityBackward(
   outGradDensity[0] = accumulated->value;
 }
 
+void diffsim::SetSoftMaterialParamsBackward(
+    Actor const* actor,
+    Span<real> outGradMaterialParams,
+    Error& error) {
+  MOCHI_ERROR_RETURN_IF_BACKWARD_NOT_SUPPORTED(const);
+  MOCHI_ERROR_IF_NOT(
+      isize(outGradMaterialParams) == kNumSoftMaterialParamGradients,
+      error,
+      "outGradMaterialParams size must be 4.");
+  MOCHI_ERROR_IF_NOT(
+      actor->GetType() == ActorType::Soft && reg.all_of<TagSoftActor>(e) &&
+          reg.all_of<CSoftMaterialParams>(e),
+      error,
+      "Only standalone soft actors are supported.");
+  MOCHI_ERROR_RETURN(error);
+  MOCHI_ERROR_IF_NOT(
+      IsSoftMaterialGradientSupported(reg.get<CSoftMaterialParams const>(e)),
+      error,
+      "Soft material gradients cover homogeneous Lame-type materials (Neo-Hookean, "
+      "St. Venant-Kirchhoff, linear elastic) only; this actor uses another material model "
+      "or a per-element material field.");
+  MOCHI_ERROR_RETURN(error);
+
+  auto const* accumulated = reg.try_get<CDiffSoftMaterialGrad const>(e);
+  MOCHI_ERROR_IF(
+      accumulated == nullptr,
+      error,
+      "No soft material gradient was accumulated for this actor: it was not part of a "
+      "back-propagated island since ResetBackPropagation.");
+  MOCHI_ERROR_RETURN(error);
+  for (int i = 0; i < kNumSoftMaterialParamGradients; ++i) {
+    outGradMaterialParams[i] = accumulated->value[i];
+  }
+}
+
 void diffsim::SetVelocityBackward(
     Actor const* actor,
     Span<real> outGradLinearVel,

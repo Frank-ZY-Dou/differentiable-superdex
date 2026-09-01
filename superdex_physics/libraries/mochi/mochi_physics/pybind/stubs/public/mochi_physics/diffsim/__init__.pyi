@@ -281,6 +281,46 @@ def reset_back_propagation(scene: mochi_physics.Scene) -> None:
         :class:`~superdex.physics.Error`: If an error occurs.
     """
 
+def set_soft_material_params_backward(
+    actor: mochi_physics.Actor,
+    out_grad_material_params: mochi_physics.ArrayLikeReal,
+) -> None:
+    """Backward pass for :meth:`~superdex.physics.Actor.set_soft_material_params`
+    (standalone soft actors).
+
+    Reads the gradient of the loss with respect to this soft actor's material
+    parameters, accumulated by the engine over every
+    :func:`~superdex.physics.diffsim.back_propagate` call since
+    :func:`~superdex.physics.diffsim.reset_back_propagation`. Each step
+    contributes ``-lambda^T dR/dtheta`` by finite differences of the assembled
+    residual under perturbed parameters, where every perturbed parameter set
+    goes through the same conversion as the forward setter (the per-element
+    Lame constants are rebuilt from Young's modulus and Poisson's ratio;
+    density and mass damping enter the inertia, gravity and damping terms
+    directly), with a per-parameter relative step scaled by
+    :attr:`~superdex.physics.diffsim.BackPropagationSolverParams.eps_finite_diff`.
+
+    Gradient order (size 4): ``[youngs_modulus, poisson_ratio, density,
+    mass_damping_coefficient]``. Covers homogeneous Lame-type materials
+    (Neo-Hookean, St. Venant-Kirchhoff, linear elastic); other material models
+    and per-element material fields are rejected. Mass damping is gated at zero
+    in the assembly (a non-positive coefficient disables the term), so at
+    ``mass_damping_coefficient == 0`` the reported value is the right-sided
+    derivative - the direction an optimizer constrained to non-negative damping
+    can move in. Stiffness damping is not differentiated (differentiable soft
+    actors require it to be zero).
+
+    Args:
+        actor (Actor): The standalone soft actor owning the material.
+        out_grad_material_params (ArrayLikeReal): Gradient in the order above.
+            Must be of size 4. Overwritten, not accumulated into.
+
+    Raises:
+        :class:`~superdex.physics.Error`: If the actor is not a standalone soft
+            actor with a supported material, or was not part of any
+            back-propagated island since the last reset.
+    """
+
 def get_displacements_backward(
     actor: mochi_physics.Actor,
     grad_output: mochi_physics.ArrayLikeReal,
