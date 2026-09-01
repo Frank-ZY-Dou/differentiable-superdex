@@ -97,6 +97,11 @@ struct ExperimentalEvalParams {
    * regardless of fadeFriction (normal alignment cannot be computed).
    * @note fadeFriction = true adds a non-integrable term to the residual unless @ref
    * explicitNormals = true.
+   * @note Differentiable scenes override fadeFriction to false: with explicit normals the fading
+   * factor is constant within a step but depends on the stage-start orientations of both bodies,
+   * which the GradTarget::Previous assembly treats as constants, so faded friction gives wrong
+   * previous-state adjoint couplings whenever the contacting surfaces rotate relative to each
+   * other.
    *
    * @see ContactParams::maxAlignmentNormals
    */

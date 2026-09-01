@@ -327,21 +327,48 @@ def chain_pushing_cube(friction: str = "rich"):
     plane: articulated-vs-dynamic-rigid *sync* contact (same island), the one
     contact combination the other scenes do not exercise. Returns (scene, chain,
     cube); the loss target is the cube."""
-    scene = physics.create_scene(f"diffsim_chain_pushing_cube_{friction}")
+    return chain_pushing_cube_with_params(contact_params(friction))
+
+
+def chain_pushing_cube_with_params(
+    cp,
+    *,
+    chain_cp=None,
+    cube_cp=None,
+    ground_cp=None,
+    cube_collider: bool = True,
+    link_collider: bool = True,
+):
+    """:func:`chain_pushing_cube` with explicit contact parameters: ``cp`` for every
+    actor unless overridden per actor (a contact pair combines both owners'
+    parameters by geometric mean, so a zero coefficient on one owner makes the
+    pair frictionless). ``cube_collider`` / ``link_collider`` select which body
+    owns an SDF collider, i.e. whose surface the other body's samples are tested
+    against (both by default)."""
+    chain_cp = cp if chain_cp is None else chain_cp
+    cube_cp = cp if cube_cp is None else cube_cp
+    ground_cp = cp if ground_cp is None else ground_cp
+    cube_collider_type = (
+        physics.ColliderType.SDF if cube_collider else physics.ColliderType.NONE
+    )
+    link_collider_type = (
+        physics.ColliderType.SDF if link_collider else physics.ColliderType.NONE
+    )
+    scene = physics.create_scene("diffsim_chain_pushing_cube")
     scene.set_gravity(GRAVITY)
-    cp = contact_params(friction)
     scene.create_rigid_actor(
         name="ground",
         shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
         is_static=True,
-        contact=cp,
+        contact=ground_cp,
     )
     cube = scene.create_rigid_actor(
         name="cube",
         shape=cube_shape(),
         density=500.0,
-        contact=cp,
+        contact=cube_cp,
         world_from_local=physics.TransformRT([0.25, 0.0, 0.099]),
+        collider_type=cube_collider_type,
     )
     joints = [
         physics.ArticulatedJointParams(
@@ -356,10 +383,20 @@ def chain_pushing_cube(friction: str = "rich"):
     ]
     links = [
         physics.ArticulatedLinkParams(
-            name="l0", parent_link=-1, shape=cube_shape(), density=1000.0, contact=cp
+            name="l0",
+            parent_link=-1,
+            shape=cube_shape(),
+            density=1000.0,
+            contact=chain_cp,
+            collider_type=link_collider_type,
         ),
         physics.ArticulatedLinkParams(
-            name="l1", parent_link=0, shape=cube_shape(), density=1000.0, contact=cp
+            name="l1",
+            parent_link=0,
+            shape=cube_shape(),
+            density=1000.0,
+            contact=chain_cp,
+            collider_type=link_collider_type,
         ),
     ]
     chain = scene.create_articulated_actor(

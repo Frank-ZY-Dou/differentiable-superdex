@@ -40,9 +40,11 @@ from .harness import (
     GradientCheckCase,
     QuaternionErrorLoss,
     TranslationErrorLoss,
+    configure_for_differentiability,
     diffsim,
 )
 from . import scenes
+from superdex.physics.diffsim_rollout import DifferentiableRollout
 
 # Relative-error tolerances, following the internal C++ tests (default 1e-2,
 # contact/friction scenes up to 3e-2).
@@ -94,6 +96,168 @@ class DiffsimGradientTest(unittest.TestCase):
             f"{tol}:\n" + "\n".join(failures),
         )
         return reports
+
+    # -- sync contact between an articulated link and a dynamic rigid body ----
+    #
+    # These checks differentiate a 30-step rollout of the chain-pushes-cube scene
+    # w.r.t. the pose-controller targets with the rollout driver (no torch), and
+    # compare against central finite differences of the rollout loss at two step
+    # sizes (1e-5, 1e-6). An entry only counts when the two FD estimates agree
+    # to 1e-4 (at the contact onset the loss can be rougher than that), so that
+    # a rough loss can never hide a wrong adjoint nor fake one; at least two
+    # entries must count.
+
+    _ONSET_ENTRIES = (-1, 0, 1, 5)  # steps relative to the cube's first motion
+
+    def _chain_control_gradient_check(self, scene, chain, cube, speed=-1.2, num_steps=30):
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        dt = 0.01
+        goal = np.array([0.5, 0.0, 0.1])
+        controls = np.stack(
+            [np.linspace(0.0, speed, num_steps), np.zeros(num_steps)], axis=1
+        )
+
+        def loss_value():
+            d = np.asarray(cube.get_center_of_mass_transform().translation) - goal
+            return 0.5 * float(d @ d)
+
+        class CubeLoss:
+            def value(self):
+                return loss_value()
+
+            def accumulate_output_grad(self):
+                d = np.asarray(cube.get_center_of_mass_transform().translation) - goal
+                g = np.zeros(7)
+                g[:3] = d
+                diffsim.get_center_of_mass_transform_backward(cube, g)
+
+        state0 = scene.capture_state()
+
+        def rollout_loss(c):
+            scene.restore_state(state0, False)
+            for step in range(num_steps):
+                chain.set_articulated_target_pose(np.ascontiguousarray(c[step]))
+                scene.step(dt)
+            return loss_value()
+
+        # Forward once to find the step at which the cube starts moving.
+        scene.restore_state(state0, False)
+        onset = None
+        for step in range(num_steps):
+            chain.set_articulated_target_pose(np.ascontiguousarray(controls[step]))
+            scene.step(dt)
+            x = np.asarray(cube.get_center_of_mass_transform().translation)[0]
+            if onset is None and abs(x - 0.25) > 1e-6:
+                onset = step
+        self.assertIsNotNone(onset, "test is vacuous: the chain never moved the cube")
+
+        scene.restore_state(state0, False)
+        rollout = DifferentiableRollout(scene, dt=dt, num_steps=num_steps)
+        result = rollout.run(
+            apply_inputs=lambda step: chain.set_articulated_target_pose(
+                np.ascontiguousarray(controls[step])
+            ),
+            terminal_losses=[CubeLoss()],
+        )
+        adjoint = result.gradients["chain"].control_targets  # (2, num_steps)
+
+        rel_errors = {}
+        skipped = {}
+        for offset in self._ONSET_ENTRIES:
+            step = onset + offset
+            fds = []
+            for eps in (1e-5, 1e-6):
+                cp = controls.copy()
+                cp[step, 0] += eps
+                cm = controls.copy()
+                cm[step, 0] -= eps
+                fds.append((rollout_loss(cp) - rollout_loss(cm)) / (2.0 * eps))
+            scale = max(abs(fds[0]), 1e-12)
+            fd_self = abs(fds[0] - fds[1]) / scale
+            if fd_self > 1e-4:
+                skipped[step] = fd_self
+                continue
+            rel_errors[step] = abs(adjoint[0, step] - fds[0]) / scale
+        scene.release_state(state0)
+        self.assertGreaterEqual(
+            len(rel_errors),
+            2,
+            f"too few smooth entries to judge the adjoint (skipped: {skipped})",
+        )
+        return rel_errors
+
+    def test_frictional_contact_with_rotating_surfaces_needs_fade_friction_off(self):
+        """The alignment fading of friction (``fade_friction``) scales the friction
+        normal force by a factor that depends on the stage-start orientations of
+        both bodies; the previous-state adjoint assembly treats that factor as a
+        constant. Differentiable scenes therefore override fade_friction to
+        false (mochi_scene.cpp), and with the override the adjoint of a chain
+        pushing a tipping cube (cube-ground friction, frictionless chain) is
+        exact. Measured 2026-09-01 on this scene: with fading 3e-4..1.8e-2
+        relative error at the contact onset, without 1e-7..2e-6."""
+        frictionless = physics.ContactParams(
+            penalty_coefficient=1e8, coulomb_friction_coefficient=0.0
+        )
+        scene, chain, cube = scenes.chain_pushing_cube_with_params(
+            scenes.contact_params("rich"), chain_cp=frictionless
+        )
+        self.addCleanup(physics.destroy_scene, scene)
+        sp = scene.get_solver_params()
+        ee = sp.experimental_eval
+        ee.fade_friction = True
+        sp.experimental_eval = ee
+        scene.set_solver_params(sp)
+        diffsim.make_scene_differentiable(scene)
+        self.assertFalse(
+            scene.get_solver_params().experimental_eval.fade_friction,
+            "make_scene_differentiable must switch fade_friction off",
+        )
+        sp = scene.get_solver_params()
+        ee = sp.experimental_eval
+        ee.fade_friction = True
+        sp.experimental_eval = ee
+        scene.set_solver_params(sp)
+        self.assertFalse(
+            scene.get_solver_params().experimental_eval.fade_friction,
+            "set_solver_params must keep fade_friction off in a differentiable scene",
+        )
+        rel_errors = self._chain_control_gradient_check(scene, chain, cube)
+        self.assertLessEqual(max(rel_errors.values()), 1e-4, rel_errors)
+
+    def test_link_as_collider_of_frictional_sync_contact_is_pinned_wrong(self):
+        """PINNED DEFECT (2026-09-01): with friction between an articulated link
+        and a dynamic rigid body in one island, the previous-state coupling of
+        the adjoint is wrong for the contacts whose *collider* (SDF owner) is the
+        link, i.e. the rigid body's samples against the link's surface, while
+        the link's samples against the rigid body's surface are exact. Each step
+        is off by 1e-3 (configuration dependent; zero for a prismatic link, so
+        it needs the link to rotate) and the errors compound over a rollout.
+        Measured on this scene, viscous friction, 30 steps: 1e-2..2e-1 with the
+        link as collider (1.1e-2 and 2.7e-2 at the two entries after the onset,
+        where the loss is smooth to 3e-5), 3e-7 with the link as colliding body.
+        The test asserts both so that a fix flips the first assertion."""
+        viscous = physics.ContactParams(
+            penalty_coefficient=1e8,
+            coulomb_friction_coefficient=0.0,
+            viscous_friction_coefficient=0.1,
+        )
+        with self.subTest("link samples vs cube SDF (link is the colliding body)"):
+            scene, chain, cube = scenes.chain_pushing_cube_with_params(
+                viscous, link_collider=False
+            )
+            rel_errors = self._chain_control_gradient_check(scene, chain, cube)
+            self.assertLessEqual(max(rel_errors.values()), 1e-5, rel_errors)
+        with self.subTest("cube samples vs link SDF (link is the collider)"):
+            scene, chain, cube = scenes.chain_pushing_cube_with_params(
+                viscous, cube_collider=False
+            )
+            rel_errors = self._chain_control_gradient_check(scene, chain, cube)
+            self.assertGreater(
+                max(rel_errors.values()),
+                5e-3,
+                f"the pinned link-as-collider defect no longer shows: {rel_errors}",
+            )
 
     # -- rigid ---------------------------------------------------------------
 

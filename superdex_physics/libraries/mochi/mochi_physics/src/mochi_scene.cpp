@@ -584,6 +584,19 @@ void SceneImpl::SetSolverParams(SolverParams const& params, Error& error) {
         "Differentiable scenes require explicit normals for contact. Overriding input params.");
     storedParams.experimentalEval.explicitNormals = true;
   }
+  if (_registry.try_ctx<TagDifferentiableScene>() && params.experimentalEval.fadeFriction) {
+    // The alignment fading factor scales the dissipation normal force by a function of the
+    // colliding and collider normals. With explicit normals both are evaluated at stage start, so
+    // the factor is constant within the step, but it depends on the stage-start orientations of
+    // both bodies and the previous-state adjoint assembly (GradTarget::Previous) treats it as a
+    // constant: the previous-state coupling then misses the derivative of the factor w.r.t. the
+    // stage-start rotations, and the gradients are wrong by an amount that grows with the
+    // relative rotation of the contacting surfaces (measured 1e-2..1e1 relative).
+    MOCHI_LOG_WARNING(
+        "Differentiable scenes require fadeFriction = false (friction fading by normal alignment "
+        "makes the contact residual non-conservative). Overriding input params.");
+    storedParams.experimentalEval.fadeFriction = false;
+  }
 }
 
 void SceneImpl::Step(double timeStepSec) {
@@ -1120,6 +1133,14 @@ void SceneImpl::ApplyImprovedConvergenceSettings(bool logWarnings) {
   // Do not log warning; this is a non-default value.
   solverParams.experimentalEval.explicitNormals = true;
 
+  // Set SolverParams.experimentalEval.fadeFriction = false: the fading factor makes the friction
+  // residual non-conservative, which breaks the adjoint (see SceneImpl::SetSolverParams).
+  if (logWarnings && solverParams.experimentalEval.fadeFriction) {
+    MOCHI_LOG_WARNING_ONCE(
+        "\nOverriding SolverParams.experimentalEval.fadeFriction = true. Setting to false");
+  }
+  solverParams.experimentalEval.fadeFriction = false;
+
   // Set SolverParams.nonlinearSolver.lineSearchType = LineSearchType::Armijo.
   // Do not log warning; this is a non-default value.
   solverParams.nonLinearSolver.lineSearchType = LineSearchType::Armijo;
@@ -1160,6 +1181,11 @@ void SceneImpl::WarnIfNotImprovedConvergenceSettings() const {
   // Validate SolverParams.experimentalEval.explicitNormals = true.
   if (!solverParams.experimentalEval.explicitNormals) {
     MOCHI_LOG_WARNING_ONCE("\nExpected SolverParams.experimentalEval.explicitNormals = true.");
+  }
+
+  // Validate SolverParams.experimentalEval.fadeFriction = false.
+  if (solverParams.experimentalEval.fadeFriction) {
+    MOCHI_LOG_WARNING_ONCE("\nExpected SolverParams.experimentalEval.fadeFriction = false.");
   }
 
   // Validate SolverParams.nonlinearSolver.lineSearchType = LineSearchType::Armijo.

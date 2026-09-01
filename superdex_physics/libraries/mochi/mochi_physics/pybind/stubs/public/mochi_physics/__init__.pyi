@@ -3735,6 +3735,13 @@ class ExperimentalEvalParams:
     between colliding and collider normals.
 
     Note:
+        A differentiable scene requires fadeFriction = false and overrides the
+        input value: the fading factor depends on the stage-start orientations
+        of both bodies, which the previous-state adjoint assembly treats as
+        constants, so faded friction gives wrong gradients whenever the
+        contacting surfaces rotate relative to each other.
+
+    Note:
         For co-dimensional colliding actors with ambiguous normals, friction fading
         is disabled regardless of fadeFriction (normal alignment cannot be
         computed).

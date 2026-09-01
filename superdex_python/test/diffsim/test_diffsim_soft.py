@@ -622,21 +622,27 @@ def _tilted_soft_cube_on_plane(tilt_deg: float, max_alignment_normals: float):
 
 
 class SoftContactApproximationPinTest(unittest.TestCase):
-    """Pins the one approximation of the contact adjoint (shared with the
-    rigid path, which was measured under the identical probe).
+    """Guards the removal of the one approximation of the contact adjoint
+    (shared with the rigid path, which was measured under the identical
+    probe).
 
     With explicit normals the dissipative terms use the colliding surface
     normal evaluated at the stage start, which depends on the previous state
     (nodal displacements here, the rotation for rigid bodies). Both the rigid
     and the soft GradTarget::Previous assemblies treat that normal as a
-    constant. Where it enters - the alignment-fading factor (max_alignment -
-    n_collider . n_colliding) / (max_alignment + 1) - the dropped term is
-    zero for flat contact (the dot product is stationary at anti-alignment)
-    and O(sin(tilt) / (max_alignment_normals + 1)) otherwise. Measured
-    2026-09-01 on a 5-degree tilt: 2.4e-6 at the default fading (noise
-    floor), 6.9e-5 with max_alignment_normals = -0.9, 6.8e-4 with -0.99
-    (rigid path under the same probe: 8.2e-5 and 8.3e-4). The lower bound
-    below flips this test when the term gets implemented.
+    constant. It enters only through the alignment-fading factor
+    (max_alignment - n_collider . n_colliding) / (max_alignment + 1), whose
+    dropped derivative is zero for flat contact (the dot product is
+    stationary at anti-alignment) and O(sin(tilt) / (max_alignment_normals +
+    1)) otherwise. Measured 2026-09-01 on a 5-degree tilt with fading on:
+    2.4e-6 at the default fading (noise floor), 6.9e-5 with
+    max_alignment_normals = -0.9, 6.8e-4 with -0.99 (rigid path under the
+    same probe: 8.2e-5 and 8.3e-4); on rotating rigid bodies the same term
+    reaches 1e-2..1e1. Since 2026-09-01 differentiable scenes force
+    fade_friction = false (mochi_scene.cpp), which removes the factor and
+    with it the dropped term: the amplified configuration measures 1.1e-8.
+    The amplified test therefore asserts exactness and flips if the override
+    is ever removed.
     """
 
     def _rel_error(self, max_alignment_normals: float) -> float:
@@ -657,10 +663,15 @@ class SoftContactApproximationPinTest(unittest.TestCase):
     def test_tilted_contact_default_fading_agrees(self) -> None:
         self.assertLessEqual(self._rel_error(0.0), 1e-4)
 
-    def test_tilted_contact_amplified_fading_shows_dropped_term(self) -> None:
-        err = self._rel_error(-0.99)
-        self.assertGreater(err, 1e-4, "dropped normal derivative no longer visible")
-        self.assertLess(err, 3e-3)
+    def test_tilted_contact_amplified_fading_is_exact_with_fading_off(self) -> None:
+        scene, _ = _tilted_soft_cube_on_plane(5.0, -0.99)
+        self.addCleanup(physics.destroy_scene, scene)
+        _configure(scene)
+        self.assertFalse(
+            scene.get_solver_params().experimental_eval.fade_friction,
+            "differentiable scenes must run with fade_friction off",
+        )
+        self.assertLessEqual(self._rel_error(-0.99), 1e-4)
 
 
 MATERIAL_FIELDS = (
