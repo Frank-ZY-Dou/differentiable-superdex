@@ -23,14 +23,17 @@ low-level. :class:`DifferentiableRollout` wraps it into one object that
 - accepts terminal and per-step (running) losses,
 - runs the reverse sweep newest-step-first, optionally truncated to the last
   ``truncation_window`` steps (truncated BPTT),
-- collects gradients w.r.t. the initial pose and velocity, per-step
-  pose-controller targets, and per-step external forces (all six DoFs of a
-  standalone rigid actor; the single-DoF joints of an articulated one),
+- collects gradients w.r.t. the initial pose and velocity (for soft actors:
+  the initial nodal displacements and velocities), per-step pose-controller
+  targets, and per-step external forces (all six DoFs of a standalone rigid
+  actor; the single-DoF joints of an articulated one; soft actors take no
+  external forces),
 - optionally clips each gradient block to a maximum L2 norm, and
 - aggregates the solver diagnostics (finite-difference validity, worst
   adjoint residual, summed solve time) across the sweep.
 
-Requirements are those of ``diffsim`` itself: rigid/articulated actors,
+Requirements are those of ``diffsim`` itself: rigid, articulated and
+standalone soft actors (soft contact against static colliders only),
 Backward Euler, double precision recommended, and the per-step protocol -
 inputs are applied first, then the pre-step state is captured, then the scene
 steps (no input changes in between).
@@ -76,6 +79,7 @@ class _ActorEntry:
     actor: object
     name: str
     articulated: bool
+    soft: bool
     dofs_size: int
     pose_size: int
     has_controller: bool
@@ -89,16 +93,16 @@ def _collect_actors(scene) -> list[_ActorEntry]:
     for actor in actors:
         if actor.is_static() or actor.is_nested_link_actor():
             continue
-        if actor.get_type() == physics.ActorType.SOFT:
-            raise NotImplementedError(
-                "DifferentiableRollout does not drive soft actors yet; use the "
-                "per-step diffsim API (prepare_back_propagate/back_propagate with "
-                "get_displacements_backward etc.) directly"
-            )
+        soft = actor.get_type() == physics.ActorType.SOFT
         articulated = actor.get_type() == physics.ActorType.ARTICULATED
         dofs = actor.get_num_dofs()
         has_controller = articulated and actor.has_articulated_pose_controller()
-        if articulated:
+        if soft:
+            # Soft actors carry no external forces and no controller; their
+            # differentiable "inputs" are the initial nodal state read at the
+            # end of the sweep (plus the scene-level parameter gradients).
+            force_dofs = []
+        elif articulated:
             force_dofs = []
             info = actor.get_articulated_shape_info()
             for entry in info.dof_info:
@@ -120,8 +124,9 @@ def _collect_actors(scene) -> list[_ActorEntry]:
                 actor,
                 name,
                 articulated,
+                soft,
                 dofs,
-                dofs if articulated else RIGID_POSE_SIZE,
+                dofs if (articulated or soft) else RIGID_POSE_SIZE,
                 has_controller,
                 force_dofs,
             )
@@ -144,12 +149,15 @@ class ActorGradients:
 
     ``initial_pose`` uses the actor's external pose representation (7-vector
     translation + quaternion for rigid actors, joint pose for articulated
-    ones); ``initial_velocity`` stacks linear+angular for rigid actors and
-    joint velocities for articulated ones. ``control_targets`` is
-    ``(num_dofs, num_steps)`` for actors with a pose controller, otherwise
-    ``None``; ``external_forces`` is ``(len(force_dofs), num_steps)`` -
-    ``force_dofs`` being all six DoFs for a standalone rigid actor and the
-    single-DoF joints for an articulated one - otherwise ``None``. Truncated sweeps leave the
+    ones, the local-frame nodal displacement vector for soft ones);
+    ``initial_velocity`` stacks linear+angular for rigid actors, joint
+    velocities for articulated ones, and the local-frame nodal velocity
+    vector for soft ones. ``control_targets`` is ``(num_dofs, num_steps)``
+    for actors with a pose controller, otherwise ``None``;
+    ``external_forces`` is ``(len(force_dofs), num_steps)`` - ``force_dofs``
+    being all six DoFs for a standalone rigid actor and the single-DoF joints
+    for an articulated one - otherwise ``None`` (always ``None`` for soft
+    actors, which take no external forces). Truncated sweeps leave the
     initial-state gradients as ``None`` (they would be incomplete) and only
     fill the steps the sweep visited.
     """
@@ -228,7 +236,14 @@ class DifferentiableRollout:
 
     def _read_initial_grads(self, grads) -> None:
         for entry, out in zip(self.entries, grads.values()):
-            if entry.articulated:
+            if entry.soft:
+                gu = np.zeros(entry.dofs_size)
+                diffsim.set_displacements_backward(entry.actor, gu)
+                gv = np.zeros(entry.dofs_size)
+                diffsim.set_node_velocities_local_backward(entry.actor, gv)
+                out.initial_pose = gu
+                out.initial_velocity = gv
+            elif entry.articulated:
                 gp = np.zeros(entry.dofs_size)
                 diffsim.set_articulated_pose_from_joints_backward(entry.actor, gp)
                 gv = np.zeros(entry.dofs_size)

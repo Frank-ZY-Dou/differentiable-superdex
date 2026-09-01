@@ -30,8 +30,13 @@ validation path on top of the suite's own FD tests.
   :class:`TorqueGradientApproximationTest`);
 - bridge loss equals the direct DifferentiableRollout loss;
 - repeated calls are deterministic (bitwise-equal loss and gradients);
+- gradcheck over a soft cube's initial nodal state + gravity + contact
+  parameters on the soft-on-plane contact scene (the ``initial_states``
+  group);
 - contract violations (dtype, device via meta, shape, undeclared/missing
-  groups, static contact actor, controller-less control actor) raise loudly.
+  groups, static contact actor, controller-less control actor, soft actors
+  in the force/density groups, a rigid actor in the initial-state group)
+  raise loudly.
 
 Requires SUPERDEX_PRECISION=double; skips (loudly) if torch is unavailable.
 """
@@ -52,6 +57,7 @@ except ImportError:
 from . import scenes
 from .harness import (
     ArticulatedPoseErrorLoss,
+    DisplacementErrorLoss,
     QuaternionErrorLoss,
     TranslationErrorLoss,
     configure_for_differentiability,
@@ -328,6 +334,89 @@ class TorqueGradientApproximationTest(unittest.TestCase):
         # Measured 2.35e-2 relative, 5.3e-10 absolute.
         self.assertGreater(float(rel.max()), 5e-3, "approximation gone - update docs")
         self.assertLess(float(np.abs(adjoint - fd).max()), 1e-8)
+
+
+class GradcheckSoftTest(unittest.TestCase):
+    """Soft cube on a static plane: initial nodal state + gravity + contact."""
+
+    def test_gradcheck_initial_state_gravity_contact(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        num_steps = 3
+        scene, cube = scenes.soft_cube_on_plane("rich")
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        bridge = diffsim_torch.TorchRollout(
+            scene,
+            dt=DT,
+            num_steps=num_steps,
+            contact_actors=[cube],
+            initial_state_actors=[cube],
+            differentiate_gravity=True,
+            terminal_losses=[DisplacementErrorLoss(cube)],
+        )
+        self.addCleanup(bridge.close)
+        num_dofs = cube.get_num_dofs()
+        self.assertEqual(bridge.initial_state_size, 2 * num_dofs)
+
+        contact_base = torch.tensor([[1e8, 0.4, 0.1, 5.0]], dtype=torch.float64)
+
+        def f(initial_states, contact_scale, gravity):
+            return bridge(
+                initial_states=initial_states,
+                contact_params=contact_base * (1.0 + 0.05 * contact_scale),
+                gravity=gravity,
+            )
+
+        u0 = np.zeros(num_dofs)
+        v0 = np.tile(np.array([0.3, 0.0, 0.0]), num_dofs // 3)
+        initial_states = torch.tensor(
+            np.concatenate([u0, v0]), dtype=torch.float64, requires_grad=True
+        )
+        contact_scale = torch.zeros((1, 4), dtype=torch.float64, requires_grad=True)
+        gravity = torch.tensor([0.0, 0.0, -9.81], dtype=torch.float64, requires_grad=True)
+        self.assertTrue(
+            torch.autograd.gradcheck(
+                f,
+                (initial_states, contact_scale, gravity),
+                eps=1e-6,
+                atol=1e-8,
+                rtol=1e-4,
+            )
+        )
+        self.assertTrue(bridge.last_result.fd_valid)
+        # Vacuousness: the initial-state gradient must be non-trivial.
+        loss = f(initial_states, contact_scale, gravity)
+        loss.backward()
+        self.assertGreater(float(initial_states.grad.abs().max()), 0.0)
+
+    def test_soft_actor_group_contracts(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, cube = scenes.soft_cube_on_plane("rich")
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        losses = [DisplacementErrorLoss(cube)]
+        with self.assertRaisesRegex(ValueError, "no external forces"):
+            diffsim_torch.TorchRollout(
+                scene, dt=DT, num_steps=2, force_actors=[cube], terminal_losses=losses
+            )
+        with self.assertRaisesRegex(ValueError, "density"):
+            diffsim_torch.TorchRollout(
+                scene, dt=DT, num_steps=2, density_actors=[cube], terminal_losses=losses
+            )
+
+    def test_rigid_initial_state_group_not_implemented(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, cube = scenes.rigid_on_plane("rich")
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        with self.assertRaisesRegex(NotImplementedError, "soft actors only"):
+            diffsim_torch.TorchRollout(
+                scene,
+                dt=DT,
+                num_steps=2,
+                initial_state_actors=[cube],
+                terminal_losses=[TranslationErrorLoss(cube)],
+            )
 
 
 class ContractTest(unittest.TestCase):

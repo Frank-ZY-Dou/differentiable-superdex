@@ -20,7 +20,11 @@
   the summed rollout objective;
 - truncation semantics: the newest step's control gradient is unaffected,
   initial-state gradients are withheld, steps before the window stay zero;
-- gradient clipping caps every block's L2 norm.
+- gradient clipping caps every block's L2 norm;
+- soft actors: the driver's initial nodal displacement/velocity gradients on
+  a soft cube in contact with a static plane equal the hand-written per-step
+  sweep bit-for-bit, a driver running loss on a soft cube matches central
+  finite differences, and truncation withholds the initial-state gradients.
 
 Requires SUPERDEX_PRECISION=double.
 """
@@ -37,10 +41,13 @@ from superdex.physics.diffsim_rollout import DifferentiableRollout
 from . import scenes
 from .harness import (
     ArticulatedPoseErrorLoss,
+    DisplacementErrorLoss,
     GradientCheckCase,
     TranslationErrorLoss,
     configure_for_differentiability,
 )
+
+diffsim = physics.diffsim
 
 _NUM_WORKER_THREADS = int(os.environ.get("SUPERDEX_DIFFSIM_TEST_THREADS", "0"))
 DT = 0.01
@@ -308,6 +315,111 @@ class RigidExternalForceGradientTest(unittest.TestCase):
 
         self.assertTrue(np.any(np.abs(fd) > 0.0), "test is vacuous")
         np.testing.assert_allclose(adjoint, fd, rtol=1e-6, atol=1e-12)
+
+
+class SoftRolloutTest(unittest.TestCase):
+    """The driver on standalone soft actors (phase 5b/5c)."""
+
+    def test_matches_manual_sweep_on_contact_scene(self) -> None:
+        num_steps = 4
+
+        def build():
+            scene, cube = scenes.soft_cube_on_plane("rich")
+            configure_for_differentiability(scene)
+            return scene, cube
+
+        # Hand-written sweep with the raw per-step API.
+        scene, cube = build()
+        self.addCleanup(physics.destroy_scene, scene)
+        loss = DisplacementErrorLoss(cube)
+        num_dofs = cube.get_num_dofs()
+        pre, post = [], []
+        for _ in range(num_steps):
+            pre.append(scene.capture_state())
+            scene.step(DT)
+            post.append(scene.capture_state())
+        manual_loss = loss.value()
+        diffsim.reset_back_propagation(scene)
+        for i in range(num_steps, 0, -1):
+            diffsim.prepare_back_propagate(scene, post[i - 1], pre[i - 1])
+            if i == num_steps:
+                loss.accumulate_output_grad()
+            diffsim.back_propagate(scene)
+        manual_u0 = np.zeros(num_dofs)
+        diffsim.set_displacements_backward(cube, manual_u0)
+        manual_v0 = np.zeros(num_dofs)
+        diffsim.set_node_velocities_local_backward(cube, manual_v0)
+        scene.release_all_states()
+
+        # The driver on a fresh, identical scene.
+        scene2, cube2 = build()
+        self.addCleanup(physics.destroy_scene, scene2)
+        rollout = DifferentiableRollout(scene2, dt=DT, num_steps=num_steps)
+        result = rollout.run(terminal_losses=[DisplacementErrorLoss(cube2)])
+        grads = result.gradients[cube2.get_name()]
+        self.assertTrue(result.fd_valid)
+        self.assertEqual(result.steps_swept, num_steps)
+        self.assertEqual(result.loss, manual_loss)
+        self.assertGreater(np.abs(manual_u0).max(), 0.0, "test is vacuous")
+        np.testing.assert_array_equal(grads.initial_pose, manual_u0)
+        np.testing.assert_array_equal(grads.initial_velocity, manual_v0)
+        self.assertIsNone(grads.control_targets)
+        self.assertIsNone(grads.external_forces)
+        self.assertEqual(grads.force_dofs, [])
+
+    def test_running_loss_vs_fd(self) -> None:
+        num_steps = 3
+
+        def build():
+            scene, cube = scenes.soft_cube(squash=0.05)
+            configure_for_differentiability(scene)
+            return scene, cube
+
+        scene, cube = build()
+        self.addCleanup(physics.destroy_scene, scene)
+        num_dofs = cube.get_num_dofs()
+        u0 = np.array(cube.get_displacements())
+        v0 = np.tile(np.array([0.3, 0.0, 0.0]), num_dofs // 3)
+        rollout = DifferentiableRollout(scene, dt=DT, num_steps=num_steps)
+        result = rollout.run(step_losses=lambda _step: [DisplacementErrorLoss(cube)])
+        adjoint = result.gradients[cube.get_name()].initial_pose
+        self.assertTrue(result.fd_valid)
+
+        def rollout_loss(u_init: np.ndarray) -> float:
+            fd_scene, fd_cube = build()
+            try:
+                fd_cube.set_displacements(u_init)
+                fd_cube.set_node_velocities_local(v0)
+                fd_loss = DisplacementErrorLoss(fd_cube)
+                total = 0.0
+                for _ in range(num_steps):
+                    fd_scene.step(DT)
+                    total += fd_loss.value()
+                return total
+            finally:
+                physics.destroy_scene(fd_scene)
+
+        eps = 1e-6
+        fd = np.zeros(num_dofs)
+        for i in range(num_dofs):
+            plus, minus = u0.copy(), u0.copy()
+            plus[i] += eps
+            minus[i] -= eps
+            fd[i] = (rollout_loss(plus) - rollout_loss(minus)) / (2 * eps)
+        self.assertGreater(np.abs(fd).max(), 0.0, "test is vacuous")
+        # Same scene and tolerance as SoftRunningLossTest in test_diffsim_soft.
+        np.testing.assert_allclose(adjoint, fd, rtol=1e-6, atol=1e-12)
+
+    def test_truncation_withholds_initial_state(self) -> None:
+        scene, cube = scenes.soft_cube_on_plane("rich")
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        rollout = DifferentiableRollout(scene, dt=DT, num_steps=3, truncation_window=1)
+        result = rollout.run(terminal_losses=[DisplacementErrorLoss(cube)])
+        self.assertEqual(result.steps_swept, 1)
+        grads = result.gradients[cube.get_name()]
+        self.assertIsNone(grads.initial_pose)
+        self.assertIsNone(grads.initial_velocity)
 
 
 def scene_full_actor(scene):

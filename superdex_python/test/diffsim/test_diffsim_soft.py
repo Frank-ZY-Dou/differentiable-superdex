@@ -50,7 +50,9 @@ fading on a tilted cube must show that error (upper AND lower bound).
 
 Loud-contract tests pin the remaining exclusions: sync (dynamic-dynamic)
 contact involving a soft actor, stiffness damping, missing inertia, Dirichlet
-BCs, the rollout-driver gate, and the forced recentering disable.
+BCs, and the forced recentering disable. (The DifferentiableRollout driver
+and the torch bridge drive soft actors since 5c; see test_diffsim_rollout /
+test_diffsim_torch.)
 
 Requires SUPERDEX_PRECISION=double and a native build with the soft adjoint.
 """
@@ -408,14 +410,6 @@ class SoftContractTest(unittest.TestCase):
         self.assertGreater(np.abs(grad_alone).max(), 0.0, "test is vacuous")
         np.testing.assert_allclose(grad, grad_alone, rtol=1e-12, atol=0.0)
 
-    def test_rollout_driver_gates_soft_actors(self) -> None:
-        from superdex.physics.diffsim_rollout import DifferentiableRollout
-
-        scene, _cube = scenes.soft_cube()
-        self.addCleanup(physics.destroy_scene, scene)
-        _configure(scene)
-        with self.assertRaisesRegex(NotImplementedError, "soft actors"):
-            DifferentiableRollout(scene, dt=DT, num_steps=2)
 
 
 def _final_displacements(scene_factory, num_steps: int = NUM_STEPS) -> np.ndarray:

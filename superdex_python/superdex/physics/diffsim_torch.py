@@ -33,7 +33,18 @@ Differentiable inputs (each group is opt-in at construction):
 - ``contact_params`` - per-actor contact material parameters, shape
   ``(num_contact_actors, 4)`` in the engine's gradient order
   :data:`CONTACT_PARAM_FIELDS`;
-- ``densities`` - per-actor mass densities, shape ``(num_density_actors,)``.
+- ``densities`` - per-actor mass densities, shape ``(num_density_actors,)``;
+- ``initial_states`` - the initial nodal state of soft actors, shape
+  ``(total_initial_state_size,)``: per declared actor its local-frame nodal
+  displacements followed by its nodal velocities (both ``num_dofs`` long).
+  Soft actors only for now: their state is a plain vector space, whereas the
+  rigid/articulated initial state lives on a manifold (quaternion chart); the
+  driver's ``RolloutResult`` still carries those gradients.
+
+Soft actors take part in the ``contact_params`` and ``initial_states`` groups
+and in the gravity gradient; they carry no external forces, no controller
+and no density gradient (the soft material parameters are not differentiable
+yet), so declaring one in those groups is an error.
 
 Design and contract:
 
@@ -143,7 +154,7 @@ class _ForceEntry:
 
 
 class _RolloutLoss(torch.autograd.Function):
-    """(controls, forces, gravity, contact, densities) -> scalar loss.
+    """(controls, forces, gravity, contact, densities, initial_states) -> loss.
 
     Forward runs the rollout AND the adjoint sweep (the engine needs the
     captured step states); backward scales the stashed input gradients by
@@ -152,8 +163,8 @@ class _RolloutLoss(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, bridge, controls, forces, gravity, contact, densities):
-        grads = bridge._run(controls, forces, gravity, contact, densities)
+    def forward(ctx, bridge, controls, forces, gravity, contact, densities, initial_states):
+        grads = bridge._run(controls, forces, gravity, contact, densities, initial_states)
         ctx.saved_grads = grads
         return torch.tensor(bridge.last_result.loss, dtype=torch.float64)
 
@@ -180,6 +191,7 @@ class TorchRollout:
         force_actors: Sequence = (),
         contact_actors: Sequence = (),
         density_actors: Sequence = (),
+        initial_state_actors: Sequence = (),
         differentiate_gravity: bool = False,
         terminal_losses: Sequence = (),
         step_losses: Callable[[int], Sequence] | None = None,
@@ -217,6 +229,11 @@ class TorchRollout:
         self._force_entries: list[_ForceEntry] = []
         for actor in force_actors:
             entry = _entry(actor, "force")
+            if entry.soft:
+                raise ValueError(
+                    f"force actor {entry.name!r} is a soft actor; soft actors "
+                    "take no external forces"
+                )
             if entry.articulated:
                 if not entry.force_dofs:
                     raise ValueError(
@@ -238,6 +255,26 @@ class TorchRollout:
                     "colliders are not part of back-propagated islands and "
                     "have no parameter gradients"
                 )
+        for actor in self._density_actors:
+            if _entry(actor, "density").soft:
+                raise ValueError(
+                    f"density actor {actor.get_name()!r} is a soft actor; the "
+                    "density gradient covers rigid-body inertia owners only "
+                    "(soft material parameters are not differentiable yet)"
+                )
+
+        self._initial_state_entries = []
+        for actor in initial_state_actors:
+            entry = _entry(actor, "initial-state")
+            if not entry.soft:
+                raise NotImplementedError(
+                    f"initial-state actor {entry.name!r} is not a soft actor; the "
+                    "initial_states group covers soft actors only (rigid and "
+                    "articulated initial-state gradients are available from "
+                    "DifferentiableRollout results)"
+                )
+            self._initial_state_entries.append(entry)
+        self.initial_state_size = 2 * sum(e.dofs_size for e in self._initial_state_entries)
 
         # Names for gradient lookup (rollout results are keyed by name).
         self._control_names = [e.name for e in self._control_actors]
@@ -261,6 +298,7 @@ class TorchRollout:
         gravity: torch.Tensor | None = None,
         contact_params: torch.Tensor | None = None,
         densities: torch.Tensor | None = None,
+        initial_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
         def check(name, value, declared, shape):
             if declared and value is None:
@@ -276,13 +314,14 @@ class TorchRollout:
         check("gravity", gravity, self.differentiate_gravity, None)
         check("contact_params", contact_params, bool(self._contact_actors), None)
         check("densities", densities, bool(self._density_actors), None)
+        check("initial_states", initial_states, bool(self._initial_state_entries), None)
         return _RolloutLoss.apply(
-            self, controls, forces, gravity, contact_params, densities
+            self, controls, forces, gravity, contact_params, densities, initial_states
         )
 
     # -- engine side -------------------------------------------------------
 
-    def _run(self, controls, forces, gravity, contact, densities):
+    def _run(self, controls, forces, gravity, contact, densities, initial_states):
         """Restore, apply inputs, rollout + adjoint sweep, read gradients.
 
         Returns the gradient arrays in the same order as the tensor inputs
@@ -317,8 +356,24 @@ class TorchRollout:
             if self._density_actors
             else None
         )
+        initial_states_np = (
+            _as_numpy("initial_states", initial_states, (self.initial_state_size,))
+            if self._initial_state_entries
+            else None
+        )
 
         self.scene.restore_state(self._state_init, False)
+        if initial_states_np is not None:
+            offset = 0
+            for entry in self._initial_state_entries:
+                n = entry.dofs_size
+                entry.actor.set_displacements(
+                    np.ascontiguousarray(initial_states_np[offset : offset + n])
+                )
+                entry.actor.set_node_velocities_local(
+                    np.ascontiguousarray(initial_states_np[offset + n : offset + 2 * n])
+                )
+                offset += 2 * n
         if gravity_np is not None:
             self.scene.set_gravity(gravity_np.tolist())
         if contact_np is not None:
@@ -402,4 +457,20 @@ class TorchRollout:
                 diffsim.set_density_backward(actor, row)
                 grad_densities[i] = row[0]
 
-        return (grad_controls, grad_forces, grad_gravity, grad_contact, grad_densities)
+        grad_initial_states = None
+        if initial_states_np is not None:
+            blocks = []
+            for entry in self._initial_state_entries:
+                actor_grads = result.gradients[entry.name]
+                blocks.append(actor_grads.initial_pose)
+                blocks.append(actor_grads.initial_velocity)
+            grad_initial_states = np.ascontiguousarray(np.concatenate(blocks))
+
+        return (
+            grad_controls,
+            grad_forces,
+            grad_gravity,
+            grad_contact,
+            grad_densities,
+            grad_initial_states,
+        )

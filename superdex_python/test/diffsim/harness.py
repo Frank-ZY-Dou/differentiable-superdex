@@ -282,6 +282,29 @@ class ContactForceLoss:
         diffsim.get_contact_force_world_backward(self.actor, self._force())
 
 
+class DisplacementErrorLoss:
+    """0.5 * sum_nodes || u_node - ref ||^2 on one soft actor's nodal displacements.
+
+    ``ref`` is a per-axis offset applied to every node (local frame; with
+    recentering disabled by ``make_scene_differentiable`` the displacements
+    carry the full motion).
+    """
+
+    def __init__(self, actor, ref=(0.05, -0.02, 0.11)):
+        self.actor = actor
+        self.ref = np.tile(np.asarray(ref, dtype=np.float64), actor.get_num_dofs() // 3)
+
+    def _residual(self) -> np.ndarray:
+        return np.asarray(self.actor.get_displacements(), dtype=np.float64) - self.ref
+
+    def value(self) -> float:
+        residual = self._residual()
+        return 0.5 * float(residual @ residual)
+
+    def accumulate_output_grad(self) -> None:
+        diffsim.get_displacements_backward(self.actor, self._residual())
+
+
 class ArticulatedPoseErrorLoss:
     """0.5 * || pose - ref ||^2 on one articulated actor's joint pose."""
 
