@@ -23,10 +23,13 @@ written to MP4 (one file per task):
    descent on its initial velocity makes it come to rest on a target after
    0.6 s, through impact and frictional sliding on the ground.
 2. ``soft_landing.mp4`` - a soft (FEM, Neo-Hookean) jelly cube is launched
-   towards a target. Adam (PyTorch) on its launch velocity makes its centroid
-   come to rest on the target; the gradient flows through the elastic
-   dynamics and the soft-body contact adjoint, via the
-   ``superdex.physics.diffsim_torch`` autograd bridge.
+   towards a target. Gradient descent (``torch.optim.SGD`` on the launch
+   velocity, gradients from the ``superdex.physics.diffsim_torch`` autograd
+   bridge) makes its centroid come to rest on the target; the gradient flows
+   through the elastic dynamics and the soft-body contact adjoint. (Plain
+   descent converges monotonically here, 0.34 -> 2e-8 in 40 iterations;
+   Adam's per-coordinate normalization overshoots the narrow valley and
+   oscillates around 1e-3.)
 
 Each video shows a selection of optimization iterations back to back: the
 rollout of that iteration, the trail of the tracked point, the target, and the
@@ -374,7 +377,7 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
         target,
         look_from=[-0.8, -2.0, 1.1],
         look_at=[0.4, -0.05, 0.15],
-        title="Soft landing: Adam on the launch velocity (FEM + contact adjoint, torch bridge)",
+        title="Soft landing: gradient descent on the launch velocity (FEM + contact adjoint, torch)",
     )
     bridge = TorchRollout(
         scene,
@@ -384,7 +387,7 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
         terminal_losses=[CentroidLoss()],
     )
     velocity = torch.zeros(3, dtype=torch.float64, requires_grad=True)
-    optimizer = torch.optim.Adam([velocity], lr=0.25)
+    optimizer = torch.optim.SGD([velocity], lr=4.0)
     losses = []
     record = recorded_iterations(num_iterations)
     u0 = torch.zeros(3 * num_nodes, dtype=torch.float64)
