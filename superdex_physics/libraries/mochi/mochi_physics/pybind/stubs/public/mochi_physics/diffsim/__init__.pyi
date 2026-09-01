@@ -226,7 +226,13 @@ def set_contact_params_backward(
     data, which residual re-assembly cannot observe), and static colliders'
     own parameters are not differentiated (they are not part of any island;
     for a static collider the penalty coefficient and falloff velocity are
-    taken from the dynamic partner by the pair rules anyway).
+    taken from the dynamic partner by the pair rules anyway). At a zero-valued
+    dissipative coefficient the geometric-mean pair rule makes the loss a
+    square-root cusp in that coefficient whenever the partner's coefficient is
+    positive, so no derivative exists there: the reported value is the
+    right-sided difference quotient at the finite-difference step (exactly
+    zero if the partner's coefficient is zero, growing like ``1 / sqrt(step)``
+    otherwise).
 
     Args:
         actor (Actor): The dynamic actor (or nested link actor) owning the

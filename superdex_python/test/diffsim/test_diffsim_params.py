@@ -326,6 +326,107 @@ class ContactParamsGradientTest(unittest.TestCase):
         # forward Newton solve (2026-08-30); 1e-3 keeps ~10x headroom.
         self._compare_per_field(grads["cube"], fd, 1e-3)
 
+    def _zero_owner_scene(self, partner: float):
+        """Cube with viscous friction and normal damping exactly 0 sliding on a
+        plane whose coefficients are ``partner``."""
+        scene = physics.create_scene(f"contact_params_zero_owner_{partner}")
+        scene.set_gravity([0.0, 0.0, -9.81])
+        ground_cp = physics.ContactParams(
+            penalty_coefficient=1e8,
+            coulomb_friction_coefficient=0.4,
+            viscous_friction_coefficient=partner,
+            normal_viscous_damping_coefficient=partner,
+        )
+        cube_cp = physics.ContactParams(
+            penalty_coefficient=1e8,
+            coulomb_friction_coefficient=0.4,
+            viscous_friction_coefficient=0.0,
+            normal_viscous_damping_coefficient=0.0,
+        )
+        scene.create_rigid_actor(
+            name="ground",
+            shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+            is_static=True,
+            contact=ground_cp,
+        )
+        cube = scene.create_rigid_actor(
+            name="cube",
+            shape=physics.create_tet_mesh_shape(
+                coordinates=scenes.CUBE_COORDS, connectivity=scenes.CUBE_CONN
+            ),
+            density=1000.0,
+            contact=cube_cp,
+            world_from_local=physics.TransformRT([0.0, 0.0, 0.099]),
+        )
+        cube.set_velocity([0.5, 0.0, 0.0], [0.0, 0.0, 0.0])
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        return scene, cube
+
+    def test_zero_valued_coefficient_is_a_right_sided_quotient(self) -> None:
+        """The contact pair combines both owners' dissipative coefficients by
+        geometric mean, so at an owner coefficient of exactly zero the rollout
+        loss has a square-root cusp in that coefficient whenever the partner's
+        is positive (the derivative is +inf) and is flat when the partner's is
+        zero. The engine cannot report a derivative there; it reports the
+        right-sided difference quotient at its own step
+        eps_finite_diff * (1 + 0), which (a) is exactly zero for a zero
+        partner, (b) matches the rollout's forward quotient at the same step,
+        and (c) grows like 1/sqrt(step) - all three are pinned here. Measured
+        2026-09-01: (b) 6.5e-5 / 1.1e-4 relative for the two fields, (c) the
+        scaled quotient sqrt(h) * q(h) constant to 1e-3 over h in
+        [1e-7, 1e-4]. A central difference would evaluate sqrt of a negative
+        product on the left side, which is why the quotient is one-sided."""
+        fields = ("viscous_friction_coefficient", "normal_viscous_damping_coefficient")
+
+        # (a) zero partner: identically zero pair coefficient, exactly zero gradient.
+        scene, cube = self._zero_owner_scene(partner=0.0)
+        grads = adjoint_contact_grads(scene, [TranslationErrorLoss(cube)], {"cube": cube})
+        for field in fields:
+            self.assertEqual(grads["cube"][CONTACT_PARAM_FIELDS.index(field)], 0.0)
+        scene.release_all_states()
+
+        # (b), (c) positive partner.
+        scene, cube = self._zero_owner_scene(partner=0.1)
+        loss = TranslationErrorLoss(cube)
+        state_init = scene.capture_state()
+        grads = adjoint_contact_grads(scene, [loss], {"cube": cube})["cube"]
+        eps_engine = diffsim.get_back_propagation_solver_params(scene).eps_finite_diff
+
+        def rollout_loss(field=None, value=None) -> float:
+            scene.restore_state(state_init, False)
+            params = cube.get_contact_params()
+            if field is not None:
+                setattr(params, field, value)
+            cube.set_contact_params(params)
+            for _ in range(NUM_STEPS):
+                scene.step(DT)
+            out = loss.value()
+            restored = cube.get_contact_params()
+            if field is not None:
+                setattr(restored, field, 0.0)
+            cube.set_contact_params(restored)
+            return out
+
+        value0 = rollout_loss()
+        for field in fields:
+            self.assertEqual(getattr(cube.get_contact_params(), field), 0.0)
+            adjoint = grads[CONTACT_PARAM_FIELDS.index(field)]
+            quotient = (rollout_loss(field, eps_engine) - value0) / eps_engine
+            self.assertGreater(abs(quotient), 1e-9, f"{field}: test is vacuous")
+            self.assertLessEqual(
+                abs(adjoint - quotient) / abs(quotient),
+                1e-3,
+                f"{field}: adjoint={adjoint:.6e}, forward quotient={quotient:.6e}",
+            )
+            scaled = [
+                np.sqrt(h) * (rollout_loss(field, h) - value0) / h
+                for h in (1e-7, 1e-6, 1e-5, 1e-4)
+            ]
+            spread = (max(scaled) - min(scaled)) / abs(np.mean(scaled))
+            self.assertLessEqual(spread, 3e-3, f"{field}: not a sqrt cusp: {scaled}")
+        scene.release_all_states()
+
     def test_static_collider_read_is_an_error(self) -> None:
         """Static colliders are not island members; reading must fail loudly,
         never return a silent zero."""

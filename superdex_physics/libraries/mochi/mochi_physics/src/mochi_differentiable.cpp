@@ -870,7 +870,17 @@ static void AccumulateParameterGradientsIsland(
   }
   gravity.accel = savedAccel;
 
-  // Contact parameters, per owner (standalone actors and nested links alike).
+  // Contact parameters, per owner (standalone actors and nested links alike). The
+  // dissipative coefficients (Coulomb, viscous, normal damping) must be non-negative, and a
+  // contact pair combines both owners' values by geometric mean (CombineContactParams). At a
+  // zero-valued owner coefficient the loss is therefore a square-root cusp in that
+  // coefficient when the partner's is positive (derivative +inf) and flat when it is zero;
+  // a central difference would evaluate the negative side (Sqrt of a negative product). The
+  // right-sided difference quotient at the finite-difference step is used there instead: it
+  // is exactly zero for a zero partner and grows like 1 / Sqrt(step) otherwise - a finite,
+  // correctly signed push for optimizers constrained to non-negative coefficients (see
+  // test_diffsim_params.py, which pins both behaviors). The penalty coefficient is always
+  // strictly positive.
   for (auto const e : descendants.actors) {
     auto* contactParams = reg.try_get<CContactParams>(e);
     if (contactParams == nullptr) {
@@ -886,13 +896,14 @@ static void AccumulateParameterGradientsIsland(
     for (int f = 0; f < kNumContactParamGradients; ++f) {
       real const saved = *fields[f];
       real const eps = solverParams.epsFiniteDiff * (1_r + std::abs(saved));
+      bool const rightSided = saved <= 0_r;
       *fields[f] = saved + eps;
       evalResidual(AsView(residualPlus));
-      *fields[f] = saved - eps;
+      *fields[f] = rightSided ? saved : saved - eps;
       evalResidual(AsView(residualMinus));
       *fields[f] = saved;
       residualPlus -= residualMinus;
-      outContactGrad.value[f] += -lambda.Dot(residualPlus) / (2_r * eps);
+      outContactGrad.value[f] += -lambda.Dot(residualPlus) / (rightSided ? eps : 2_r * eps);
     }
   }
 
