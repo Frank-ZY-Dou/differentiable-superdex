@@ -632,6 +632,24 @@ class AdjointOperatorDiagnosticsTest(unittest.TestCase):
         self.assertEqual(result.max_hessian_asymmetry, 0.0)
         self.assertEqual(result.flagged_steps, [])
 
+    def test_validation_refines_coarse_finite_differences(self):
+        """With validate_finite_diff the products are refined (halving the step
+        until two consecutive quotients agree, at most four times) instead of
+        only flagged. Measured 2026-09-02 on this island: at eps 1e-5 every step
+        was flagged before; now none is, and the gradient agrees with the one at
+        the default epsilon 1e-8 to 3e-6 (1e-4 is beyond four halvings and stays
+        flagged, so the mechanism is a bounded refinement, not a guarantee)."""
+        fine = self._rollout_diagnostics(validate=True)
+        coarse = self._rollout_diagnostics(validate=True, eps=1e-5)
+        self.assertTrue(fine.fd_valid)
+        self.assertTrue(coarse.fd_valid, coarse.flagged_steps)
+        g_fine = fine.gradients["chain"].control_targets
+        g_coarse = coarse.gradients["chain"].control_targets
+        rel = np.linalg.norm(g_coarse - g_fine) / np.linalg.norm(g_fine)
+        self.assertLessEqual(rel, 1e-5, f"refined coarse-eps gradient off by {rel:.2e}")
+        too_coarse = self._rollout_diagnostics(validate=True, eps=1e-4)
+        self.assertFalse(too_coarse.fd_valid)
+
 
 if __name__ == "__main__":
     unittest.main()

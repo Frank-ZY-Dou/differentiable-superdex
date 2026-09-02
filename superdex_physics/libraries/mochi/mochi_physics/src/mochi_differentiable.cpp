@@ -130,8 +130,8 @@ static void GetHessianVectorProduct(
     return;
   }
 
-  // Stack memory for local vector data (4 x 256 elements)
-  MOCHI_FILO_STACK_ALLOCATOR(allocator, 4 * 256 * sizeof(real));
+  // Stack memory for local vector data (6 x 256 elements)
+  MOCHI_FILO_STACK_ALLOCATOR(allocator, 6 * 256 * sizeof(real));
 
   // Set up the gradient assembly function
   AssemblyParams params = {
@@ -191,31 +191,54 @@ static void GetHessianVectorProduct(
   };
   evalHvpAtEps(1_r, outHvp);
 
-  // Validate finite-difference robustness by comparing Hvp at different
-  // epsilon scales. Always run when validateFiniteDiff is set; record any
-  // failure in the per-island stats (aggregated to scene stats via logical
-  // AND), and emit a warning only when verbosity admits it.
+  // Validate the difference quotient and refine it where it has not converged (only with
+  // validateFiniteDiff set). For a smooth residual the truncation error is O(eps^2), so the
+  // quotients at eps and eps/2 agreeing to kFiniteDiffTol bounds the error of the finer one by
+  // about a third of the tolerance. Where they disagree (stiff contact terms and contact
+  // transitions: on the FR3 + 2F-85 grasp island a handful of steps per backward at the default
+  // epsilon, all of them clean one decade finer), halve the step until two consecutive
+  // quotients agree, at most kMaxRefinements times, and return the finer product of the
+  // agreeing pair. A product that never converges is recorded in the per-island stats
+  // (aggregated into BackPropagationSceneStats::finiteDiffValid via logical AND) and the finest
+  // product is returned.
   if (solverParams.validateFiniteDiff) {
-    real const norm = outHvp.Norm() + std::numeric_limits<real>::min();
     real constexpr kFiniteDiffTol = 1e-2_r;
-    ColumnVector<real> auxHvp(outHvp.Rows(), &allocator);
+    int constexpr kMaxRefinements = 4;
     auto& islandBackPropStats = reg.get<CIslandBackPropSolverStats>(island);
-
-    auto checkError = [&](real epsScale) {
-      evalHvpAtEps(epsScale, auxHvp);
-      auxHvp -= outHvp;
-      real const err = auxHvp.Norm() / norm;
-      if (err > kFiniteDiffTol) {
-        islandBackPropStats.finiteDiffValid = false;
-        if (solverParams.verbosity >= VerbosityLevel::Verbose) {
-          MOCHI_LOG(
-              "Finite diff unstable: err(%f x eps)=%f (tol=%f)", epsScale, err, kFiniteDiffTol);
-        }
+    ColumnVector<real> finer(outHvp.Rows(), &allocator);
+    ColumnVector<real> diff(outHvp.Rows(), &allocator);
+    real epsScale = 0.5_r;
+    evalHvpAtEps(epsScale, finer);
+    bool converged = false;
+    int refinements = 0;
+    while (true) {
+      diff = finer;
+      diff -= outHvp;
+      real const err = diff.Norm() / (finer.Norm() + std::numeric_limits<real>::min());
+      if (err <= kFiniteDiffTol) {
+        converged = true;
+        break;
       }
-    };
-
-    checkError(2_r);
-    checkError(0.5_r);
+      if (refinements == kMaxRefinements) {
+        break;
+      }
+      ++refinements;
+      outHvp = finer;
+      epsScale *= 0.5_r;
+      evalHvpAtEps(epsScale, finer);
+    }
+    outHvp = finer;
+    if (!converged) {
+      islandBackPropStats.finiteDiffValid = false;
+      if (solverParams.verbosity >= VerbosityLevel::Verbose) {
+        MOCHI_LOG(
+            "Finite difference did not converge after %d halvings of eps (tol=%f)",
+            refinements,
+            kFiniteDiffTol);
+      }
+    } else if (refinements > 0 && solverParams.verbosity >= VerbosityLevel::Verbose) {
+      MOCHI_LOG("Finite difference refined: %d halvings of eps", refinements);
+    }
   }
 }
 

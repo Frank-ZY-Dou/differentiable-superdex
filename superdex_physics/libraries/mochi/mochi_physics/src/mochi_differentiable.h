@@ -86,11 +86,12 @@ struct CIslandDiffInputInfo : NoCopy {
 // Stores information on the statistics of an island backprop solve execution.
 struct CIslandBackPropSolverStats : NoCopy {
   StageSolverStats stats;
-  // True if every finite-difference Hvp validation check this back-prop
-  // performed (across every Hvp evaluation in the outer solve) passed its
-  // tolerance. Only meaningful when BackPropagationSolverParams::validateFiniteDiff
-  // is set; otherwise stays at its default of true. Aggregated into
-  // BackPropagationSceneStats::finiteDiffValid via logical AND across islands.
+  // True if every finite-difference Hvp this back-prop evaluated (across the whole
+  // outer solve) converged: its quotient agreed with the one at half the step size
+  // to 1e-2, after at most four halvings (GetHessianVectorProduct). Only meaningful
+  // when BackPropagationSolverParams::validateFiniteDiff is set; otherwise stays at
+  // its default of true. Aggregated into BackPropagationSceneStats::finiteDiffValid
+  // via logical AND across islands.
   bool finiteDiffValid = true;
   // Relative asymmetry of the adjoint operator measured by KrylovSolveZ's symmetry probe
   // (only with validateFiniteDiff; 0 otherwise). Aggregated into

@@ -52,8 +52,15 @@ class BackPropagationSolverParams:
     When :attr:`validate_finite_diff` flags steps, reduce this value.
     """
     validate_finite_diff: bool
-    """Validate analytic Hessian-vector products against finite differences
-    (diagnostic; slower).
+    """Check every finite-difference Hessian-vector product of the adjoint solve
+    against the product at half the step size, refine it (halving the step, at
+    most four times) until two consecutive quotients agree to 1e-2, and record
+    the products that never converge in
+    :attr:`~superdex.physics.diffsim.BackPropagationSceneStats.finite_diff_valid`.
+    Also enables the true-residual and symmetry diagnostics of the solve (see
+    :class:`BackPropagationSceneStats`) and, with :attr:`use_analytic_hvp`, the
+    analytic-vs-FD cross-check. About three products per Hessian-vector product
+    instead of one.
     """
     use_analytic_hvp: bool
     """[Experimental] Use the analytically assembled Hessian as the outer-solve
@@ -103,8 +110,11 @@ class BackPropagationSceneStats:
     otherwise the solver's own estimate.
     """
     finite_diff_valid: bool
-    """True if every finite-difference Hvp validation check across every island and
-    every Hvp evaluation in this back-prop step passed its tolerance.
+    """True if every finite-difference Hessian-vector product across every island
+    and every product of this back-prop step converged: its quotient agreed with
+    the one at half the step size to 1e-2, after at most four halvings. A step
+    with this False has an adjoint solve built on an unconverged product; do not
+    trust its gradient.
 
     Note:
         Only meaningful when

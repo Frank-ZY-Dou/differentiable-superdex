@@ -32,6 +32,9 @@ struct BackPropagationSceneStats {
   // Hessian-vector product (MINRES's implicit residual can under-report); otherwise the solver's
   // own estimate.
   double residualNorm = 0.0;
+  // True if every finite-difference Hessian-vector product of this back-propagation step
+  // converged (see BackPropagationSolverParams::validateFiniteDiff); stays true when that
+  // flag is off.
   bool finiteDiffValid = true;
   // Relative asymmetry of the adjoint operator H (the step Jacobian), measured after the solve as
   // |rhs.(H z) - z.(H rhs)| / mean(|rhs.(H z)|, |z.(H rhs)|) with two extra Hessian-vector
@@ -56,6 +59,12 @@ struct BackPropagationSolverParams {
       NonLinearSolverConvergenceMode::Global;
   real innerSolverAbsTol = 1e-10_r;
   real epsFiniteDiff = kDefaultBackPropagationEpsFiniteDiff;
+  // Check every finite-difference Hessian-vector product of the adjoint solve against the
+  // product at half the step size, refine it (halving the step, at most four times) until two
+  // consecutive quotients agree to 1e-2, and record the products that never converge in
+  // BackPropagationSceneStats::finiteDiffValid. Also enables the true-residual and symmetry
+  // diagnostics of the solve and, with useAnalyticHvp, the analytic-vs-FD cross-check. About
+  // three products per Hessian-vector product instead of one.
   bool validateFiniteDiff = false;
   // Experimental: use the analytically assembled Hessian (psdDRes = false, exact
   // saturation Hessians) as the outer-solve operator instead of finite-difference
