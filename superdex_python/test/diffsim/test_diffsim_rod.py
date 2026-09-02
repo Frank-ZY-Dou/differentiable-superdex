@@ -290,6 +290,113 @@ class RodStaticContactAdjointTest(unittest.TestCase):
         )
 
 
+class RodArticulatedIslandTest(unittest.TestCase):
+    """A stiff rod tied to a controlled pendulum's link (:func:`scenes.rod_on_pendulum`):
+    one island with an articulated actor, its pose controller and a rod.
+
+    Pins two engine defects found on the tendon-driven finger (2026-09-02):
+
+    * the controller's input-target assembly resized the rod's residual to its (empty)
+      input rows and the parameter-gradient pass then asserted "Residual must not be
+      empty" (heap corruption without assertions) - any island mixing a rod with a
+      controlled articulated actor crashed in back_propagate;
+    * the adjoint solve stopped on an absolute residual tolerance (1e-3 by default),
+      i.e. on a scale set by the loss: on this scene the production defaults gave a
+      controller gradient 2 percent off, and the same loss scaled by 1e-4 an exactly
+      zero gradient with the finite-difference self-check passing. The criterion is
+      now relative to |rhs|."""
+
+    dt, num_steps = 0.005, 16
+    goal = np.array([0.25, 0.02, 0.76])
+
+    @classmethod
+    def targets(cls):
+        n = cls.num_steps
+        return np.stack([np.linspace(0.0, 0.3, n), np.linspace(0.0, -0.2, n)], axis=1)
+
+    class _WeightedTipLoss(_TipLoss):
+        def __init__(self, rod, node, goal, weight):
+            super().__init__(rod, node, goal)
+            self.weight = weight
+
+        def value(self) -> float:
+            return self.weight * super().value()
+
+        def accumulate_output_grad(self) -> None:
+            d = _node_position(self.rod, self.node) - self.goal
+            g = np.zeros(self.rod.get_num_dofs())
+            g[4 * self.node : 4 * self.node + 3] = self.weight * d
+            diffsim.get_displacements_backward(self.rod, g)
+
+    def _control_gradient(self, weight: float, default_solver: bool):
+        """Adjoint dL/d(targets) (2 x num_steps) of the weighted node-3 loss; with
+        ``default_solver`` the engine's default adjoint solver parameters (plus the
+        finite-difference validation) replace the harness's tight ones."""
+        scene, chain, rod = scenes.rod_on_pendulum()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        if default_solver:
+            dp = diffsim.BackPropagationSolverParams()
+            dp.validate_finite_diff = True
+            diffsim.set_back_propagation_solver_params(scene, dp)
+        targets = self.targets()
+        result = DifferentiableRollout(scene, dt=self.dt, num_steps=self.num_steps).run(
+            apply_inputs=lambda step: chain.set_articulated_target_pose(
+                np.ascontiguousarray(targets[step])
+            ),
+            terminal_losses=[self._WeightedTipLoss(rod, 3, self.goal, weight)],
+        )
+        self.assertTrue(result.fd_valid, result.flagged_steps)
+        self.assertEqual(result.minres_fallbacks, 0)
+        return result, result.gradients[chain.get_name()].control_targets.copy()
+
+    def _fd_control_gradient(self, dof: int, step: int, eps: float) -> float:
+        targets = self.targets()
+
+        def loss_at(c):
+            sc, ch, rd = scenes.rod_on_pendulum()
+            try:
+                configure_for_differentiability(sc)
+                loss = _TipLoss(rd, 3, self.goal)
+                for s in range(self.num_steps):
+                    ch.set_articulated_target_pose(np.ascontiguousarray(c[s]))
+                    sc.step(self.dt)
+                return loss.value()
+            finally:
+                physics.destroy_scene(sc)
+
+        plus, minus = targets.copy(), targets.copy()
+        plus[step, dof] += eps
+        minus[step, dof] -= eps
+        return (loss_at(plus) - loss_at(minus)) / (2.0 * eps)
+
+    def test_control_gradients_match_finite_differences(self) -> None:
+        result, grad = self._control_gradient(1.0, default_solver=False)
+        self.assertLessEqual(result.max_adjoint_residual, 1e-6)
+        rel_errors, skipped = {}, {}
+        for dof, step in ((0, 2), (1, 2), (0, 8), (1, 8)):
+            fds = [self._fd_control_gradient(dof, step, eps) for eps in (1e-5, 1e-6)]
+            denom = max(abs(fds[0]), 1e-30)
+            fd_self = abs(fds[0] - fds[1]) / denom
+            if fd_self > 1e-4:
+                skipped[(dof, step)] = fd_self
+                continue
+            rel_errors[(dof, step)] = abs(grad[dof, step] - fds[0]) / denom
+        self.assertGreaterEqual(len(rel_errors), 2, f"too few smooth entries: {skipped}")
+        self.assertLessEqual(max(rel_errors.values()), 1e-4, (rel_errors, skipped))
+
+    def test_default_solver_gradients_are_scale_invariant(self) -> None:
+        _, tight = self._control_gradient(1.0, default_solver=False)
+        _, default = self._control_gradient(1.0, default_solver=True)
+        _, default_small = self._control_gradient(1e-4, default_solver=True)
+        scale = np.linalg.norm(tight)
+        self.assertGreater(scale, 0.0)
+        # Former absolute default (1e-3): 1.9e-2 here.
+        self.assertLessEqual(np.linalg.norm(default - tight) / scale, 1e-5)
+        # Former absolute default: exactly zero gradient (relative error 1).
+        self.assertLessEqual(np.linalg.norm(default_small / 1e-4 - tight) / scale, 1e-5)
+
+
 class RodSupportBoundaryTest(unittest.TestCase):
     """The unsupported cases must fail loudly, never silently drop a term."""
 

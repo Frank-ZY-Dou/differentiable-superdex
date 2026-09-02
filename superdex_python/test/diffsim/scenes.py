@@ -543,6 +543,44 @@ def rod_with_cube(cube_velocity=(0.3, 0.0, 0.0)):
     return scene, rod, cube
 
 
+def rod_on_pendulum():
+    """A stiff horizontal rod (axial stiffness 2e4 over 5 cm elements, i.e. a
+    tendon-like 4e5 N/m per element) pinned at one end (node position
+    constraint) and tied at the other to the second link of the controlled
+    pendulum of :func:`pendulum` through a node-to-rigid constraint: one island
+    with an articulated actor, its pose controller and a rod, no contact.
+    Returns (scene, chain, rod)."""
+    ex = physics.experimental
+    scene, chain = pendulum(with_controller=True)
+    num_nodes = 7
+    x = np.linspace(0.4, 0.1, num_nodes)
+    nodes = np.stack([x, 0.0 * x, 0.75 + 0.0 * x], axis=1)
+    material = ex.RodMaterialParams(
+        linear_density=0.05,
+        linear_rotational_inertia=2e-6,
+        axial_stiffness=2e4,
+        torsional_stiffness=2e-1,
+        flexural_stiffness=[2e-1, 2e-1],
+    )
+    rod = _rod_actor(scene, nodes, axis_hint=(0.0, 0.0, 1.0), material=material)
+    scene.create_deformable_node_position_constraint(
+        actor=rod.get_handle(), node_index=0, position=nodes[0].tolist(), stiffness=2e4
+    )
+    link1 = chain.get_nested_link_actors()[1]
+    scene.create_deformable_node_to_rigid_constraint(
+        deformable_actor=rod.get_handle(),
+        rigid_actor=link1,
+        deformable_node_index=num_nodes - 1,
+        rigid_local_pos=[0.1, 0.0, 0.0],
+        stiffness=2e4,
+    )
+    # Rod-vs-dynamic-collider contact has no adjoint; the links are dynamic colliders.
+    scene.enable_actor_contact_symmetric(
+        rod.get_handle(), chain.get_handle(), False, physics.IncludeNestedActors.YES
+    )
+    return scene, chain, rod
+
+
 def rod_on_plane(friction: str = "coulomb", height: float = 0.03):
     """A horizontal rod released ``height`` above a static ground plane with a
     downward velocity: centerline contact of the rod against a static collider

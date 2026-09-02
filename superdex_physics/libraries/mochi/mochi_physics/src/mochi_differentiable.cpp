@@ -312,6 +312,7 @@ static void KrylovSolveZ(
 
   // Retrieve backpropagation solver stats component.
   auto& islandBackPropSolverStats = reg.get<CIslandBackPropSolverStats>(island);
+  islandBackPropSolverStats.usedMinresFallback = false;
 
   // Handle trivial case
   if (IsZero(rhs)) {
@@ -326,7 +327,19 @@ static void KrylovSolveZ(
   NewtonSolverParams newtonParamsForward;
   GetIslandNewtonParams(numDofs, simParams, newtonParamsForward);
   KrylovSolverParams& innerLParams = newtonParamsForward.lParams;
-  innerLParams.absTol = backpropParams.innerSolverAbsTol;
+  // The preconditioner solve must be judged in the outer solver's norm (plain residual L2)
+  // and to a tolerance below the outer stopping threshold: judged in the scene default
+  // (the preconditioned residual norm) with an absolute floor, it returned a zero
+  // correction for a residual the outer loop still considered unconverged on a stiff
+  // tendon island (axial stiffness 1e5 N/m: the preconditioned norm is orders of magnitude
+  // below the plain one) - a "Zero Preconditioner-dot product" PCG breakdown and a MINRES
+  // fallback stalled at 2e-8 (2026-09-02).
+  ColumnVector<real> rhsCopy(numDofs);
+  AsView(rhsCopy) = rhs;
+  real const outerThreshold = Max(
+      backpropParams.outerSolverAbsTol, backpropParams.outerSolverRelTol * rhsCopy.Norm());
+  innerLParams.normType = LinearSolverConvergenceNorm::ResidualL2;
+  innerLParams.absTol = Min(backpropParams.innerSolverAbsTol, 0.1_r * outerThreshold);
 
   // Analytic outer operator: assemble the exact Hessian once, before the PSD
   // preconditioner assembly below reuses the problem's dresidual storage.
@@ -386,6 +399,7 @@ static void KrylovSolveZ(
 
   // If PCG aborted due to non-SPD, fall back to MINRES
   if (!outerResult.converged && outerResult.numIterDone < backpropParams.outerSolverMaxIter) {
+    islandBackPropSolverStats.usedMinresFallback = true;
     if (backpropParams.verbosity >= VerbosityLevel::Warning) {
       MOCHI_LOG_WARNING(
           "PCG aborted at iteration %d (likely non-SPD). Falling back to MINRES.",
@@ -530,6 +544,7 @@ static void NewtonSolveZ(
 
   // Retrieve backpropagation solver stats component.
   auto& islandBackPropSolverStats = reg.get<CIslandBackPropSolverStats>(island);
+  islandBackPropSolverStats.usedMinresFallback = false;
 
   // Configure NR solver
   // ------------------------------------------------------------------------

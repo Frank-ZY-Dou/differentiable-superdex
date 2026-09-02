@@ -47,16 +47,31 @@ struct BackPropagationSceneStats {
   // the gradient of one merit function, and the symmetric adjoint solve (PCG / MINRES) is then
   // only approximate.
   double hessianAsymmetry = 0.0;
+  // Number of islands whose PCG adjoint solve aborted (non-SPD detection or a preconditioner
+  // breakdown) and whose solution comes from the MINRES fallback. Always computed.
+  int numMinresFallbacks = 0;
 };
 
 struct BackPropagationSolverParams {
   VerbosityLevel verbosity = NonLinearSolverParams{}.verbosity;
   bool useNewtonOuterSolver = false;
-  int outerSolverMaxIter = 10;
-  real outerSolverAbsTol = 1e-3_r;
-  real outerSolverRelTol = 1e-10_r;
+  // The adjoint solve stops when |H z - rhs| <= max(outerSolverAbsTol, outerSolverRelTol |rhs|)
+  // or after outerSolverMaxIter iterations (each costing two residual assemblies for the
+  // finite-difference operator). The right-hand side scales with the loss, so the criterion is
+  // relative by default and the absolute floor is off: with the former floor of 1e-3 an
+  // ordinary rod-on-pendulum controller gradient was 2 percent off and the same loss scaled by
+  // 1e-4 gave an exactly zero gradient with every self-check passing (2026-09-02). The relative
+  // tolerance sits at the finite-difference operator's accuracy floor; tighter values run to
+  // outerSolverMaxIter on stiff islands.
+  int outerSolverMaxIter = 30;
+  real outerSolverAbsTol = 0_r;
+  real outerSolverRelTol = 1e-8_r;
   NonLinearSolverConvergenceMode outerSolverConvergenceMode =
       NonLinearSolverConvergenceMode::Global;
+  // Absolute tolerance of the inner solve (the preconditioner application of the outer PCG),
+  // measured on the plain residual norm like the outer criterion and capped at a tenth of the
+  // outer stopping threshold, so the preconditioner never returns a zero correction for a
+  // residual the outer solve still considers unconverged.
   real innerSolverAbsTol = 1e-10_r;
   real epsFiniteDiff = kDefaultBackPropagationEpsFiniteDiff;
   // Check every finite-difference Hessian-vector product of the adjoint solve against the

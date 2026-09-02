@@ -196,6 +196,10 @@ class RolloutResult:
     # the 0-based steps whose finite-difference self-check failed.
     max_hessian_asymmetry: float = 0.0
     flagged_steps: list = dataclasses.field(default_factory=list)
+    # Largest outer-iteration count of one adjoint solve, and the number of island
+    # solves (over the sweep) whose PCG aborted and fell back to MINRES.
+    max_outer_iters: int = 0
+    minres_fallbacks: int = 0
 
     @property
     def control_gradients(self) -> dict[str, np.ndarray]:
@@ -338,6 +342,8 @@ class DifferentiableRollout:
         max_residual = 0.0
         max_asymmetry = 0.0
         flagged_steps: list[int] = []
+        max_outer_iters = 0
+        minres_fallbacks = 0
         solve_time = 0.0
         steps_swept = 0
 
@@ -360,6 +366,8 @@ class DifferentiableRollout:
                 flagged_steps.append(i - 1)
             max_residual = max(max_residual, stats.residual_norm)
             max_asymmetry = max(max_asymmetry, stats.hessian_asymmetry)
+            max_outer_iters = max(max_outer_iters, stats.max_outer_iters)
+            minres_fallbacks += stats.num_minres_fallbacks
             solve_time += stats.solve_duration_sec
 
             self._read_step_input_grads(grads, i - 1)
@@ -393,4 +401,6 @@ class DifferentiableRollout:
             steps_swept=steps_swept,
             max_hessian_asymmetry=max_asymmetry,
             flagged_steps=flagged_steps[::-1],
+            max_outer_iters=max_outer_iters,
+            minres_fallbacks=minres_fallbacks,
         )

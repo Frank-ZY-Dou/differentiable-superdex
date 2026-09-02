@@ -331,12 +331,14 @@ static void ComputeAggregateBackPropSolverSceneStats(
   outStats.maxOuterIters = 0;
   outStats.finiteDiffValid = true;
   outStats.hessianAsymmetry = 0.0;
+  outStats.numMinresFallbacks = 0;
   reg.view<CIslandBackPropSolverStats>().each([&](auto& islandSolverStats) {
     auto const& stats = islandSolverStats.stats;
     sqrResNorm += Sqr((double)stats.resNorm);
     outStats.maxOuterIters = Max(outStats.maxOuterIters, stats.numIterDone);
     outStats.finiteDiffValid = outStats.finiteDiffValid && islandSolverStats.finiteDiffValid;
     outStats.hessianAsymmetry = Max(outStats.hessianAsymmetry, islandSolverStats.hessianAsymmetry);
+    outStats.numMinresFallbacks += islandSolverStats.usedMinresFallback ? 1 : 0;
   });
   outStats.residualNorm = Sqrt(sqrResNorm);
 }

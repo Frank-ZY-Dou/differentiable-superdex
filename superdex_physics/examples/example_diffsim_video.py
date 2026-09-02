@@ -142,7 +142,7 @@ CUBE_CONN = np.array([
 class Recorder:
     """Offscreen viewer + MP4 writer with text overlays and a tracked-point trail."""
 
-    def __init__(self, scene, target, look_from, look_at, title: str):
+    def __init__(self, scene, target, look_from, look_at, title: str, curves=None):
         # The scene is Z-up FLU (X forward, Y left, Z up) - the "ros" preset.
         self.viewer = Viewer(
             ViewerCfg(offscreen=True, size=FRAME_SIZE, coordinate_system="ros")
@@ -153,6 +153,9 @@ class Recorder:
         )
         self.viewer.set_camera_view(look_from=look_from, look_at=look_at)
         self.title = title
+        # Optional extra geometry the viewer does not draw itself (rod centerlines):
+        # a callable returning (name, points, edges, radius, color) tuples per frame.
+        self.curves = curves
         self.frames: list[np.ndarray] = []
         self.trail: list[np.ndarray] = []
 
@@ -167,6 +170,9 @@ class Recorder:
             self.viewer.add_curve_network(
                 "trail", pts, edges, radius=0.006, color=[0.1, 0.35, 0.9]
             )
+        if self.curves is not None:
+            for name, pts, edges, radius, color in self.curves():
+                self.viewer.add_curve_network(name, pts, edges, radius=radius, color=color)
         frame = np.ascontiguousarray(np.asarray(self.viewer.render())[..., :3])
         self._overlay(frame, caption)
         for _ in range(hold):

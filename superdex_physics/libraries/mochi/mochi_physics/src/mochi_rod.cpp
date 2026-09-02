@@ -2065,6 +2065,9 @@ void AssembleBody(
     outActorSnle.objective = 0.0;
   }
   if (params.assemRes) {
+    // Size explicitly: the input-target assembly of a differentiable island resizes the
+    // residual to its (empty) input rows, and this actor's storage persists across assemblies.
+    outActorSnle.fullResidual.Resize(isize(currPose.value.displacements));
     outActorSnle.fullResidual.SetZero();
   }
   if (params.assemDRes) {

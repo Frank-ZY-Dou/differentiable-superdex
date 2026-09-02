@@ -134,12 +134,15 @@ def configure_for_differentiability(scene) -> None:
 
     dp = diffsim.get_back_propagation_solver_params(scene)
     dp.validate_finite_diff = True
-    # The production default solves the adjoint only to abs_tol = 1e-3, which
-    # leaves solve error of that order in small gradient components (measured:
-    # 1.6e-2 relative error on a pendulum controller gradient, dropping to
-    # 5.6e-5 with a tight tolerance). These tests measure gradient
-    # correctness, so solve the adjoint tightly.
-    dp.outer_solver_abs_tol = 1e-10
+    # The adjoint stopping criterion is relative to |rhs| by default (1e-8, since
+    # 2026-09-02; the former absolute default of 1e-3 left 1.6e-2 relative error
+    # on a pendulum controller gradient, and an absolute floor of 1e-10 still
+    # cost 3e-3 on a loss scaled by 1e-4). These tests measure gradient
+    # correctness: solve to 1e-10 relative with no absolute floor and allow more
+    # iterations, so the solves run to the finite-difference operator's floor
+    # (the suite takes the same 6.4 s either way, 2026-09-02).
+    dp.outer_solver_abs_tol = 0.0
+    dp.outer_solver_rel_tol = 1e-10
     dp.outer_solver_max_iter = 100
     if bool(int(os.environ.get("SUPERDEX_DIFFSIM_ANALYTIC_HVP", "0"))):
         # A/B switch for the analytic outer-solve operator (source builds with
@@ -457,6 +460,7 @@ class GradientCheckCase:
         fd_valid_all = True
         max_residual = 0.0
         max_asymmetry = 0.0
+        minres_fallbacks = 0
         solve_time = 0.0
         for i in range(self.num_steps, 0, -1):
             if i != self.num_steps:
@@ -468,6 +472,7 @@ class GradientCheckCase:
             fd_valid_all = fd_valid_all and step_stats.finite_diff_valid
             max_residual = max(max_residual, step_stats.residual_norm)
             max_asymmetry = max(max_asymmetry, step_stats.hessian_asymmetry)
+            minres_fallbacks += step_stats.num_minres_fallbacks
             for entry in self.entries:
                 if entry.input_size > 0:
                     g = np.zeros(entry.input_size)
@@ -518,6 +523,7 @@ class GradientCheckCase:
             "fd_valid_all": fd_valid_all,
             "max_residual": max_residual,
             "max_asymmetry": max_asymmetry,
+            "minres_fallbacks": minres_fallbacks,
             "solve_time": solve_time,
         }
 
@@ -625,6 +631,7 @@ class GradientCheckCase:
         self.fd_valid_all = grads["fd_valid_all"]
         self.max_residual = grads["max_residual"]
         self.max_asymmetry = grads["max_asymmetry"]
+        self.minres_fallbacks = grads["minres_fallbacks"]
         self.solve_time = grads["solve_time"]
         self.scene.release_all_states()
         return reports

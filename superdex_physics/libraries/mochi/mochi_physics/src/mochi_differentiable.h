@@ -102,6 +102,10 @@ struct CIslandBackPropSolverStats : NoCopy {
   // (only with validateFiniteDiff; 0 otherwise). Aggregated into
   // BackPropagationSceneStats::hessianAsymmetry via max across islands.
   double hessianAsymmetry = 0.0;
+  // True if the PCG adjoint solve of this island aborted (non-SPD detection or a
+  // preconditioner breakdown) and the solution comes from the MINRES fallback. Counted into
+  // BackPropagationSceneStats::numMinresFallbacks.
+  bool usedMinresFallback = false;
 };
 
 // Stores information on the size of the differentiable input of an actor, necessary for indexing

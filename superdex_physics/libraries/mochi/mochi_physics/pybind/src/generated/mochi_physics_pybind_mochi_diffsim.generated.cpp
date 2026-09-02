@@ -73,18 +73,18 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
     .def("__deepcopy__", [](mochi::diffsim::BackPropagationSolverParams const& self, py::dict) { return mochi::diffsim::BackPropagationSolverParams(self); })
     .def_readwrite("verbosity", &mochi::diffsim::BackPropagationSolverParams::verbosity, "Verbosity level of the back-propagation solver's logging.")
     .def_readwrite("use_newton_outer_solver", &mochi::diffsim::BackPropagationSolverParams::useNewtonOuterSolver, "Use a Newton solver for the outer adjoint solve instead of the default Krylov\nsolver.")
-    .def_readwrite("outer_solver_max_iter", &mochi::diffsim::BackPropagationSolverParams::outerSolverMaxIter, "Maximum number of outer-solver iterations for the adjoint solve.")
-    .def_readwrite("outer_solver_abs_tol", &mochi::diffsim::BackPropagationSolverParams::outerSolverAbsTol, "Absolute convergence tolerance for the outer solver.")
-    .def_readwrite("outer_solver_rel_tol", &mochi::diffsim::BackPropagationSolverParams::outerSolverRelTol, "Relative convergence tolerance for the outer solver.")
+    .def_readwrite("outer_solver_max_iter", &mochi::diffsim::BackPropagationSolverParams::outerSolverMaxIter, "Maximum number of outer-solver iterations for the adjoint solve (default 30); each\niteration costs two residual assemblies with the finite-difference operator. The solve\nstops early once ``|H z - rhs| <= max(outer_solver_abs_tol, outer_solver_rel_tol * |rhs|)``.")
+    .def_readwrite("outer_solver_abs_tol", &mochi::diffsim::BackPropagationSolverParams::outerSolverAbsTol, "Absolute floor of the adjoint solve's stopping criterion (default 0, i.e. off). The\nright-hand side scales with the loss, so an absolute floor silently truncates small\ngradients: with the former default of 1e-3 an ordinary controller gradient was 2 percent\noff and a loss scaled by 1e-4 gave an exactly zero gradient (2026-09-02).")
+    .def_readwrite("outer_solver_rel_tol", &mochi::diffsim::BackPropagationSolverParams::outerSolverRelTol, "Relative tolerance of the adjoint solve: stop once ``|H z - rhs| <= outer_solver_rel_tol *\n|rhs|`` (default 1e-8, the finite-difference operator's accuracy floor).")
     .def_readwrite("outer_solver_convergence_mode", &mochi::diffsim::BackPropagationSolverParams::outerSolverConvergenceMode, "Convergence-checking mode for the outer solver.")
-    .def_readwrite("inner_solver_abs_tol", &mochi::diffsim::BackPropagationSolverParams::innerSolverAbsTol, "Absolute convergence tolerance for the inner (linear) solver.")
+    .def_readwrite("inner_solver_abs_tol", &mochi::diffsim::BackPropagationSolverParams::innerSolverAbsTol, "Absolute tolerance of the inner solve (the preconditioner application of the outer PCG),\nmeasured on the plain residual norm like the outer criterion and capped at a tenth of the\nouter stopping threshold, so the preconditioner never returns a zero correction for a\nresidual the outer solve still considers unconverged.")
     .def_readwrite("eps_finite_diff", &mochi::diffsim::BackPropagationSolverParams::epsFiniteDiff, "Finite-difference step size used for Hessian-vector products in the adjoint\nsolve (per pose component; default 1e-8 in double precision, 1e-4 in single).\n\nStiff islands (a closed-loop gripper with stiff pose-controller gains holding\na cube) need 1e-8: at 1e-7 their adjoint solves end with true residuals up to\n8e-3, the finite-difference self-check fails on 13 of 100 steps and the control\ngradient is 11 percent off, while 1e-8 and 1e-9 agree to 3e-6 (2026-09-01).\nWhen validate_finite_diff flags steps, reduce this value.")
     .def_readwrite("validate_finite_diff", &mochi::diffsim::BackPropagationSolverParams::validateFiniteDiff, "Check every finite-difference Hessian-vector product of the adjoint solve\nagainst the product at half the step size, refine it (halving the step, at\nmost four times) until two consecutive quotients agree to 1e-2, and record\nthe products that never converge in\n:attr:`~superdex.physics.diffsim.BackPropagationSceneStats.finite_diff_valid`.\nAlso enables the true-residual and symmetry diagnostics of the solve (see\nBackPropagationSceneStats) and, with use_analytic_hvp, the analytic-vs-FD\ncross-check. About three products per Hessian-vector product instead of one.")
     .def_readwrite("use_analytic_hvp", &mochi::diffsim::BackPropagationSolverParams::useAnalyticHvp, "[Experimental] Use the analytically assembled Hessian as the outer-solve\noperator instead of finite-difference Hessian-vector products (Krylov outer\nsolver only). The assembly is exactly symmetric but Gauss-Newton-grade\neverywhere: on a rigid cube sliding on a static plane its gradients are\noff by 7e-4 (rich friction) to 4e-2 (frictionless) relative, where the\nfinite-difference operator is exact to 1e-7; articulated islands and\ndynamic-dynamic contact coupling are worse (5e-2 and up). A fast\napproximate operator only; the finite-difference operator is the accurate\none. With validate_finite_diff also set, each solve cross-checks the\nanalytic operator against one finite-difference product.")
   ;
 
   registry.GetClass<mochi::diffsim::BackPropagationSceneStats>()
-    .def(py::init([](py::object total_duration_sec, py::object solve_duration_sec, py::object max_outer_iters, py::object residual_norm, py::object finite_diff_valid, py::object hessian_asymmetry) {
+    .def(py::init([](py::object total_duration_sec, py::object solve_duration_sec, py::object max_outer_iters, py::object residual_norm, py::object finite_diff_valid, py::object hessian_asymmetry, py::object num_minres_fallbacks) {
       mochi::diffsim::BackPropagationSceneStats result;
       result.totalDurationSec = py::cast<double>(total_duration_sec);
       result.solveDurationSec = py::cast<double>(solve_duration_sec);
@@ -92,6 +92,7 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
       result.residualNorm = py::cast<double>(residual_norm);
       result.finiteDiffValid = py::cast<bool>(finite_diff_valid);
       result.hessianAsymmetry = py::cast<double>(hessian_asymmetry);
+      result.numMinresFallbacks = py::cast<int>(num_minres_fallbacks);
       return result;
     })
       , py::kw_only()
@@ -101,6 +102,7 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
       , py::arg("residual_norm") = mochi::diffsim::BackPropagationSceneStats{}.residualNorm
       , py::arg("finite_diff_valid") = mochi::diffsim::BackPropagationSceneStats{}.finiteDiffValid
       , py::arg("hessian_asymmetry") = mochi::diffsim::BackPropagationSceneStats{}.hessianAsymmetry
+      , py::arg("num_minres_fallbacks") = mochi::diffsim::BackPropagationSceneStats{}.numMinresFallbacks
     )
     .def(py::init<>())
     .def("__copy__", [](mochi::diffsim::BackPropagationSceneStats const& self) { return mochi::diffsim::BackPropagationSceneStats(self); })
@@ -111,6 +113,7 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
     .def_readwrite("residual_norm", &mochi::diffsim::BackPropagationSceneStats::residualNorm, "Final residual norm of the adjoint solve in the last back-propagation step.\n\nWith :attr:`~superdex.physics.diffsim.BackPropagationSolverParams.validate_finite_diff`\nset, this is the true residual ``|H z - rhs|`` of the returned solution, recomputed\nwith a fresh Hessian-vector product (MINRES's implicit residual can under-report);\notherwise the solver's own estimate.")
     .def_readwrite("finite_diff_valid", &mochi::diffsim::BackPropagationSceneStats::finiteDiffValid, "True if every finite-difference Hessian-vector product across every island\nand every product of this back-prop step converged: its quotient agreed with\nthe one at half the step size to 1e-2, after at most four halvings. A step\nwith this False has an adjoint solve built on an unconverged product; do not\ntrust its gradient.\n\nNote:\n    Only meaningful when\n    :attr:`~superdex.physics.diffsim.BackPropagationSolverParams.validate_finite_diff`\n    is set; otherwise stays at its default of true.")
     .def_readwrite("hessian_asymmetry", &mochi::diffsim::BackPropagationSceneStats::hessianAsymmetry, "Relative asymmetry of the adjoint operator (the step Jacobian ``H``), measured after\nthe solve as ``|rhs.(H z) - z.(H rhs)| / mean(|rhs.(H z)|, |z.(H rhs)|)`` with two extra\nHessian-vector products; maximum across islands.\n\nNote:\n    Only computed when\n    :attr:`~superdex.physics.diffsim.BackPropagationSolverParams.validate_finite_diff`\n    is set (0 otherwise). With the finite-difference operator the probe has a noise\n    floor set by the products' own error (measured 1.3e-4 at the default epsilon 1e-8\n    on an articulated-vs-rigid frictional island, 1.3e-3 at 1e-7; the gradients\n    themselves are unaffected at that level); with the analytic operator it is exact.\n    Values well above the floor mean the residual is not the gradient of one merit\n    function, and the symmetric adjoint solve (PCG / MINRES) is then only approximate.")
+    .def_readwrite("num_minres_fallbacks", &mochi::diffsim::BackPropagationSceneStats::numMinresFallbacks, "Number of islands whose PCG adjoint solve aborted (non-SPD detection or a\npreconditioner breakdown) and whose solution comes from the MINRES fallback in the\nlast back-propagation step. Always computed.")
   ;
 
     m_diffsim.def("make_scene_differentiable", [](mochi::Scene* scene) {

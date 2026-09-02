@@ -32,15 +32,28 @@ class BackPropagationSolverParams:
     solver.
     """
     outer_solver_max_iter: int
-    """Maximum number of outer-solver iterations for the adjoint solve."""
+    """Maximum number of outer-solver iterations for the adjoint solve (default 30); each
+    iteration costs two residual assemblies with the finite-difference operator. The solve
+    stops early once ``|H z - rhs| <= max(outer_solver_abs_tol, outer_solver_rel_tol * |rhs|)``.
+    """
     outer_solver_abs_tol: float
-    """Absolute convergence tolerance for the outer solver."""
+    """Absolute floor of the adjoint solve's stopping criterion (default 0, i.e. off). The
+    right-hand side scales with the loss, so an absolute floor silently truncates small
+    gradients: with the former default of 1e-3 an ordinary controller gradient was 2 percent
+    off and a loss scaled by 1e-4 gave an exactly zero gradient (2026-09-02).
+    """
     outer_solver_rel_tol: float
-    """Relative convergence tolerance for the outer solver."""
+    """Relative tolerance of the adjoint solve: stop once ``|H z - rhs| <= outer_solver_rel_tol *
+    |rhs|`` (default 1e-8, the finite-difference operator's accuracy floor).
+    """
     outer_solver_convergence_mode: mochi_physics.NonLinearSolverConvergenceMode
     """Convergence-checking mode for the outer solver."""
     inner_solver_abs_tol: float
-    """Absolute convergence tolerance for the inner (linear) solver."""
+    """Absolute tolerance of the inner solve (the preconditioner application of the outer PCG),
+    measured on the plain residual norm like the outer criterion and capped at a tenth of the
+    outer stopping threshold, so the preconditioner never returns a zero correction for a
+    residual the outer solve still considers unconverged.
+    """
     eps_finite_diff: float
     """Finite-difference step size used for Hessian-vector products in the adjoint
     solve (per pose component; default 1e-8 in double precision, 1e-4 in single).
@@ -136,6 +149,11 @@ class BackPropagationSceneStats:
         Values well above the floor mean the residual is not the gradient of one merit
         function, and the symmetric adjoint solve (PCG / MINRES) is then only approximate.
     """
+    num_minres_fallbacks: int
+    """Number of islands whose PCG adjoint solve aborted (non-SPD detection or a
+    preconditioner breakdown) and whose solution comes from the MINRES fallback in the
+    last back-propagation step. Always computed.
+    """
     @overload
     def __init__(self) -> None: ...
     @overload
@@ -147,6 +165,7 @@ class BackPropagationSceneStats:
         residual_norm: float = ...,
         finite_diff_valid: bool = ...,
         hessian_asymmetry: float = ...,
+        num_minres_fallbacks: int = ...,
     ) -> None: ...
 
 def make_scene_differentiable(scene: mochi_physics.Scene) -> None:

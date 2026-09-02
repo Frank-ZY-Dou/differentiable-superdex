@@ -38,6 +38,17 @@ rendered offscreen with the built-in viewer and written to MP4:
    targets only through the two frictional finger-cube contacts (articulated
    links against a rigid body in one island): the cube moves because the
    fingers hold it.
+4. ``finger_tendon.mp4`` - the tendon-driven finger of the physics samples
+   (three passive hinges, a prismatic tendon slider, eyelets on the bones)
+   actuated by a rod actor as the cable, tied to the slider and the fingertip
+   eyelet by node-to-rigid constraints of the cable's own axial stiffness. The
+   variables are the per-step slider targets (the tendon pull), updated by
+   normalized gradient descent (Adam at a constant rate oscillates around this
+   exactly reachable goal); the loss is the fingertip's final position, whose
+   goal is the pose a hidden reference pull reaches; the gradient flows from
+   the fingertip through the passive hinges, the constraints and the cable's
+   elasticity (rod adjoint, with the articulated actor, its controller and the
+   rod in one island) into the slider targets.
 
 Rigor. Before optimizing, ``--check`` compares the adjoint gradient of the
 largest-gradient target entries against central finite differences of the
@@ -76,7 +87,7 @@ import superdex.physics as physics
 import superdex.robotics as robotics
 import torch
 from superdex.physics.diffsim_torch import TorchRollout
-from superdex.physics.paths import resolve_asset
+from superdex.physics.paths import resolve_asset, resolve_asset_root
 from superdex.physics.utils import render_model_registry
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -105,6 +116,17 @@ NGD_DECAY = 0.95  # per-iteration decay of the normalized-gradient step length
 GRASP_TIP_AHEAD = 0.012  # the pose controller lags 1 cm behind the IK pose during the descent
 # Per-joint PD gains of the pose controller (stiffness [N m/rad], damping [N m s/rad]).
 JOINT_GAINS = list(zip([400, 400, 300, 300, 150, 100, 60], [40, 40, 30, 30, 15, 10, 6]))
+TENDON_SCENE = "samples/tendon_comparison_articulation.mochi_scene"
+TENDON_SLIDER_GAINS = (200.0, 5.0)  # pose-controller gains of the tendon slider (prismatic joint)
+TENDON_HINGE_DAMPING = 0.02  # the finger hinges are passive: no stiffness, light damping
+TENDON_RADIUS = 0.003  # [m]
+TENDON_YOUNG = 2e7  # [Pa]: a soft cable, so the pull stretches it visibly
+TENDON_DENSITY = 1000.0  # [kg/m^3]
+TENDON_ELEMENTS = 16
+TENDON_DT, TENDON_STEPS = 0.01, 40
+TENDON_PULL0, TENDON_PULL_GOAL = 0.03, 0.09  # [m] slider travel: the initial ramp, the hidden reference
+TENDON_NEWTON_TOL = 5e-7  # the finger-tendon island's Newton residual stalls at ~1e-7 (round-off; ~10 N forces)
+TENDON_FINGERTIP = np.array([0.1, 0.0, 0.0])  # the distal end of the last bone (a 0.2 m box) in its frame
 CUBE_HALF = 0.05
 CONTACT = physics.ContactParams(penalty_coefficient=1e6, coulomb_friction_coefficient=0.4)
 # The arm's links carry the same frictional material as the cube: the contact
@@ -215,15 +237,15 @@ def spawn_gripper_arm(scene, with_controller: bool = True, with_contact: bool = 
     )
 
 
-def configure(scene) -> None:
+def configure(scene, newton_tol: float = 1e-9) -> None:
     diffsim.make_scene_differentiable(scene)
     solver = scene.get_solver_params()
     newton = solver.non_linear_solver
     newton.max_iter = 300
-    # 1e-9 is the tightest tolerance this model reaches reliably: with the pose
+    # 1e-9 is the tightest tolerance the arm models reach reliably: with the pose
     # controller active the Newton residual stalls at 1e-10..2e-10 (round-off).
-    newton.abs_tol = 1e-9
-    newton.rel_tol = 1e-9
+    newton.abs_tol = newton_tol
+    newton.rel_tol = newton_tol
     solver.non_linear_solver = newton
     scene.set_solver_params(solver)
     params = diffsim.get_back_propagation_solver_params(scene)
@@ -403,6 +425,7 @@ def run_task(
     parametrize=None,
     params0: np.ndarray | None = None,
     optimizer_kind: str = "adam",
+    curves=None,
 ) -> None:
     """Optimizes the rollout loss over the pose-controller targets.
 
@@ -416,13 +439,16 @@ def run_task(
     (normalized gradient descent: a step of length ``learning_rate`` along the
     gradient, decaying by NGD_DECAY per iteration - the update then follows the
     gradient's direction instead of moving every variable by the learning rate
-    at once, which matters when a jerk can break a contact)."""
+    at once, which matters when a jerk can break a contact). ``curves`` is passed
+    to the recorder (extra geometry to draw per frame, e.g. a rod's centerline)."""
     num_steps = controls0.shape[0]
     guard = ConvergenceGuard(scene)
     bridge = TorchRollout(
         scene, dt=dt, num_steps=num_steps, control_actors=[arm], terminal_losses=[loss]
     )
-    recorder = Recorder(scene, target, look_from=look_from, look_at=look_at, title=title)
+    recorder = Recorder(
+        scene, target, look_from=look_from, look_at=look_at, title=title, curves=curves
+    )
     identity = parametrize is None
     if identity:
         parametrize = lambda p: p
@@ -796,12 +822,237 @@ def task_grasp(output_dir: pathlib.Path, num_iterations: int, check: bool) -> No
         del context
 
 
+def _rotate(q: np.ndarray, o: np.ndarray) -> np.ndarray:
+    """R(q) o for a unit quaternion q = (x, y, z, w)."""
+    v, w = q[:3], q[3]
+    return o + 2.0 * w * np.cross(v, o) + 2.0 * np.cross(v, np.cross(v, o))
+
+
+def _rotate_jacobian(q: np.ndarray, o: np.ndarray) -> np.ndarray:
+    """d(R(q) o)/dq (3 x 4, columns x, y, z, w) of :func:`_rotate`."""
+    v, w = q[:3], q[3]
+    jac = np.zeros((3, 4))
+    for i in range(3):
+        e = np.zeros(3)
+        e[i] = 1.0
+        jac[:, i] = 2.0 * w * np.cross(e, o) + 2.0 * (
+            np.cross(e, np.cross(v, o)) + np.cross(v, np.cross(e, o))
+        )
+    jac[:, 3] = 2.0 * np.cross(v, o)
+    return jac
+
+
+def link_point(actor, local_offset: np.ndarray):
+    """World position of a point fixed in a link's center-of-mass frame, plus the
+    quaternion (XYZW) it was computed with."""
+    transform = actor.get_center_of_mass_transform()
+    q = np.array([transform.rotation[i] for i in range(4)], dtype=np.float64)
+    return np.asarray(transform.translation) + _rotate(q, local_offset), q
+
+
+def build_tendon_finger():
+    """The tendon-driven finger of the physics samples (three passive hinges, a
+    prismatic tendon slider, eyelets on the bones) with a rod actor as the tendon,
+    tied to the slider and the fingertip eyelet by node-to-rigid constraints of the
+    cable's own axial stiffness EA/L. The finger root is welded to the world
+    (RootFree -> HARD) and a pose controller drives the slider only (the hinges get
+    damping, no stiffness). Cable-vs-finger contact is disabled: rod contact adjoints
+    exist for static colliders only, and the cable runs through the eyelets anyway.
+    Returns (scene, finger actor, rod, fingertip link actor, slider DoF index)."""
+    ex = physics.experimental
+    prefab = physics.prefab.load_from_file(
+        prefab_path=str(resolve_asset(TENDON_SCENE)),
+        root_path=str(resolve_asset_root(TENDON_SCENE)),
+    )
+    finger = prefab.actors.articulated[0]
+    finger.name = "finger"
+    joint_type = physics.ArticulatedJointType
+    tracking = []  # one entry per joint (the controller accepts 1 or num-joints entries)
+    for i in range(len(finger.joints)):
+        joint = finger.joints[i]
+        if joint.name == "RootFree":
+            joint.type = joint_type.HARD
+            finger.joints[i] = joint
+        if joint.type == joint_type.PRISMATIC:
+            k, d = TENDON_SLIDER_GAINS
+            tracking.append(physics.PoseTrackingParams(stiffness=k, damping=d, saturation=-1.0))
+        elif joint.type == joint_type.REVOLUTE:
+            tracking.append(
+                physics.PoseTrackingParams(
+                    stiffness=0.0, damping=TENDON_HINGE_DAMPING, saturation=-1.0
+                )
+            )
+        else:
+            tracking.append(physics.PoseTrackingParams(stiffness=0.0, damping=0.0, saturation=-1.0))
+    prefab.controllers.append(
+        physics.prefab.PoseControllerPrefab(articulated_actor="finger", joint_tracking=tracking)
+    )
+    scene = physics.create_scene("Differentiable tendon finger")
+    scene.set_gravity(GRAVITY)
+    added = physics.prefab.add_to_scene(
+        prefab=prefab,
+        scene=scene,
+        params=physics.prefab.PrefabParams(
+            name="demo", translation=[0.0, 0.0, 0.5], apply_scene_settings=False
+        ),
+    )
+    actor = added.filter(physics.ActorType.ARTICULATED)[0]
+    info = actor.get_articulated_shape_info()
+    slider_dof = [
+        info.dof_info[i].offset
+        for i, name in enumerate(info.joint_names)
+        if name == "SliderPrismatic"
+    ][0]
+    links = []
+    scene.for_each_actor(lambda a: links.append(a) if a.is_nested_link_actor() else None)
+
+    def link(suffix):
+        return [a for a in links if a.get_name().endswith(suffix)][0]
+
+    slider, eyelet, tip = link("Slider"), link("Eyelet3"), link("Bone3")
+    # The fingertip point (link_point) must agree with the engine's transform product.
+    engine_tip = tip.get_center_of_mass_transform() * physics.TransformRT(TENDON_FINGERTIP.tolist())
+    assert np.allclose(link_point(tip, TENDON_FINGERTIP)[0], np.asarray(engine_tip.translation), atol=1e-12)
+    # The cable: a straight rod from the slider to the last eyelet.
+    start = np.asarray(slider.get_center_of_mass_transform().translation)
+    end = np.asarray(eyelet.get_center_of_mass_transform().translation)
+    nodes = start + np.linspace(0.0, 1.0, TENDON_ELEMENTS + 1)[:, None] * (end - start)
+    tangent = (end - start) / np.linalg.norm(end - start)
+    axis = np.array([0.0, 0.0, 1.0])
+    axis -= (axis @ tangent) * tangent
+    axis /= np.linalg.norm(axis)
+    model = ex.generate_tubular_rod_model_data(
+        nodes=nodes.tolist(),
+        element_frame_axes=[axis.tolist()] * TENDON_ELEMENTS,
+        radius=TENDON_RADIUS,
+        num_cross_section_segments=6,
+        is_closed_loop=False,
+    )
+    area = np.pi * TENDON_RADIUS**2
+    inertia = 0.25 * np.pi * TENDON_RADIUS**4  # second moment of area of the cross section
+    material = ex.RodMaterialParams(
+        linear_density=TENDON_DENSITY * area,
+        linear_rotational_inertia=TENDON_DENSITY * 2.0 * inertia,
+        axial_stiffness=TENDON_YOUNG * area,
+        torsional_stiffness=0.4 * TENDON_YOUNG * 2.0 * inertia,  # G = E / (2 (1 + nu)), nu = 0.25
+        flexural_stiffness=[TENDON_YOUNG * inertia, TENDON_YOUNG * inertia],
+    )
+    rod = ex.create_rod_actor(
+        scene,
+        ex.RodActorParams(
+            name="tendon",
+            shape=physics.create_model_shape(model),
+            material=material,
+            layer="Tendon",
+            has_gravity=True,
+        ),
+    )
+    for other in ("Bone", "RoutingGuide"):
+        scene.enable_layer_contact_symmetric("Tendon", other, False)
+    stiffness = TENDON_YOUNG * area / np.linalg.norm(end - start)
+    for node, link_actor in ((0, slider), (TENDON_ELEMENTS, eyelet)):
+        scene.create_deformable_node_to_rigid_constraint(
+            deformable_actor=rod.get_handle(),
+            rigid_actor=link_actor.get_handle(),
+            deformable_node_index=node,
+            rigid_local_pos=[0.0, 0.0, 0.0],
+            stiffness=stiffness,
+        )
+    return scene, actor, rod, tip, slider_dof
+
+
+def task_tendon(output_dir: pathlib.Path, num_iterations: int, check: bool) -> None:
+    """Tendon-driven finger: find the tendon pull (per-step slider targets) that
+    brings the fingertip to the pose a hidden reference pull reaches. The
+    gradient of the fingertip's final position w.r.t. the slider targets flows
+    through the passive hinges, the two node-to-link constraints and the cable's
+    elasticity (the rod adjoint); the finger, its controller and the cable form
+    one island. Normalized gradient descent with the decaying step reaches the
+    goal to round-off in ~15 iterations (Adam at a constant 2e-3 oscillated
+    between 1e-7 and 8e-5 in loss, 2026-09-02)."""
+    scene, finger, rod, tip, slider_dof = build_tendon_finger()
+    try:
+        configure(scene, newton_tol=TENDON_NEWTON_TOL)
+        n = finger.get_num_dofs()
+        q0 = np.zeros(n)
+        finger.get_articulated_pose(q0)
+
+        def ramp(pull: float) -> np.ndarray:
+            controls = np.tile(q0, (TENDON_STEPS, 1))
+            controls[:, slider_dof] = q0[slider_dof] + np.linspace(0.0, pull, TENDON_STEPS)
+            return controls
+
+        fingertip = lambda: link_point(tip, TENDON_FINGERTIP)[0]
+        # The goal: where the fingertip ends up under the hidden reference pull.
+        state0 = scene.capture_state()
+        guard = ConvergenceGuard(scene)
+        for targets in ramp(TENDON_PULL_GOAL):
+            finger.set_articulated_target_pose(np.ascontiguousarray(targets))
+            scene.step(TENDON_DT)
+            guard.assert_last_step()
+        goal = fingertip().copy()
+        scene.restore_state(state0, False)
+        scene.release_all_states()
+        controls0 = ramp(TENDON_PULL0)
+        trainable = np.zeros(controls0.shape, dtype=bool)
+        trainable[:, slider_dof] = True  # the hinge targets have no stiffness: zero gradient
+        rod_reference = np.asarray(rod.get_mesh().coordinates, dtype=np.float64).reshape(-1, 3)
+        rod_edges = np.stack(
+            [np.arange(TENDON_ELEMENTS), np.arange(1, TENDON_ELEMENTS + 1)], axis=1
+        )
+
+        def rod_centerline():
+            nodes = rod_reference + np.asarray(rod.get_displacements()).reshape(-1, 4)[:, :3]
+            return [("tendon", nodes, rod_edges, 0.008, [0.85, 0.65, 0.1])]
+
+        class TipLoss:
+            """0.5 |fingertip - goal|^2; the fingertip is a point fixed in the last
+            bone, so the gradient reaches both the translation and the quaternion
+            of its center-of-mass transform (the engine converts the latter to its
+            Lie-parameterized state gradient)."""
+
+            def value(self) -> float:
+                d = fingertip() - goal
+                return 0.5 * float(d @ d)
+
+            def accumulate_output_grad(self) -> None:
+                point, q = link_point(tip, TENDON_FINGERTIP)
+                d = point - goal
+                g = np.zeros(7)
+                g[:3] = d
+                g[3:] = _rotate_jacobian(q, TENDON_FINGERTIP).T @ d
+                diffsim.get_center_of_mass_transform_backward(tip, g)
+
+        run_task(
+            "finger_tendon",
+            scene,
+            finger,
+            controls0=controls0,
+            loss=TipLoss(),
+            tracked_point=fingertip,
+            target=goal,
+            look_from=[0.25, 1.05, 1.0],  # the eyelet side, so the cable and the goal stay visible
+            look_at=[0.4, 0.05, 0.5],
+            title="Tendon finger: normalized gradient descent on the tendon pull (rod adjoint)",
+            output_dir=output_dir,
+            num_iterations=num_iterations,
+            learning_rate=0.012,
+            dt=TENDON_DT,
+            check=check,
+            trainable=trainable,
+            optimizer_kind="ngd",
+            curves=rod_centerline,
+        )
+    finally:
+        physics.destroy_scene(scene)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--output-dir", type=pathlib.Path, default=pathlib.Path("diffsim_videos"))
     parser.add_argument("--iterations", type=int, default=40)
     parser.add_argument(
-        "--task", choices=["reach", "push", "grasp", "both", "all"], default="all"
+        "--task", choices=["reach", "push", "grasp", "tendon", "both", "all"], default="all"
     )
     parser.add_argument("--check", action="store_true", help="finite-difference gradient check first")
     args = parser.parse_args()
@@ -814,6 +1065,8 @@ def main() -> None:
         task_push(args.output_dir, args.iterations, args.check)
     if args.task in ("grasp", "all"):
         task_grasp(args.output_dir, args.iterations, args.check)
+    if args.task in ("tendon", "all"):
+        task_tendon(args.output_dir, args.iterations, args.check)
     print(f"done in {time.time() - start:.1f} s")
     physics.shutdown()
 
