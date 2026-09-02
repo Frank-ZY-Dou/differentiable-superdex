@@ -31,7 +31,17 @@ low-level. :class:`DifferentiableRollout` wraps it into one object that
 - optionally clips each gradient block to a maximum L2 norm, and
 - aggregates the solver diagnostics (finite-difference validity and the
   steps it flagged, worst adjoint residual, worst operator asymmetry, summed
-  solve time) across the sweep.
+  solve time) across the sweep, and
+- optionally refines the time step where the forward Newton solve fails
+  (``max_substep_levels`` > 0): the step is redone from its pre-step state as
+  two half steps, recursively, each accepted substep becoming its own adjoint
+  step with the parent step's inputs held fixed. The physical model is
+  unchanged; only the time discretisation is locally finer, and the reverse
+  sweep differentiates exactly the substeps that were solved (the split
+  decision itself is treated as fixed). External-force gradients of the
+  substeps are summed into the step's column; controller-target gradients are
+  read once per step, at its first substep, because the engine propagates the
+  gradient of an inherited (not re-set) target back to the step that set it.
 
 Requirements are those of ``diffsim`` itself: rigid, articulated,
 standalone soft and rod actors (soft and rod contact against static colliders
@@ -156,6 +166,120 @@ def _clip(block: np.ndarray, max_norm: float | None) -> np.ndarray:
     return block
 
 
+class ForwardSolveError(RuntimeError):
+    """The forward Newton solve of one step did not converge.
+
+    Raised by :func:`step_with_substeps` (and hence by rollouts with
+    ``max_substep_levels`` > 0) when even the finest substep level fails.
+    """
+
+    def __init__(self, step: int, dt: float, status, residual_norm: float, iterations: int):
+        self.step = step
+        self.dt = dt
+        self.status = status
+        self.residual_norm = residual_norm
+        self.iterations = iterations
+        super().__init__(
+            f"forward Newton solve did not converge at step {step} with dt={dt:g} "
+            f"(status {status.name}, residual {residual_norm:.2e}, "
+            f"{iterations} iterations)"
+        )
+
+
+def forward_solve_failed(scene, residual_tolerance: float) -> bool:
+    """Whether the last ``scene.step`` ended without convergence and with a
+    residual above ``residual_tolerance``.
+
+    A solve that stopped on round-off with a residual below the tolerance
+    counts as converged; a solve that hit the iteration limit or diverged with a
+    larger residual is a failure.
+    """
+    stats = scene.get_solver_stats()
+    return (
+        stats.convergence_status != physics.ConvergenceStatus.CONVERGED
+        and stats.residual_norm > residual_tolerance
+    )
+
+
+def _step_adaptive(
+    scene, dt: float, level: int, max_levels: int, residual_tolerance: float,
+    step: int, on_substep, pre,
+) -> list[float]:
+    scene.step(dt)
+    if forward_solve_failed(scene, residual_tolerance):
+        stats = scene.get_solver_stats()
+        if level >= max_levels:
+            scene.release_state(pre)
+            raise ForwardSolveError(
+                step,
+                dt,
+                stats.convergence_status,
+                stats.residual_norm,
+                stats.max_non_linear_iters,
+            )
+        scene.restore_state(pre, False)
+        half = dt / 2.0
+        taken = _step_adaptive(
+            scene, half, level + 1, max_levels, residual_tolerance, step, on_substep, pre
+        )
+        taken += _step_adaptive(
+            scene,
+            half,
+            level + 1,
+            max_levels,
+            residual_tolerance,
+            step,
+            on_substep,
+            scene.capture_state(),
+        )
+        return taken
+    post = scene.capture_state()
+    if on_substep is None:
+        scene.release_state(pre)
+        scene.release_state(post)
+    else:
+        on_substep(pre, post, dt)
+    return [dt]
+
+
+def step_with_substeps(
+    scene,
+    dt: float,
+    max_levels: int,
+    residual_tolerance: float,
+    step: int = 0,
+    on_substep: Callable | None = None,
+) -> list[float]:
+    """Advance ``scene`` by ``dt``; if the forward Newton solve fails, redo the
+    step from its pre-step state as two half steps (recursively, at most
+    ``max_levels`` times).
+
+    Returns the substep sizes actually taken (``[dt]`` when the plain step
+    converged). ``on_substep(pre, post, sub_dt)`` receives the captured states
+    around every accepted substep and owns them afterwards; without it the
+    captures are released. Inputs (controller targets, external forces) are
+    part of the captured state and therefore stay fixed across the substeps.
+    Raises :class:`ForwardSolveError` when the finest level fails too; ``step``
+    only labels that error.
+    """
+    if max_levels < 0:
+        raise ValueError("max_levels must be non-negative")
+    if not residual_tolerance > 0.0:
+        raise ValueError("residual_tolerance must be positive")
+    return _step_adaptive(
+        scene, dt, 0, max_levels, residual_tolerance, step, on_substep,
+        scene.capture_state(),
+    )
+
+
+@dataclasses.dataclass
+class _StepRecord:
+    step: int  # 0-based rollout step this (sub)step belongs to
+    dt: float
+    pre: object
+    post: object
+
+
 @dataclasses.dataclass
 class ActorGradients:
     """Gradients for one dynamic actor, in that actor's own coordinates.
@@ -200,6 +324,11 @@ class RolloutResult:
     # solves (over the sweep) whose PCG aborted and fell back to MINRES.
     max_outer_iters: int = 0
     minres_fallbacks: int = 0
+    # Failure-adaptive substepping (``max_substep_levels`` > 0): the 0-based steps that
+    # were split, with the number of substeps each was solved in, and the total number
+    # of solver steps of the forward rollout (``num_steps`` when nothing was split).
+    split_steps: list = dataclasses.field(default_factory=list)
+    num_solver_steps: int = 0
 
     @property
     def control_gradients(self) -> dict[str, np.ndarray]:
@@ -220,43 +349,88 @@ class DifferentiableRollout:
         num_steps: int,
         truncation_window: int | None = None,
         grad_clip_norm: float | None = None,
+        max_substep_levels: int = 0,
+        substep_residual_tolerance: float | None = None,
     ):
+        """``max_substep_levels`` > 0 enables failure-adaptive substepping: a
+        step whose Newton solve ends without convergence and with a residual
+        above ``substep_residual_tolerance`` (required then; typically a few
+        times the solver tolerance) is redone as two half steps, recursively up
+        to ``max_substep_levels`` halvings, and :class:`ForwardSolveError` is
+        raised if the finest level fails too. With the default 0 the forward
+        rollout never inspects convergence.
+        """
         if num_steps <= 0:
             raise ValueError("num_steps must be positive")
         if truncation_window is not None and truncation_window <= 0:
             raise ValueError("truncation_window must be positive when given")
+        if max_substep_levels < 0:
+            raise ValueError("max_substep_levels must be non-negative")
+        if max_substep_levels > 0:
+            if substep_residual_tolerance is None or not substep_residual_tolerance > 0.0:
+                raise ValueError(
+                    "substep_residual_tolerance must be a positive float when "
+                    "max_substep_levels > 0"
+                )
+        elif substep_residual_tolerance is not None:
+            raise ValueError(
+                "substep_residual_tolerance has no effect without max_substep_levels > 0"
+            )
         self.scene = scene
         self.dt = dt
         self.num_steps = num_steps
         self.truncation_window = truncation_window
         self.grad_clip_norm = grad_clip_norm
+        self.max_substep_levels = max_substep_levels
+        self.substep_residual_tolerance = substep_residual_tolerance
         self.entries = _collect_actors(scene)
 
     # -- pieces ------------------------------------------------------------
 
-    def _forward(self, apply_inputs):
-        pre, post = [], []
-        for step in range(self.num_steps):
-            if apply_inputs is not None:
-                apply_inputs(step)
-            pre.append(self.scene.capture_state())
-            self.scene.step(self.dt)
-            post.append(self.scene.capture_state())
-        return pre, post
+    def _forward(self, apply_inputs) -> list[_StepRecord]:
+        records: list[_StepRecord] = []
+        try:
+            for step in range(self.num_steps):
+                if apply_inputs is not None:
+                    apply_inputs(step)
+                if self.max_substep_levels == 0:
+                    pre = self.scene.capture_state()
+                    self.scene.step(self.dt)
+                    records.append(_StepRecord(step, self.dt, pre, self.scene.capture_state()))
+                    continue
+                step_with_substeps(
+                    self.scene,
+                    self.dt,
+                    self.max_substep_levels,
+                    self.substep_residual_tolerance,
+                    step=step,
+                    on_substep=lambda pre, post, sub_dt, step=step: records.append(
+                        _StepRecord(step, sub_dt, pre, post)
+                    ),
+                )
+        except BaseException:
+            self._release(records)
+            raise
+        return records
 
-    def _read_step_input_grads(self, grads, step: int) -> None:
+    def _release(self, records: Sequence[_StepRecord]) -> None:
+        for record in records:
+            self.scene.release_state(record.pre)
+            self.scene.release_state(record.post)
+
+    def _read_step_input_grads(self, grads, step: int, read_targets: bool = True) -> None:
         real = _real_dtype()
         for entry, out in zip(self.entries, grads.values()):
-            if entry.has_controller:
+            if entry.has_controller and read_targets:
                 g = np.zeros(entry.dofs_size, dtype=real)
                 diffsim.set_articulated_target_pose_backward(entry.actor, g)
-                out.control_targets[:, step] = g
+                out.control_targets[:, step] += g
             if entry.force_dofs:
                 g = np.zeros(len(entry.force_dofs), dtype=real)
                 diffsim.set_external_forces_on_dofs_backward(
                     entry.actor, np.asarray(entry.force_dofs, dtype=np.int32), g
                 )
-                out.external_forces[:, step] = g
+                out.external_forces[:, step] += g
 
     def _read_initial_grads(self, grads) -> None:
         real = _real_dtype()
@@ -311,7 +485,7 @@ class DifferentiableRollout:
             raise ValueError("provide terminal_losses and/or step_losses")
         terminal_losses = list(terminal_losses or [])
 
-        pre, post = self._forward(apply_inputs)
+        records = self._forward(apply_inputs)
 
         loss_value = sum(loss.value() for loss in terminal_losses)
 
@@ -347,14 +521,21 @@ class DifferentiableRollout:
         solve_time = 0.0
         steps_swept = 0
 
+        # Reverse sweep over the solver steps, newest first. A step's losses are
+        # evaluated on its final state, i.e. at the last of its substeps.
         diffsim.reset_back_propagation(self.scene)
-        for i in range(self.num_steps, first_step - 1, -1):
-            diffsim.prepare_back_propagate(self.scene, post[i - 1], pre[i - 1])
-            if i == self.num_steps:
+        for k in range(len(records) - 1, -1, -1):
+            record = records[k]
+            if record.step < first_step - 1:
+                break
+            last_of_step = k == len(records) - 1 or records[k + 1].step != record.step
+            first_of_step = k == 0 or records[k - 1].step != record.step
+            diffsim.prepare_back_propagate(self.scene, record.post, record.pre)
+            if k == len(records) - 1:
                 for loss in terminal_losses:
                     loss.accumulate_output_grad()
-            if step_losses is not None:
-                for loss in step_losses(i - 1):
+            if step_losses is not None and last_of_step:
+                for loss in step_losses(record.step):
                     loss_value += loss.value()
                     loss.accumulate_output_grad()
             diffsim.back_propagate(self.scene)
@@ -362,23 +543,33 @@ class DifferentiableRollout:
 
             stats = diffsim.get_back_propagation_scene_stats(self.scene)
             fd_valid = fd_valid and stats.finite_diff_valid
-            if not stats.finite_diff_valid:
-                flagged_steps.append(i - 1)
+            if not stats.finite_diff_valid and record.step not in flagged_steps:
+                flagged_steps.append(record.step)
             max_residual = max(max_residual, stats.residual_norm)
             max_asymmetry = max(max_asymmetry, stats.hessian_asymmetry)
             max_outer_iters = max(max_outer_iters, stats.max_outer_iters)
             minres_fallbacks += stats.num_minres_fallbacks
             solve_time += stats.solve_duration_sec
 
-            self._read_step_input_grads(grads, i - 1)
+            # Targets are set once per step and inherited by its later substeps; the
+            # engine folds the inherited substeps' target gradients into the first
+            # substep's, so they are read there only. Forces enter every substep.
+            self._read_step_input_grads(grads, record.step, read_targets=first_of_step)
 
         # Initial-state gradients are only complete when the sweep reached
         # the first step.
         if first_step == 1:
             self._read_initial_grads(grads)
 
-        for handle in pre + post:
-            self.scene.release_state(handle)
+        split_steps = []
+        for record in records:
+            if split_steps and split_steps[-1][0] == record.step:
+                split_steps[-1] = (record.step, split_steps[-1][1] + 1)
+            else:
+                split_steps.append((record.step, 1))
+        split_steps = [entry for entry in split_steps if entry[1] > 1]
+
+        self._release(records)
 
         if self.grad_clip_norm is not None:
             for out in grads.values():
@@ -403,4 +594,6 @@ class DifferentiableRollout:
             flagged_steps=flagged_steps[::-1],
             max_outer_iters=max_outer_iters,
             minres_fallbacks=minres_fallbacks,
+            split_steps=split_steps,
+            num_solver_steps=len(records),
         )

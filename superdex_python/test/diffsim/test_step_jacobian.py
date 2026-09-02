@@ -103,6 +103,8 @@ class StepJacobianTest(unittest.TestCase):
         return grad_lie
 
     def test_rigid_step_jacobian_vs_adjoint(self) -> None:
+        # Both steps use the same dt: get_step_jacobian assumes that (see its docs).
+        dts = (DT, DT)
         scene, cube = scenes.rigid_on_plane(
             "coulomb", initial_velocity=(0.0, 0.0, 0.0)
         )
@@ -120,9 +122,9 @@ class StepJacobianTest(unittest.TestCase):
         # From-rest trajectory: s0 (initial; embedded previous state is itself),
         # then two completed steps.
         s0 = scene.capture_state()
-        scene.step(DT)
+        scene.step(dts[0])
         s1 = scene.capture_state()
-        scene.step(DT)
+        scene.step(dts[1])
         s2 = scene.capture_state()
         transform2 = cube.get_center_of_mass_transform()
 

@@ -1417,6 +1417,7 @@ void mochi::ResetBackPropagationContainers(
     CDiffTargetPoseGrad* outTargetPoseGrad) {
   outGradState.value.SetZero();
   outGradDerivedStep.value.SetZero();
+  outGradDerivedStep.stepDt = 0.0;
   if (outTargetPoseGrad) {
     outTargetPoseGrad->propagated.SetZero();
   }

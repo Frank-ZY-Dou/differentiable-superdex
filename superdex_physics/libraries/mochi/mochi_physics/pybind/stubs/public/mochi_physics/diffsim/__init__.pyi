@@ -540,7 +540,9 @@ def get_step_jacobian(
     The rows and columns of the Jacobian matrices are sorted according to the order
     given in Scene.GetActors(). The input states are three consecutive states
     captured during a simulated trajectory: stateNew = state_t, stateCurr =
-    state_t-1, stateOld = state_t-2.
+    state_t-1, stateOld = state_t-2. The two steps must have used the same step size
+    (the previous-delta block assumes dt_t-1 = dt_t; back-propagation handles variable
+    step sizes).
 
     Args:
         scene (Scene): The differentiable scene.

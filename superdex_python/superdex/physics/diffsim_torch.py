@@ -245,6 +245,8 @@ class TorchRollout:
         differentiate_gravity: bool = False,
         terminal_losses: Sequence = (),
         step_losses: Callable[[int], Sequence] | None = None,
+        max_substep_levels: int = 0,
+        substep_residual_tolerance: float | None = None,
     ):
         if not terminal_losses and step_losses is None:
             raise ValueError("provide terminal_losses and/or step_losses")
@@ -253,7 +255,15 @@ class TorchRollout:
         self.differentiate_gravity = bool(differentiate_gravity)
         self._terminal_losses = list(terminal_losses)
         self._step_losses = step_losses
-        self._rollout = DifferentiableRollout(scene, dt=dt, num_steps=num_steps)
+        # Failure-adaptive substepping is forwarded verbatim (see
+        # DifferentiableRollout); ``last_result.split_steps`` reports what was split.
+        self._rollout = DifferentiableRollout(
+            scene,
+            dt=dt,
+            num_steps=num_steps,
+            max_substep_levels=max_substep_levels,
+            substep_residual_tolerance=substep_residual_tolerance,
+        )
         by_name = {entry.name: entry for entry in self._rollout.entries}
 
         def _entry(actor, role: str):

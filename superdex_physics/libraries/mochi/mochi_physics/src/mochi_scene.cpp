@@ -1066,14 +1066,21 @@ void SceneImpl::EnableActorContactSymmetric(
 void SceneImpl::RestoreStatePair(StateHandle curr, StateHandle prev, Error& err) {
   MOCHI_ERROR_RETURN(err);
 
-  // Set the previous state, excluding adjoints.
+  // The step size that produced `curr` (its captured scene time): the pre-step below must run
+  // with it, as the forward step did, because pre-step quantities scale with the current step
+  // size (e.g. the inertia predictor's delta dt * v_prev). The previous state's own step size
+  // is only right for uniform step sizes.
   SReflect::TypeId excludeAdjoints[] = {attribute::HasAdjoint::GetTypeId()};
+  RestorePartialState(curr, /*releaseImmediately*/ false, excludeAdjoints, err);
+  MOCHI_ERROR_RETURN(err);
+  double const currTimeStepSec = _registry.ctx<CSceneTime const>().DeltaTime();
+
+  // Set the previous state, excluding adjoints.
   RestorePartialState(prev, /*releaseImmediately*/ false, excludeAdjoints, err);
   MOCHI_ERROR_RETURN(err);
 
   // Advance time and pre-step ECS, to set TimeStep::Previous components
-  auto timeStepSec = _registry.ctx<CSceneTime>().DeltaTime();
-  _registry.ctx<CSceneTime>().Advance(timeStepSec);
+  _registry.ctx<CSceneTime>().Advance(currTimeStepSec);
   PreStepEcs(_registry);
 
   // Set the current state, excluding adjoints and old targets.
@@ -1391,9 +1398,20 @@ void SceneImpl::BackPropagate(Error& error) {
   // Add to the pose adjoint the projected derived-step adjoint. Store in CDiffContainerState.
   // λq_k += λΔx_k * ∂Δx_k/∂x_k * ∂x_k/∂q_k; with ∂Δx_k/∂x_k = I
   // Also add the contact-force adjoints wrt the current state.
+  // λΔx_k was assembled by the back-propagation of step k+1 as z * ∂r_{k+1}/∂Δx_k under the
+  // model v_k = Δx_k / dt_{k+1}; the delta was produced by step k with v_k = Δx_k / dt_k, so the
+  // true derivative carries the factor dt_{k+1} / dt_k (1 for uniform step sizes; 1 as well
+  // right after a reset, when λΔx_k is zero).
+  // The rescaled λΔx_k feeds both the projection below and the shift in UpdateAdjointsStep1,
+  // so it is rescaled in place.
+  double const stepDt = _registry.ctx<CStatePair const>().stepDt;
   ParallelForEach("PrepareBackPropagationSolve", actors, 1, [&](entt::entity e) {
-    AsView(_registry.get<CDiffContainerDerivedState>(e)) =
-        _registry.get<CDiffDerivedStepGrad const>(e).value;
+    auto& derivedStepGrad = _registry.get<CDiffDerivedStepGrad>(e);
+    if (derivedStepGrad.stepDt > 0.0 && derivedStepGrad.stepDt != stepDt) {
+      derivedStepGrad.value *= static_cast<real>(derivedStepGrad.stepDt / stepDt);
+      derivedStepGrad.stepDt = stepDt;
+    }
+    AsView(_registry.get<CDiffContainerDerivedState>(e)) = derivedStepGrad.value;
 
     ecs::TryInvokeOnEntity(rigid::ProjectDerivedStateGradient, _registry, e);
     ecs::TryInvokeOnEntity(soft::ProjectDerivedStateGradient, _registry, e);
@@ -1443,6 +1461,7 @@ void SceneImpl::BackPropagate(Error& error) {
     ColumnVector<real> temp(derivedStateContainer, &allocator);
     derivedStateContainer = gradDerivedStep;
     gradDerivedStep = temp;
+    _registry.get<CDiffDerivedStepGrad>(e).stepDt = stepDt;
 
     ecs::TryInvokeOnEntity(rigid::ShiftDerivedStateGradient, _registry, e);
     ecs::TryInvokeOnEntity(soft::ShiftDerivedStateGradient, _registry, e);
@@ -1544,6 +1563,9 @@ void SceneImpl::GetStepJacobian(
   StepJacobianSolve(_registry, jacCurrView);
 
   // Set the current state (with the old state as previous).
+  // NOTE: dq_t/dDx_t-1 is assembled under v_t-1 = Dx_t-1 / dt_t; the chain below therefore
+  // assumes that the step stateOld -> stateCurr used the same step size as stateCurr -> stateNew
+  // (documented in the public API). The back-propagation path handles variable step sizes.
   RestoreStatePair(stateCurr, stateOld, error);
   MOCHI_ERROR_RETURN(error);
 

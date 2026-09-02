@@ -65,6 +65,16 @@ end effector starts in contact (no impact), the sweep is slow, and the forward
 Newton tolerance is 1e-9 (tighter settings sit at the round-off floor of this
 model and stall the solver, which the guard would report).
 
+``robot_push_soft.mp4`` (``--task push_soft``) is the same push with a soft
+(neo-Hookean, E = 1e5 Pa) cube. A soft body pressed and dragged by a link can
+trap the forward Newton solve in a limit cycle at isolated steps (the
+regularized stick stiffness of frictional contact samples competing with the
+nodal stiffness; see ContactParams.friction_falloff_vel). Those steps are
+solved with failure-adaptive substepping (``PUSH_SUBSTEP_LEVELS`` halvings of
+the step, each substep its own adjoint step, see
+``superdex.physics.diffsim_rollout``); the guard reports which steps were
+split, and the replay used for the video takes the same substeps.
+
 Requirements: SUPERDEX_PRECISION=double (set below), the robotics extension
 (``superdex.robotics``), polyscope, imageio+ffmpeg, OpenCV, PyTorch, and the
 repository assets (resolved through ``superdex.physics.paths``). Run::
@@ -86,12 +96,13 @@ import numpy as np
 import superdex.physics as physics
 import superdex.robotics as robotics
 import torch
+from superdex.physics.diffsim_rollout import step_with_substeps
 from superdex.physics.diffsim_torch import TorchRollout
 from superdex.physics.paths import resolve_asset, resolve_asset_root
 from superdex.physics.utils import render_model_registry
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from example_diffsim_video import GRAVITY, Recorder, save_loss_curve  # noqa: E402
+from example_diffsim_video import GRAVITY, Recorder, box_tet_mesh, save_loss_curve  # noqa: E402
 
 diffsim = physics.diffsim
 
@@ -128,6 +139,21 @@ TENDON_PULL0, TENDON_PULL_GOAL = 0.03, 0.09  # [m] slider travel: the initial ra
 TENDON_NEWTON_TOL = 5e-7  # the finger-tendon island's Newton residual stalls at ~1e-7 (round-off; ~10 N forces)
 TENDON_FINGERTIP = np.array([0.1, 0.0, 0.0])  # the distal end of the last bone (a 0.2 m box) in its frame
 CUBE_HALF = 0.05
+# Soft push: a neo-Hookean cube of the same size. The cube's friction falloff velocity is
+# widened so that the stick stiffness of a contact sample, 2 mu N / (falloff dt), stays well
+# below the nodal stiffness E h (ContactParams.friction_falloff_vel); the pair value with the
+# arm links is the geometric mean of the two actors' values.
+PUSH_SOFT_YOUNG = 1e5  # [Pa]
+PUSH_SOFT_POISSON = 0.45
+PUSH_SOFT_DENSITY = 300.0  # [kg/m^3]
+PUSH_SOFT_MASS_DAMPING = 1.0  # [1/s]
+PUSH_SOFT_CELLS = 3  # tet-mesh resolution per side
+PUSH_SOFT_FALLOFF = 0.1  # [m/s]
+PUSH_SUBSTEP_LEVELS = 2  # failure-adaptive substepping: at most dt/4
+# The soft cube's Newton solve stalls on round-off at ~1e-5 residual (1e6 penalty samples on a
+# 1e5 Pa body; the arm-only tasks stall at ~1e-9): stalls below this are accepted, the limit-cycle
+# failures sit at 2e-3..4e-2.
+PUSH_SOFT_STALL_TOLERANCE = 1e-4
 CONTACT = physics.ContactParams(penalty_coefficient=1e6, coulomb_friction_coefficient=0.4)
 # The arm's links carry the same frictional material as the cube: the contact
 # pair combines both owners' coefficients by geometric mean, so the arm pushes
@@ -370,10 +396,17 @@ class ConvergenceGuard:
 
     stall_tolerance = 1e-7
 
-    def __init__(self, scene):
+    def __init__(self, scene, stall_tolerance: float | None = None):
         self.scene = scene
+        if stall_tolerance is not None:
+            self.stall_tolerance = stall_tolerance
         self.checked = 0
         self.stalled = 0
+        self.splits: list[tuple[int, int]] = []  # (step, number of substeps) of split steps
+
+    def note_substeps(self, step: int, taken: list) -> None:
+        if len(taken) > 1:
+            self.splits.append((step, len(taken)))
 
     def assert_last_step(self) -> None:
         stats = self.scene.get_solver_stats()
@@ -395,7 +428,8 @@ class ConvergenceGuard:
     def report(self, name: str) -> None:
         print(
             f"[{name}] forward convergence verified on {self.checked} replayed steps "
-            f"({self.stalled} stalled below {self.stall_tolerance:.0e} residual)"
+            f"({self.stalled} stalled below {self.stall_tolerance:.0e} residual, "
+            f"{len(self.splits)} split into substeps: {self.splits[:8]})"
         )
 
 
@@ -426,6 +460,8 @@ def run_task(
     params0: np.ndarray | None = None,
     optimizer_kind: str = "adam",
     curves=None,
+    substep_levels: int = 0,
+    stall_tolerance: float | None = None,
 ) -> None:
     """Optimizes the rollout loss over the pose-controller targets.
 
@@ -440,11 +476,21 @@ def run_task(
     gradient, decaying by NGD_DECAY per iteration - the update then follows the
     gradient's direction instead of moving every variable by the learning rate
     at once, which matters when a jerk can break a contact). ``curves`` is passed
-    to the recorder (extra geometry to draw per frame, e.g. a rod's centerline)."""
+    to the recorder (extra geometry to draw per frame, e.g. a rod's centerline).
+    ``substep_levels`` > 0 enables failure-adaptive substepping in the rollout
+    and in the replay: a step whose Newton solve fails (not converged and above
+    the guard's stall tolerance) is redone as 2, 4, ... substeps. ``stall_tolerance``
+    overrides the guard's default residual floor for stalled solves."""
     num_steps = controls0.shape[0]
-    guard = ConvergenceGuard(scene)
+    guard = ConvergenceGuard(scene, stall_tolerance)
     bridge = TorchRollout(
-        scene, dt=dt, num_steps=num_steps, control_actors=[arm], terminal_losses=[loss]
+        scene,
+        dt=dt,
+        num_steps=num_steps,
+        control_actors=[arm],
+        terminal_losses=[loss],
+        max_substep_levels=substep_levels,
+        substep_residual_tolerance=guard.stall_tolerance if substep_levels else None,
     )
     recorder = Recorder(
         scene, target, look_from=look_from, look_at=look_at, title=title, curves=curves
@@ -468,7 +514,13 @@ def run_task(
             recorder.begin_iteration()
         for step in range(num_steps):
             arm.set_articulated_target_pose(np.ascontiguousarray(targets[step]))
-            scene.step(dt)
+            if substep_levels:
+                taken = step_with_substeps(
+                    scene, dt, substep_levels, guard.stall_tolerance, step=step
+                )
+                guard.note_substeps(step, taken)
+            else:
+                scene.step(dt)
             guard.assert_last_step()
             if capture:
                 recorder.capture(
@@ -498,6 +550,8 @@ def run_task(
                 "  warning: the adjoint's finite-difference self-check flagged steps "
                 f"{result.flagged_steps}"
             )
+        if result.split_steps:
+            print(f"  substepped (step, substeps): {result.split_steps}")
         if iteration == 0 and check:
             check_gradient(bridge, controls0, raw_grad.numpy())
         if iteration in record:
@@ -582,10 +636,19 @@ def task_reach(output_dir: pathlib.Path, num_iterations: int, check: bool) -> No
 
 
 def task_push(output_dir: pathlib.Path, num_iterations: int, check: bool) -> None:
+    _task_push_impl(output_dir, num_iterations, check, soft=False)
+
+
+def task_push_soft(output_dir: pathlib.Path, num_iterations: int, check: bool) -> None:
+    _task_push_impl(output_dir, num_iterations, check, soft=True)
+
+
+def _task_push_impl(output_dir: pathlib.Path, num_iterations: int, check: bool, soft: bool) -> None:
+    name = "robot_push_soft" if soft else "robot_push"
     cube_start = np.array([0.55, 0.0, CUBE_HALF - 0.001])
     goal = np.array([0.80, 0.10, CUBE_HALF])
     # Pre-push pose and a straight slow sweep, from IK on the end effector.
-    print("[robot_push] IK for the initial joint-target trajectory")
+    print(f"[{name}] IK for the initial joint-target trajectory")
     # The engine's IK is a quasi-static simulation towards the target, solved
     # from the previous waypoint's pose: sample the sweep densely (5 cm).
     waypoints = [np.array([0.44 + 0.05 * k, 0.0, 0.10]) for k in range(6)]  # 0.44 .. 0.69
@@ -594,7 +657,7 @@ def task_push(output_dir: pathlib.Path, num_iterations: int, check: bool) -> Non
     keys = [(0, poses[0])] + [(15 * k, poses[k]) for k in range(1, 6)]
     controls0 = interpolate_targets(keys, num_steps)
 
-    scene = physics.create_scene("Differentiable push")
+    scene = physics.create_scene("Differentiable push" + (" (soft cube)" if soft else ""))
     scene.set_gravity(GRAVITY)
     bot, arm, ee, context = spawn_arm(scene)
     scene.create_rigid_actor(
@@ -603,45 +666,87 @@ def task_push(output_dir: pathlib.Path, num_iterations: int, check: bool) -> Non
         is_static=True,
         contact=CONTACT,
     )
-    cube = scene.create_rigid_actor(
-        name="cube",
-        shape=physics.create_tet_mesh_shape(coordinates=cube_coords(CUBE_HALF), connectivity=CUBE_CONN),
-        density=300.0,
-        contact=CONTACT,
-        world_from_local=physics.TransformRT(cube_start.tolist()),
-    )
+    if soft:
+        coordinates, connectivity = box_tet_mesh(size=2.0 * CUBE_HALF, cells=PUSH_SOFT_CELLS)
+        rest = coordinates.reshape(-1, 3)
+        material = physics.SoftMaterialParams(
+            density=PUSH_SOFT_DENSITY, mass_damping_coefficient=PUSH_SOFT_MASS_DAMPING
+        )
+        material.neo_hookean = physics.NeoHookeanMaterialParams(
+            youngs_modulus=PUSH_SOFT_YOUNG, poisson_ratio=PUSH_SOFT_POISSON
+        )
+        cube = scene.create_soft_actor(
+            name="cube",
+            shape=physics.create_tet_mesh_shape(coordinates=coordinates, connectivity=connectivity),
+            material=material,
+            contact=physics.ContactParams(
+                penalty_coefficient=CONTACT.penalty_coefficient,
+                coulomb_friction_coefficient=CONTACT.coulomb_friction_coefficient,
+                friction_falloff_vel=PUSH_SOFT_FALLOFF,
+            ),
+            world_from_local=physics.TransformRT(cube_start.tolist()),
+        )
+
+        def cube_position() -> np.ndarray:
+            # Differentiable soft actors keep their root transform fixed; the motion is
+            # in the nodal displacements. The tracked point is the mean node position.
+            u = np.asarray(cube.get_displacements(), dtype=np.float64).reshape(-1, 3)
+            return cube_start + (rest + u).mean(axis=0)
+
+    else:
+        cube = scene.create_rigid_actor(
+            name="cube",
+            shape=physics.create_tet_mesh_shape(coordinates=cube_coords(CUBE_HALF), connectivity=CUBE_CONN),
+            density=300.0,
+            contact=CONTACT,
+            world_from_local=physics.TransformRT(cube_start.tolist()),
+        )
+
+        def cube_position() -> np.ndarray:
+            return np.asarray(cube.get_center_of_mass_transform().translation)
+
     arm.set_articulated_pose_from_joints(poses[0])
     configure(scene)
 
     class CubeLoss:
         def value(self) -> float:
-            d = np.asarray(cube.get_center_of_mass_transform().translation) - goal
+            d = cube_position() - goal
             return 0.5 * float(d @ d)
 
         def accumulate_output_grad(self) -> None:
-            d = np.asarray(cube.get_center_of_mass_transform().translation) - goal
-            g = np.zeros(7)
-            g[:3] = d
-            diffsim.get_center_of_mass_transform_backward(cube, g)
+            d = cube_position() - goal
+            if soft:
+                num_nodes = rest.shape[0]
+                diffsim.get_displacements_backward(cube, np.tile(d / num_nodes, num_nodes))
+            else:
+                g = np.zeros(7)
+                g[:3] = d
+                diffsim.get_center_of_mass_transform_backward(cube, g)
 
     try:
         run_task(
-            "robot_push",
+            name,
             scene,
             arm,
             controls0=controls0,
             loss=CubeLoss(),
-            tracked_point=lambda: np.asarray(cube.get_center_of_mass_transform().translation),
+            tracked_point=cube_position,
             target=goal,
             look_from=[1.9, -1.6, 0.9],
             look_at=[0.6, 0.05, 0.1],
-            title="FR3 push: Adam on the joint-target trajectory through frictional contact",
+            title=(
+                "FR3 push of a soft cube: Adam on the joint targets, failure-adaptive substeps"
+                if soft
+                else "FR3 push: Adam on the joint-target trajectory through frictional contact"
+            ),
             output_dir=output_dir,
             num_iterations=num_iterations,
             learning_rate=0.002,
             dt=0.02,
             check=check,
             grad_clip=0.02,
+            substep_levels=PUSH_SUBSTEP_LEVELS if soft else 0,
+            stall_tolerance=PUSH_SOFT_STALL_TOLERANCE if soft else None,
         )
     finally:
         robotics.destroy_bot(scene, bot)
@@ -1052,7 +1157,9 @@ def main() -> None:
     parser.add_argument("--output-dir", type=pathlib.Path, default=pathlib.Path("diffsim_videos"))
     parser.add_argument("--iterations", type=int, default=40)
     parser.add_argument(
-        "--task", choices=["reach", "push", "grasp", "tendon", "both", "all"], default="all"
+        "--task",
+        choices=["reach", "push", "push_soft", "grasp", "tendon", "both", "all"],
+        default="all",
     )
     parser.add_argument("--check", action="store_true", help="finite-difference gradient check first")
     args = parser.parse_args()
@@ -1063,6 +1170,8 @@ def main() -> None:
         task_reach(args.output_dir, args.iterations, args.check)
     if args.task in ("push", "both", "all"):
         task_push(args.output_dir, args.iterations, args.check)
+    if args.task in ("push_soft", "all"):
+        task_push_soft(args.output_dir, args.iterations, args.check)
     if args.task in ("grasp", "all"):
         task_grasp(args.output_dir, args.iterations, args.check)
     if args.task in ("tendon", "all"):

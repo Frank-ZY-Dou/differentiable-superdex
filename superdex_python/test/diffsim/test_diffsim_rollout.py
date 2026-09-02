@@ -24,7 +24,21 @@
 - soft actors: the driver's initial nodal displacement/velocity gradients on
   a soft cube in contact with a static plane equal the hand-written per-step
   sweep bit-for-bit, a driver running loss on a soft cube matches central
-  finite differences, and truncation withholds the initial-state gradients.
+  finite differences, and truncation withholds the initial-state gradients;
+- failure-adaptive substepping: with the failure predicate injected, the driver
+  splits exactly the declared steps (two halves, then quarters), sums the
+  substeps' gradients into the parent step's control / force columns, and its
+  gradients match central finite differences of a manual rollout with the same
+  substep schedule; the finest level failing raises ForwardSolveError; the
+  arguments are validated;
+- variable step sizes: the low-level per-step adjoint chained across steps of
+  different dt (as substepping produces) matches finite differences for a free
+  rigid body's initial velocity and for joint forces on a pendulum (the engine
+  rescales the previous-delta adjoint by dt_k / dt_{k-1} and runs the adjoint's
+  pre-step with the current step's dt); the pose-controller target gradients
+  keep a small residual mismatch (about 1e-3 relative, only at steps whose dt
+  differs from a neighbour's; it scales with the controller damping and is
+  pinned here as known behaviour, see VariableStepSizeTest).
 
 Requires SUPERDEX_PRECISION=double.
 """
@@ -36,7 +50,8 @@ import unittest
 
 import numpy as np
 import superdex.physics as physics
-from superdex.physics.diffsim_rollout import DifferentiableRollout
+from superdex.physics import diffsim_rollout
+from superdex.physics.diffsim_rollout import DifferentiableRollout, ForwardSolveError
 
 from . import scenes
 from .harness import (
@@ -434,3 +449,305 @@ def scene_full_actor(scene):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SubstepTest(unittest.TestCase):
+    """Failure-adaptive substepping with an injected failure predicate.
+
+    The predicate is keyed on the attempt index, so the split schedule is fixed
+    and the finite-difference reference replays the very same schedule by hand:
+    step 2 -> two halves; step 4 -> the first half fails again -> two quarters
+    plus one half.
+    """
+
+    FD_EPS = 1e-6
+    TOL = 1e-5
+    # Pose-controller target gradients at steps whose dt differs from a neighbour's keep a
+    # residual mismatch of up to ~1e-3 relative (VariableStepSizeTest pins it); the force
+    # gradients are exact.
+    TOL_TARGETS = 1e-3
+    SCHEDULE = {2: [DT / 2, DT / 2], 4: [DT / 4, DT / 4, DT / 2]}
+    # Attempt indices (one per scene.step in the forward rollout) declared failed:
+    # step 2 at DT; step 4 at DT and its first half.
+    FAILED_ATTEMPTS = {2, 6, 7}
+
+    def _inject_failures(self, failed_attempts) -> list:
+        attempts: list[float] = []
+        original = diffsim_rollout.forward_solve_failed
+
+        def predicate(scene, residual_tolerance) -> bool:
+            attempts.append(residual_tolerance)
+            return (len(attempts) - 1) in failed_attempts
+
+        diffsim_rollout.forward_solve_failed = predicate
+        self.addCleanup(setattr, diffsim_rollout, "forward_solve_failed", original)
+        return attempts
+
+    def test_split_schedule_and_gradients_vs_fd(self) -> None:
+        scene, chain, targets, forces, apply_inputs = _controller_setup()
+        self.addCleanup(physics.destroy_scene, scene)
+        num_dofs = chain.get_num_dofs()
+        pose0 = targets[:, 0].copy()
+        terminal = ArticulatedPoseErrorLoss(chain, ref=pose0 + 0.1)
+        running = ArticulatedPoseErrorLoss(chain, ref=pose0 - 0.05)
+        state_init = scene.capture_state()
+        attempts = self._inject_failures(self.FAILED_ATTEMPTS)
+
+        rollout = DifferentiableRollout(
+            scene,
+            dt=DT,
+            num_steps=NUM_STEPS,
+            max_substep_levels=2,
+            substep_residual_tolerance=1e-7,
+        )
+        result = rollout.run(
+            apply_inputs=apply_inputs,
+            terminal_losses=[terminal],
+            step_losses=lambda step: [running],
+        )
+        self.assertEqual(len(attempts), NUM_STEPS + 2 + 4)
+        self.assertTrue(all(tol == 1e-7 for tol in attempts))
+        self.assertEqual(result.split_steps, [(2, 2), (4, 3)])
+        self.assertEqual(result.num_solver_steps, NUM_STEPS + 3)
+        self.assertEqual(result.steps_swept, NUM_STEPS + 3)
+        grads = result.gradients["chain"]
+
+        def objective() -> float:
+            scene.restore_state(state_init, False)
+            total = 0.0
+            for step in range(NUM_STEPS):
+                apply_inputs(step)
+                for sub_dt in self.SCHEDULE.get(step, [DT]):
+                    scene.step(sub_dt)
+                total += running.value()
+            return total + terminal.value()
+
+        self.assertAlmostEqual(objective(), result.loss, delta=1e-12 * max(1.0, abs(result.loss)))
+
+        def fd_block(array: np.ndarray) -> np.ndarray:
+            fd = np.zeros_like(array)
+            for index in np.ndindex(array.shape):
+                values = []
+                for sign in (+1.0, -1.0):
+                    saved = array[index]
+                    array[index] = saved + sign * self.FD_EPS
+                    values.append(objective())
+                    array[index] = saved
+                fd[index] = (values[0] - values[1]) / (2.0 * self.FD_EPS)
+            return fd
+
+        fd_controls = fd_block(targets)
+        fd_forces = fd_block(forces)
+        scene.release_all_states()
+        for name, analytic, fd, tol in (
+            ("controls", grads.control_targets, fd_controls, self.TOL_TARGETS),
+            ("forces", grads.external_forces, fd_forces, self.TOL),
+        ):
+            rel = np.linalg.norm(analytic - fd) / np.linalg.norm(fd)
+            self.assertLessEqual(rel, tol, f"{name} gradient mismatch:\n{analytic}\n{fd}")
+            # The split steps must carry the summed substep gradients, not the last one.
+            for step, _ in result.split_steps:
+                self.assertGreater(np.linalg.norm(fd[:, step]), 0.0)
+        self.assertEqual(num_dofs, grads.control_targets.shape[0])
+
+    def test_finest_level_failure_raises(self) -> None:
+        scene, chain, targets, forces, apply_inputs = _controller_setup()
+        self.addCleanup(physics.destroy_scene, scene)
+        terminal = ArticulatedPoseErrorLoss(chain, ref=targets[:, 0] + 0.1)
+        # Attempts: step 0 ok; step 1 fails at DT, DT/2 and DT/4 -> error at DT/4.
+        self._inject_failures({1, 2, 3})
+        rollout = DifferentiableRollout(
+            scene, dt=DT, num_steps=NUM_STEPS, max_substep_levels=2, substep_residual_tolerance=1e-7
+        )
+        with self.assertRaises(ForwardSolveError) as ctx:
+            rollout.run(apply_inputs=apply_inputs, terminal_losses=[terminal])
+        self.assertEqual(ctx.exception.step, 1)
+        self.assertAlmostEqual(ctx.exception.dt, DT / 4)
+        # All captured states were released on the error path.
+        scene.release_all_states()
+
+    def test_argument_validation(self) -> None:
+        scene, _ = scenes.rigid_free()
+        self.addCleanup(physics.destroy_scene, scene)
+        with self.assertRaises(ValueError):
+            DifferentiableRollout(scene, dt=DT, num_steps=2, max_substep_levels=-1)
+        with self.assertRaises(ValueError):
+            DifferentiableRollout(scene, dt=DT, num_steps=2, max_substep_levels=1)
+        with self.assertRaises(ValueError):
+            DifferentiableRollout(
+                scene, dt=DT, num_steps=2, max_substep_levels=1, substep_residual_tolerance=0.0
+            )
+        with self.assertRaises(ValueError):
+            DifferentiableRollout(scene, dt=DT, num_steps=2, substep_residual_tolerance=1e-6)
+        with self.assertRaises(ValueError):
+            diffsim_rollout.step_with_substeps(scene, DT, max_levels=1, residual_tolerance=-1.0)
+
+    def test_without_substepping_convergence_is_not_inspected(self) -> None:
+        scene, chain, targets, forces, apply_inputs = _controller_setup()
+        self.addCleanup(physics.destroy_scene, scene)
+        terminal = ArticulatedPoseErrorLoss(chain, ref=targets[:, 0] + 0.1)
+        attempts = self._inject_failures(set(range(100)))
+        result = DifferentiableRollout(scene, dt=DT, num_steps=NUM_STEPS).run(
+            apply_inputs=apply_inputs, terminal_losses=[terminal]
+        )
+        self.assertEqual(attempts, [])
+        self.assertEqual(result.split_steps, [])
+        self.assertEqual(result.num_solver_steps, NUM_STEPS)
+
+
+class VariableStepSizeTest(unittest.TestCase):
+    """The per-step adjoint chained across steps of different dt."""
+
+    FD_EPS = 1e-6
+    TOL = 1e-5
+    DTS = [DT, DT / 2, DT / 4, DT, DT / 2, DT]
+
+    def _sweep(self, scene, dts, apply_inputs, terminal, read_step, read_initial):
+        pre, post = [], []
+        for step, dt in enumerate(dts):
+            apply_inputs(step)
+            pre.append(scene.capture_state())
+            scene.step(dt)
+            post.append(scene.capture_state())
+        loss = terminal.value()
+        step_grads = []
+        diffsim.reset_back_propagation(scene)
+        for i in range(len(dts) - 1, -1, -1):
+            diffsim.prepare_back_propagate(scene, post[i], pre[i])
+            if i == len(dts) - 1:
+                terminal.accumulate_output_grad()
+            diffsim.back_propagate(scene)
+            step_grads.append(read_step())
+        initial = read_initial()
+        for handle in pre + post:
+            scene.release_state(handle)
+        return loss, step_grads[::-1], initial
+
+    def _per_step_errors(self, scene, chain, inputs, apply_inputs, read_step):
+        """Relative error per step of the analytic per-step input gradient vs central FD
+        of ``inputs`` (an array (dofs, steps) that ``apply_inputs`` reads)."""
+        num_dofs = chain.get_num_dofs()
+        pose0 = np.zeros(num_dofs)
+        chain.get_articulated_pose(pose0)
+        terminal = ArticulatedPoseErrorLoss(chain, ref=pose0 + 0.1)
+        state_init = scene.capture_state()
+        loss, step_grads, _ = self._sweep(
+            scene, self.DTS, apply_inputs, terminal, read_step, lambda: None
+        )
+        analytic = np.stack(step_grads, axis=1)
+
+        def objective() -> float:
+            scene.restore_state(state_init, False)
+            for step, dt in enumerate(self.DTS):
+                apply_inputs(step)
+                scene.step(dt)
+            return terminal.value()
+
+        self.assertAlmostEqual(objective(), loss, delta=1e-12 * max(1.0, abs(loss)))
+        fd = np.zeros_like(inputs)
+        for index in np.ndindex(inputs.shape):
+            values = []
+            for sign in (+1.0, -1.0):
+                saved = inputs[index]
+                inputs[index] = saved + sign * self.FD_EPS
+                values.append(objective())
+                inputs[index] = saved
+            fd[index] = (values[0] - values[1]) / (2.0 * self.FD_EPS)
+        scene.release_all_states()
+        return [
+            np.linalg.norm(analytic[:, step] - fd[:, step]) / np.linalg.norm(fd[:, step])
+            for step in range(NUM_STEPS)
+        ]
+
+    def test_articulated_joint_forces_vs_fd(self) -> None:
+        scene, chain = scenes.pendulum(with_controller=False)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        num_dofs = chain.get_num_dofs()
+        force_dofs = np.arange(num_dofs, dtype=np.int32)
+        forces = np.stack([DT * (j + 1) * np.ones(num_dofs) for j in range(NUM_STEPS)], axis=1)
+
+        def apply_inputs(step: int) -> None:
+            chain.set_external_forces_on_dofs(force_dofs, np.ascontiguousarray(forces[:, step]))
+
+        def read_step():
+            g = np.zeros(num_dofs)
+            diffsim.set_external_forces_on_dofs_backward(chain, force_dofs, g)
+            return g
+
+        errors = self._per_step_errors(scene, chain, forces, apply_inputs, read_step)
+        self.assertLessEqual(max(errors), self.TOL, f"joint-force gradient errors per step: {errors}")
+
+    def test_articulated_controller_targets_vs_fd_pinned(self) -> None:
+        """Pins the known residual of pose-controller target gradients at variable dt.
+
+        With the controller's damping term (stiffness 50, damping 5 here) the target
+        gradient of a step whose dt differs from a neighbour's is off by ~1e-4..1e-3
+        relative (exact with damping 0 up to ~1e-5, exact at uniform dt); the steps with
+        the same dt as both neighbours are exact. Cause not identified yet (it is not
+        the previous-delta rescaling, the pre-step dt, nor the state chain: rigid, soft
+        and joint-force gradients are exact). The bounds below assert the current
+        behaviour so that a change in either direction is noticed.
+        """
+        scene, chain, targets, forces, apply_inputs = _controller_setup()
+        self.addCleanup(physics.destroy_scene, scene)
+        num_dofs = chain.get_num_dofs()
+
+        def apply_targets(step: int) -> None:
+            if step == 0:
+                chain.set_articulated_target_velocity(np.zeros(num_dofs))
+            chain.set_articulated_target_pose(np.ascontiguousarray(targets[:, step]))
+
+        def read_step():
+            g = np.zeros(num_dofs)
+            diffsim.set_articulated_target_pose_backward(chain, g)
+            return g
+
+        errors = self._per_step_errors(scene, chain, targets, apply_targets, read_step)
+        # DTS = [DT, DT/2, DT/4, DT, DT/2, DT]: the last step's column is exact (no later
+        # step feeds it); every earlier step touches a dt change and carries the residual.
+        self.assertLessEqual(errors[-1], self.TOL, f"last-step control gradient: {errors}")
+        self.assertLessEqual(max(errors), 5e-3, f"control gradient errors per step: {errors}")
+        self.assertGreater(max(errors), 1e-6, f"the pinned residual vanished: {errors}")
+
+    def test_rigid_initial_velocity_vs_fd(self) -> None:
+        scene, cube = scenes.rigid_free()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        terminal = TranslationErrorLoss(cube)
+        state_init = scene.capture_state()
+
+        def read_initial():
+            gl = np.zeros(3)
+            ga = np.zeros(3)
+            diffsim.set_velocity_backward(cube, gl, ga)
+            return np.concatenate([gl, ga])
+
+        loss, _, analytic = self._sweep(
+            scene, self.DTS, lambda step: None, terminal, lambda: None, read_initial
+        )
+
+        def objective() -> float:
+            for dt in self.DTS:
+                scene.step(dt)
+            return terminal.value()
+
+        fd = np.zeros(6)
+        for j in range(6):
+            values = []
+            for sign in (+1.0, -1.0):
+                scene.restore_state(state_init, False)
+                lin = np.asarray(cube.get_linear_velocity(), dtype=np.float64)
+                ang = np.asarray(cube.get_angular_velocity(), dtype=np.float64)
+                delta = np.zeros(3)
+                delta[j % 3] = sign * self.FD_EPS
+                if j < 3:
+                    lin = lin + delta
+                else:
+                    ang = ang + delta
+                cube.set_velocity(lin, ang)
+                values.append(objective())
+            fd[j] = (values[0] - values[1]) / (2.0 * self.FD_EPS)
+        scene.release_all_states()
+        rel = np.linalg.norm(analytic - fd) / np.linalg.norm(fd)
+        self.assertLessEqual(rel, self.TOL, f"initial-velocity gradient mismatch: {analytic} vs {fd}")

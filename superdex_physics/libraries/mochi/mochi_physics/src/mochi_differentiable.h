@@ -141,7 +141,15 @@ struct CDiffStateGrad {
   MOCHI_STRUCT_END();
 };
 struct CDiffDerivedStepGrad {
+  // Adjoint of the previous step's delta, as assembled by the back-propagation of the step
+  // that consumed it (GradTarget::PreviousDelta), i.e. under that step's model of the previous
+  // velocity v_{k-1} = delta_{k-1} / dt_k.
   ColumnVector<real> value;
+  // Time step of the back-propagated step that assembled `value` (0 after a reset). The delta
+  // itself was produced by the previous step, whose own dt_{k-1} defines v_{k-1} = delta / dt_{k-1};
+  // folding `value` into that step therefore scales it by dt_k / dt_{k-1} (SceneImpl::BackPropagate),
+  // which is the identity for uniform step sizes only.
+  double stepDt = 0.0;
 
   CDiffDerivedStepGrad() = default;
   explicit CDiffDerivedStepGrad(int size) : value(size) {}
@@ -150,6 +158,7 @@ struct CDiffDerivedStepGrad {
   MOCHI_ATTRIBUTE(CaptureState);
   MOCHI_ATTRIBUTE(HasAdjoint);
   MOCHI_FIELD(value);
+  MOCHI_FIELD(stepDt);
   MOCHI_STRUCT_END();
 };
 // Component to store contact-force adjoints, templatized by GradTarget.
