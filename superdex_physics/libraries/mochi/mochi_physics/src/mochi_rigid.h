@@ -238,7 +238,10 @@ void SetupCollidingJacobiansImpl(
     CContactSamples<TimeStep::Current> const& samples,
     CCollJacs<CollRole::Colliding>& outJacobians,
     MatrixView<real const> jacAux = {},
-    Span<int const> dofsAux = {});
+    Span<int const> dofsAux = {},
+    // The previous-state assembly (state and transform at stage start): use the stage-start
+    // collider-space Jacobians of the contact query.
+    bool stageStartContacts = false);
 
 template <TimeStep kTimeStep>
 MOCHI_FORCE_INLINE void SetupCollidingJacobians(
@@ -256,7 +259,10 @@ MOCHI_FORCE_INLINE void SetupCollidingJacobians(
                                      : transform.worldFromLocalStageStart,
       dofOffset,
       samples,
-      outJacobians);
+      outJacobians,
+      {},
+      {},
+      /*stageStartContacts*/ kTimeStep == TimeStep::StageStart);
 }
 
 // Compute the contact Jacobians as collider actor
@@ -266,7 +272,10 @@ void SetupColliderJacobiansImpl(
     CRigidBodyInertia const& rigidInertia,
     CCollJacs<CollRole::Collider>& outJacobians,
     MatrixView<real const> jacAux = {},
-    Span<int const> dofsAux = {});
+    Span<int const> dofsAux = {},
+    // The previous-state assembly (state at stage start): lever arms from the stage-start
+    // contact positions.
+    bool stageStartContacts = false);
 
 template <TimeStep kTimeStep>
 MOCHI_FORCE_INLINE void SetupColliderJacobians(
@@ -276,7 +285,15 @@ MOCHI_FORCE_INLINE void SetupColliderJacobians(
     CDofOffset const& dofOffset,
     CRigidBodyInertia const& rigidInertia,
     CCollJacs<CollRole::Collider>& outJacobians) {
-  SetupColliderJacobiansImpl(state.value, dofOffset, rigidInertia, outJacobians);
+  static_assert(kTimeStep == TimeStep::Current || kTimeStep == TimeStep::StageStart);
+  SetupColliderJacobiansImpl(
+      state.value,
+      dofOffset,
+      rigidInertia,
+      outJacobians,
+      {},
+      {},
+      /*stageStartContacts*/ kTimeStep == TimeStep::StageStart);
 }
 
 /*

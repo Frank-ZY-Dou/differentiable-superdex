@@ -214,13 +214,17 @@ class DMapRTOutput final : public DMapImpl {
       int offset,
       Vec4r com,
       MatrixView<real const> jacAuxPersistentView = {}, // The owner must outlive the Jacobians.
-      Span<int const> dofsAux = {})
+      Span<int const> dofsAux = {},
+      // Lever arms from the stage-start contact positions (the previous-state assembly, where
+      // `state` is the stage-start state) instead of the current ones.
+      bool stageStartContacts = false)
       : _slice(slice),
         _state(state),
         _offset(offset),
         _com(com),
         _jacAux(jacAuxPersistentView),
-        _dofsAux(dofsAux) {
+        _dofsAux(dofsAux),
+        _stageStartContacts(stageStartContacts) {
     MOCHI_ASSERT(_jacAux.empty() == _dofsAux.empty(), "Inconsistent optional arguments");
   }
 
@@ -234,14 +238,20 @@ class DMapRTOutput final : public DMapImpl {
     auto& outJacY = outJacsY[_slice];
 
     int stateSize = _dofsAux.empty() ? RigidSize::kDAll : isize(_dofsAux);
-    outJacY.Resize(true, false, RigidSize::kDAll, stateSize, isize(_query->posColliding));
+    MOCHI_ASSERT(
+        !_stageStartContacts ||
+            isize(_query->posCollidingStageStart) == isize(_query->posColliding),
+        "Stage-start contact positions are missing for the stage-start collider Jacobian");
+    auto const& positions =
+        _stageStartContacts ? _query->posCollidingStageStart : _query->posColliding;
+    outJacY.Resize(true, false, RigidSize::kDAll, stateSize, isize(positions));
 
     // Compute partial derivatives wrt state
     VMatrix3x3r rotT = ToVMatrix3x3Transpose(_state.GetRotation());
     Matrix<real, 3, 3> jacTrans = AsMatrixView(-rotT);
     for (int i = 0; i < outJacY.nContacts; i++) {
       outJacY.Jac(i).template LeftCols<3>(3) = jacTrans;
-      auto radiusVecLocal = ToSimd(_query->posColliding[i]) - _com;
+      auto radiusVecLocal = ToSimd(positions[i]) - _com;
       outJacY.Jac(i).template MiddleCols<3>(3, 3) =
           AsMatrixView(lie::DMultRotTVecDRot(rotT, radiusVecLocal));
     }
@@ -268,6 +278,7 @@ class DMapRTOutput final : public DMapImpl {
   Vec4r const _com; // Local position of the center of mass
   MatrixView<real const> _jacAux{}; // Jacobian of rigid state wrt actual state (optional)
   Span<int const> _dofsAux{}; // DoF indices of actual state (optional)
+  bool const _stageStartContacts; // Lever arms from the stage-start contact positions
   ContactDetectionResult const* _query =
       nullptr; // Contact detection result including contact points
 };

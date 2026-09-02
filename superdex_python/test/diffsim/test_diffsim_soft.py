@@ -77,6 +77,8 @@ import unittest
 import numpy as np
 import superdex.physics as physics
 
+from superdex.physics.diffsim_rollout import DifferentiableRollout
+
 from . import scenes
 
 diffsim = physics.diffsim
@@ -400,14 +402,18 @@ class SoftContractTest(unittest.TestCase):
         scene.release_all_states()
         return grad_u0
 
-    def test_sync_contact_with_dynamic_actor_rejected(self) -> None:
-        # A rigid cube resting on the soft cube: both share an island (sync
-        # contact), whose soft-side previous-state derivative is missing, so
-        # the backward must refuse instead of dropping the term.
+    def test_dynamic_actor_in_the_same_island_is_allowed(self) -> None:
+        # A rigid cube resting on the soft cube: sync contact of the soft's samples
+        # against the box's SDF, in one island. Supported since 2026-09-02 (the
+        # backward used to refuse any island shared with a dynamic actor); the
+        # gradient itself is validated by SoftSyncContactGradientTest. Soft actors
+        # created from Python carry no collider, so the unsupported direction (the
+        # box's samples against a soft SDF, which has no stage-start Hessian) cannot
+        # arise here; the engine rejects it in back_propagate.
         scene, cube = self._soft_on_plane_with_rigid((0.0, 0.0, 0.298))
         self.addCleanup(physics.destroy_scene, scene)
-        with self.assertRaisesRegex(physics.Error, "sync contact"):
-            self._one_step_backward(scene, cube)
+        grad = self._one_step_backward(scene, cube)
+        self.assertGreater(np.abs(grad).max(), 0.0)
 
     def test_dynamic_actor_in_separate_island_is_allowed(self) -> None:
         # The same rigid cube far away lives in its own island: the soft
@@ -507,6 +513,104 @@ CONTACT_PARAM_FIELDS = (
     "viscous_friction_coefficient",
     "normal_viscous_damping_coefficient",
 )
+
+
+class SoftSyncContactGradientTest(unittest.TestCase):
+    """Sync contact (dynamic-dynamic, one island): the soft cube's samples against a
+    rigid box sliding on top of it (:func:`scenes.soft_cube_under_rigid`). The
+    gradient of the box's final position w.r.t. its initial velocity and w.r.t.
+    the soft's initial nodal velocities flows through the frictional contact in
+    both directions (the box moves the soft, the soft's reaction moves the box).
+    The previous-state assembly of deformable samples against a moving rigid
+    collider uses the stage-start collider-space Jacobians and lever arms (C++
+    MochiSoftRigidContact *Previous tests, 2026-09-02)."""
+
+    dt, num_steps = DT, 3
+    goal = np.array([0.03, 0.0, 0.3])
+
+    class _BoxLoss:
+        def __init__(self, rigid, goal):
+            self.rigid, self.goal = rigid, np.asarray(goal, dtype=np.float64)
+
+        def value(self) -> float:
+            d = np.asarray(self.rigid.get_center_of_mass_transform().translation) - self.goal
+            return 0.5 * float(d @ d)
+
+        def accumulate_output_grad(self) -> None:
+            d = np.asarray(self.rigid.get_center_of_mass_transform().translation) - self.goal
+            g = np.zeros(7)
+            g[:3] = d
+            diffsim.get_center_of_mass_transform_backward(self.rigid, g)
+
+    def _rollout_loss(self, rigid_velocity, soft_velocity_delta=None) -> float:
+        scene, soft, rigid = scenes.soft_cube_under_rigid(rigid_velocity=tuple(rigid_velocity))
+        try:
+            _configure(scene)
+            if soft_velocity_delta is not None:
+                soft.set_node_velocities_local(soft_velocity_delta)
+            loss = self._BoxLoss(rigid, self.goal)
+            for _ in range(self.num_steps):
+                scene.step(self.dt)
+            return loss.value()
+        finally:
+            physics.destroy_scene(scene)
+
+    def test_initial_velocity_gradients_through_sync_contact(self) -> None:
+        v0_rigid = np.array([0.2, 0.0, 0.0])
+        scene, soft, rigid = scenes.soft_cube_under_rigid(rigid_velocity=tuple(v0_rigid))
+        self.addCleanup(physics.destroy_scene, scene)
+        _configure(scene)
+        result = DifferentiableRollout(scene, dt=self.dt, num_steps=self.num_steps).run(
+            apply_inputs=lambda step: None, terminal_losses=[self._BoxLoss(rigid, self.goal)]
+        )
+        self.assertTrue(result.fd_valid, result.flagged_steps)
+        self.assertEqual(result.minres_fallbacks, 0)
+        grad_rigid = result.gradients["rigid"].initial_velocity[:3]
+        grad_soft = result.gradients["jelly"].initial_velocity
+        num_nodes = soft.get_num_dofs() // 3
+
+        # Rigid initial velocity (norm-relative: the scene is symmetric in y).
+        fd_rigid = np.zeros(3)
+        for k in range(3):
+            fds = []
+            for eps in (1e-5, 1e-6):
+                dv = np.zeros(3)
+                dv[k] = eps
+                fds.append(
+                    (self._rollout_loss(v0_rigid + dv) - self._rollout_loss(v0_rigid - dv))
+                    / (2.0 * eps)
+                )
+            fd_rigid[k] = fds[0]
+            if abs(fds[0]) > 1e-8:
+                self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), 1e-4, "rough FD")
+        self.assertGreater(np.linalg.norm(fd_rigid), 0.0)
+        rel = np.linalg.norm(grad_rigid - fd_rigid) / np.linalg.norm(fd_rigid)
+        self.assertLessEqual(rel, 1e-5, (grad_rigid, fd_rigid))
+
+        # Soft initial nodal velocities: the z-velocities of the top-face nodes (in
+        # contact with the box) and one x-velocity; an entry counts only when the
+        # two FD estimates agree to 1e-4 relative, and at least two must count.
+        rest = scenes.CUBE_COORDS.reshape(-1, 3)
+        top = [i for i in range(num_nodes) if rest[i, 2] > 0.0]
+        entries = [3 * i + 2 for i in top[:3]] + [3 * top[0]]
+        rel_errors, skipped = {}, {}
+        for k in entries:
+            fds = []
+            for eps in (1e-5, 1e-6):
+                dv = np.zeros(3 * num_nodes)
+                dv[k] = eps
+                fds.append(
+                    (self._rollout_loss(v0_rigid, dv) - self._rollout_loss(v0_rigid, -dv))
+                    / (2.0 * eps)
+                )
+            denom = max(abs(fds[0]), 1e-30)
+            fd_self = abs(fds[0] - fds[1]) / denom
+            if fd_self > 1e-4:
+                skipped[k] = fd_self
+                continue
+            rel_errors[k] = abs(grad_soft[k] - fds[0]) / denom
+        self.assertGreaterEqual(len(rel_errors), 2, f"too few smooth entries: {skipped}")
+        self.assertLessEqual(max(rel_errors.values()), 1e-4, (rel_errors, skipped))
 
 
 class SoftContactParameterGradientTest(unittest.TestCase):

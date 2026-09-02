@@ -183,8 +183,10 @@ template <class ElementT, int kBatchSize = kDefaultFemBatchSize, size_t kMassDof
   };
 }
 
-// Compute the contact Jacobians as colliding actor
-template <typename ActorTag, typename DiscretizationType>
+// Compute the contact Jacobians as colliding actor. For TimeStep::StageStart (the previous-state
+// assembly of differentiable scenes) the samples' collider-space Jacobians and the root transform
+// are the stage-start ones.
+template <typename ActorTag, typename DiscretizationType, TimeStep kTimeStep>
 void SetupCollidingJacobians(
     ecs::Included<ActorTag>,
     ecs::Excluded<TagRomActor, TagNestedSoftActor, TagRodSurfaceContact>,

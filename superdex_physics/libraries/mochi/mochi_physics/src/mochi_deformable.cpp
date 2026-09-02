@@ -413,7 +413,7 @@ MOCHI_COMPUTE_ASYNC_CONTACT_RESPONSE_INST(CFemSurfaceDiscretization, 3);
 MOCHI_COMPUTE_ASYNC_CONTACT_RESPONSE_INST(CFemSegmentDiscretization, 4);
 #undef MOCHI_COMPUTE_ASYNC_CONTACT_RESPONSE_INST
 
-template <typename ActorTag, typename DiscretizationType>
+template <typename ActorTag, typename DiscretizationType, TimeStep kTimeStep>
 void deformable::SetupCollidingJacobians(
     ecs::Included<ActorTag>,
     ecs::Excluded<TagRomActor, TagNestedSoftActor, TagRodSurfaceContact>,
@@ -422,6 +422,8 @@ void deformable::SetupCollidingJacobians(
     CDofOffset const& dofOffset,
     CCollJacs<CollRole::Colliding>& outJacobians) {
   MOCHI_PROFILE_SCOPE();
+  static_assert(kTimeStep == TimeStep::Current || kTimeStep == TimeStep::StageStart);
+  bool constexpr kStageStart = kTimeStep == TimeStep::StageStart;
 
   int constexpr kNumFields = std::is_same_v<ActorTag, TagRodActor> ? 4 : 3;
 
@@ -430,7 +432,8 @@ void deformable::SetupCollidingJacobians(
 
     // Define shared differentiable maps
     DMapDeformable<kNumFields> dsoft(0, dofOffset.dofsOffset);
-    DMapRTConst dtransform(transform.worldFromLocal);
+    DMapRTConst dtransform(
+        kStageStart ? transform.worldFromLocalStageStart : transform.worldFromLocal);
 
     // Find all the Sync jacs
     MOCHI_FILO_STACK_ALLOCATOR(tempAlloc, 256 * sizeof(JacData*)); // Probably more than enough
@@ -450,7 +453,14 @@ void deformable::SetupCollidingJacobians(
 
           // Create differentiable map
           using DQuad = DMapQuad<typename DiscretizationT::ElementT>;
-          DQuad dquad(discretizationImpl.femElements, jac->query->jacColliderFromWorld);
+          MOCHI_ASSERT(
+              !kStageStart || !jac->query->jacColliderFromWorldStageStart.empty(),
+              "Stage-start collider-space Jacobians are missing for the stage-start contact "
+              "Jacobian");
+          DQuad dquad(
+              discretizationImpl.femElements,
+              kStageStart ? jac->query->jacColliderFromWorldStageStart
+                          : jac->query->jacColliderFromWorld);
           DMap<DQuad, DMapRTConst, DMapDeformable<kNumFields>> dmap(&dquad, &dtransform, &dsoft);
 
           auto& jacs = *(jac->jacs);
@@ -460,17 +470,22 @@ void deformable::SetupCollidingJacobians(
   });
 }
 
-#define MOCHI_SETUP_COLLIDING_JACOBIANS_INST(ACTOR_TAG, DISCRETIZATION_TYPE)         \
-  template void deformable::SetupCollidingJacobians<ACTOR_TAG, DISCRETIZATION_TYPE>( \
-      ecs::Included<ACTOR_TAG>,                                                      \
-      ecs::Excluded<TagRomActor, TagNestedSoftActor, TagRodSurfaceContact>,          \
-      DISCRETIZATION_TYPE const& discretization,                                     \
-      CRootTransform const& transform,                                               \
-      CDofOffset const& dofOffset,                                                   \
+#define MOCHI_SETUP_COLLIDING_JACOBIANS_INST(ACTOR_TAG, DISCRETIZATION_TYPE, TIME_STEP)     \
+  template void deformable::SetupCollidingJacobians<ACTOR_TAG, DISCRETIZATION_TYPE, TIME_STEP>( \
+      ecs::Included<ACTOR_TAG>,                                                                 \
+      ecs::Excluded<TagRomActor, TagNestedSoftActor, TagRodSurfaceContact>,                     \
+      DISCRETIZATION_TYPE const& discretization,                                                \
+      CRootTransform const& transform,                                                          \
+      CDofOffset const& dofOffset,                                                              \
       CCollJacs<CollRole::Colliding>& outJacobians);
-MOCHI_SETUP_COLLIDING_JACOBIANS_INST(TagSoftActor, CFemBoundaryDiscretization);
-MOCHI_SETUP_COLLIDING_JACOBIANS_INST(TagShellActor, CFemSurfaceDiscretization);
-MOCHI_SETUP_COLLIDING_JACOBIANS_INST(TagRodActor, CFemSegmentDiscretization);
+MOCHI_SETUP_COLLIDING_JACOBIANS_INST(TagSoftActor, CFemBoundaryDiscretization, TimeStep::Current);
+MOCHI_SETUP_COLLIDING_JACOBIANS_INST(TagShellActor, CFemSurfaceDiscretization, TimeStep::Current);
+MOCHI_SETUP_COLLIDING_JACOBIANS_INST(TagRodActor, CFemSegmentDiscretization, TimeStep::Current);
+MOCHI_SETUP_COLLIDING_JACOBIANS_INST(
+    TagSoftActor, CFemBoundaryDiscretization, TimeStep::StageStart);
+MOCHI_SETUP_COLLIDING_JACOBIANS_INST(
+    TagShellActor, CFemSurfaceDiscretization, TimeStep::StageStart);
+MOCHI_SETUP_COLLIDING_JACOBIANS_INST(TagRodActor, CFemSegmentDiscretization, TimeStep::StageStart);
 
 void deformable::SetupColliderJacobians(
     [[maybe_unused]] ecs::OptionalTag<TagSoftActor> isSoftActor,

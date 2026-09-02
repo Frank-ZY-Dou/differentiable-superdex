@@ -397,6 +397,101 @@ class RodArticulatedIslandTest(unittest.TestCase):
         self.assertLessEqual(np.linalg.norm(default_small / 1e-4 - tight) / scale, 1e-5)
 
 
+class RodDynamicContactAdjointTest(unittest.TestCase):
+    """Sync contact of the rod's centerline samples against a dynamic box sliding on
+    the ground (:func:`scenes.rod_onto_cube`, one island): gradients of the rod's
+    tip position w.r.t. the cube's initial velocity (rigid accessor) and the rod's
+    initial nodal velocities, through the frictional rod-cube contact."""
+
+    dt, num_steps = 0.005, 20
+    goal = np.array([0.3, 0.0, 0.1])
+
+    def test_initial_velocity_gradients_through_dynamic_contact(self) -> None:
+        v0_cube = np.array([0.3, 0.0, 0.0])
+        scene, rod, cube = scenes.rod_onto_cube(cube_velocity=tuple(v0_cube))
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        v0_rod = np.zeros(rod.get_num_dofs())
+        v0_rod[2::4] = -0.5  # the scene's initial rod velocities (no getter exists)
+        result = DifferentiableRollout(scene, dt=self.dt, num_steps=self.num_steps).run(
+            apply_inputs=lambda step: None, terminal_losses=[_TipLoss(rod, 6, self.goal)]
+        )
+        self.assertTrue(result.fd_valid, result.flagged_steps)
+        self.assertEqual(result.minres_fallbacks, 0)
+        grad_cube = result.gradients["cube"].initial_velocity[:3]
+        grad_rod = result.gradients["rod"].initial_velocity
+
+        def rollout(v_cube, v_rod):
+            sc, rd, cb = scenes.rod_onto_cube(cube_velocity=tuple(v_cube))
+            try:
+                configure_for_differentiability(sc)
+                rd.set_node_velocities_local(v_rod)
+                loss = _TipLoss(rd, 6, self.goal)
+                for _ in range(self.num_steps):
+                    sc.step(self.dt)
+                return loss.value(), _node_position(rd, 3)[2]
+            finally:
+                physics.destroy_scene(sc)
+
+        def rollout_loss(v_cube, v_rod):
+            return rollout(v_cube, v_rod)[0]
+
+        # The rod must have reached the cube's top face (else the island never couples).
+        self.assertLess(rollout(v0_cube, v0_rod)[1], 0.205)
+
+        fd_cube = np.zeros(3)
+        for k in range(3):
+            fds = []
+            for eps in (1e-5, 1e-6):
+                dv = np.zeros(3)
+                dv[k] = eps
+                fds.append(
+                    (rollout_loss(v0_cube + dv, v0_rod) - rollout_loss(v0_cube - dv, v0_rod))
+                    / (2.0 * eps)
+                )
+            fd_cube[k] = fds[0]
+            if abs(fds[0]) > 1e-8:
+                self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), 1e-4, "rough FD")
+        self.assertGreater(np.linalg.norm(fd_cube), 0.0)
+        rel = np.linalg.norm(grad_cube - fd_cube) / np.linalg.norm(fd_cube)
+        self.assertLessEqual(rel, 1e-4, (grad_cube, fd_cube))
+
+        # Rod initial velocities. The directional derivative along the gradient is the
+        # clean check (single entries of the fall velocity move the contact onset and
+        # their rollout FD is self-consistent to 2e-4..3e-4 only); the per-entry rows
+        # are checked at their own FD self-consistency level.
+        direction = grad_rod / np.linalg.norm(grad_rod)
+        fds = []
+        for eps in (1e-5, 1e-6):
+            fds.append(
+                (
+                    rollout_loss(v0_cube, v0_rod + eps * direction)
+                    - rollout_loss(v0_cube, v0_rod - eps * direction)
+                )
+                / (2.0 * eps)
+            )
+        self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), 1e-4, "rough directional FD")
+        self.assertLessEqual(abs(np.linalg.norm(grad_rod) - fds[0]) / abs(fds[0]), 1e-4, fds)
+        rel_errors, skipped = {}, {}
+        for k in (4 * 2 + 2, 4 * 3 + 2, 4 * 4 + 2, 4 * 3 + 0):
+            fds = []
+            for eps in (1e-5, 1e-6):
+                dv = np.zeros_like(v0_rod)
+                dv[k] = eps
+                fds.append(
+                    (rollout_loss(v0_cube, v0_rod + dv) - rollout_loss(v0_cube, v0_rod - dv))
+                    / (2.0 * eps)
+                )
+            denom = max(abs(fds[0]), 1e-30)
+            fd_self = abs(fds[0] - fds[1]) / denom
+            if fd_self > 1e-3:
+                skipped[k] = fd_self
+                continue
+            rel_errors[k] = abs(grad_rod[k] - fds[0]) / denom
+        self.assertGreaterEqual(len(rel_errors), 3, f"too few smooth entries: {skipped}")
+        self.assertLessEqual(max(rel_errors.values()), 1e-3, (rel_errors, skipped))
+
+
 class RodSupportBoundaryTest(unittest.TestCase):
     """The unsupported cases must fail loudly, never silently drop a term."""
 
@@ -410,38 +505,28 @@ class RodSupportBoundaryTest(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "stiffness damping"):
             diffsim.make_scene_differentiable(scene)
 
-    def test_contact_with_a_dynamic_collider_fails_at_back_propagate(self) -> None:
-        scene = physics.create_scene("rod_dynamic_contact")
+    def _rod_onto_cube_backward(self, **kwargs) -> None:
+        scene, rod, cube = scenes.rod_onto_cube(**kwargs)
         self.addCleanup(physics.destroy_scene, scene)
-        scene.set_gravity(scenes.GRAVITY)
-        cp = scenes.contact_params("coulomb")
-        # A dynamic cube resting on the ground, and a rod dropped onto it.
-        scene.create_rigid_actor(
-            name="ground",
-            shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
-            is_static=True,
-            contact=cp,
-        )
-        scene.create_rigid_actor(
-            name="cube",
-            shape=scenes.cube_shape(),
-            density=1000.0,
-            contact=cp,
-            collider_type=physics.ColliderType.BOX,
-            world_from_local=physics.TransformRT([0.15, 0.0, 0.099]),
-        )
-        x = np.linspace(0.0, 0.3, 7)
-        nodes = np.stack([x, np.zeros(7), np.full(7, 0.215)], axis=1)
-        rod = scenes._rod_actor(scene, nodes, contact=cp)
         configure_for_differentiability(scene)
-        v = np.zeros(rod.get_num_dofs())
-        v[2::4] = -0.5
-        rod.set_node_velocities_local(v)
-        with self.assertRaisesRegex(Exception, "static colliders only"):
-            DifferentiableRollout(scene, dt=0.005, num_steps=20).run(
-                apply_inputs=lambda step: None,
-                terminal_losses=[_TipLoss(rod, 6, [0.3, 0.0, 0.1])],
-            )
+        DifferentiableRollout(scene, dt=0.005, num_steps=20).run(
+            apply_inputs=lambda step: None,
+            terminal_losses=[_TipLoss(rod, 6, [0.3, 0.0, 0.1])],
+        )
+
+    def test_rod_as_collider_of_a_dynamic_actor_is_rejected(self) -> None:
+        # The cube's samples against the rod's point-cloud collider: no stage-start
+        # SDF Hessian and no stage-start collider Jacobian on the rod side.
+        with self.assertRaisesRegex(Exception, "collider"):
+            self._rod_onto_cube_backward(rod_as_collider=True)
+
+    def test_mesh_collider_is_rejected(self) -> None:
+        # Mesh colliders provide no SDF Hessian (the explicit stage-start normal's
+        # derivative), unlike sphere, box, plane and grid-SDF colliders; the
+        # differentiable scene's stage-start contact query requests Hessians from
+        # every collider, so make_scene_differentiable refuses mesh colliders.
+        with self.assertRaisesRegex(Exception, "[Mm]esh collider"):
+            self._rod_onto_cube_backward(cube_collider=physics.ColliderType.MESH)
 
 
 if __name__ == "__main__":

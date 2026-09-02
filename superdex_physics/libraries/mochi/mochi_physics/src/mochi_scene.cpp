@@ -1284,71 +1284,87 @@ void SceneImpl::BackPropagate(Error& error) {
   MOCHI_ERROR_IF(!allActorsValid, error, "All actors must be rigid, articulated, soft or rod");
   MOCHI_ERROR_RETURN(error);
 
-  // Soft-body contact adjoints cover async contact (against static colliders) only. Sync
-  // contact - a soft actor and a dynamic actor of the same island, in either role - has no
-  // previous-state derivative on the soft side yet, so it must fail loudly instead of
-  // silently dropping a term. Islands are formed from overlapping conservative step bounds,
-  // i.e. from potential sync contact, and island membership is part of the restored state,
-  // so "a soft actor shares its island with another actor" is the exact, state-consistent
-  // criterion (the active-collision lists are not captured with the state).
-  _registry.view<CIslandDescendants const>().each([&](CIslandDescendants const& descendants) {
-    MOCHI_ERROR_RETURN(error);
-    MOCHI_ERROR_IF(
-        !descendants.softActors.empty() && descendants.actors.size() > 1,
-        error,
-        "Soft-body sync contact adjoints are not implemented: a differentiable soft actor "
-        "shares an island with another dynamic actor (potential dynamic-dynamic contact) in "
-        "the prepared step. Only contact against static colliders is supported.");
-  });
-  MOCHI_ERROR_RETURN(error);
-
-  // Rod contact adjoints cover async contact (against static colliders) only. A rod's contact
-  // with a dynamic actor is sync contact (same island), whose previous-state derivative is not
-  // implemented on either side. Rods share islands with dynamic actors through constraints as
-  // well (a tendon and its bones), so instead of the soft-body island criterion require contact
-  // to be filtered out between a differentiable rod and every dynamic collider of its island.
+  // Deformable (soft, rod) contact adjoints cover async contact against static colliders and
+  // sync contact of the deformable's OWN samples against dynamic colliders whose SDF provides
+  // stage-start Hessians (sphere, box, plane and grid-SDF colliders of rigid and articulated
+  // actors: the previous-state assembly differentiates the explicit stage-start normal through
+  // them, and the stage-start contact Jacobians of deformable samples and rigid colliders are
+  // implemented). Not covered, hence rejected loudly instead of silently dropping a term: the
+  // deformable as the COLLIDER of a dynamic colliding actor (its mapped or point-cloud collider
+  // has no stage-start Hessian and no stage-start collider Jacobian), and mesh or point-cloud
+  // colliders of the other actor. Islands are formed from overlapping conservative step bounds
+  // (potential sync contact) and island membership is part of the restored state, so island
+  // membership plus the contact filter is the exact, state-consistent criterion (the
+  // active-collision lists are not captured with the state).
   {
     auto const& filter = _registry.ctx<CContactFilterTable const>();
+    // Directional, like the filter: the colliding actor's samples against the collider.
+    auto contactEnabled = [&](entt::entity colliding, entt::entity collider) {
+      auto const* layerA = _registry.try_get<CContactLayer const>(colliding);
+      auto const* layerB = _registry.try_get<CContactLayer const>(collider);
+      return (layerA && layerB)
+          ? filter.IsContactEnabled(colliding, collider, layerA->id, layerB->id)
+          : filter.IsEntityContactEnabled(colliding, collider);
+    };
+    auto isDeformable = [&](entt::entity e) {
+      return _registry.any_of<TagSoftActor, TagShellActor, TagRodActor>(e);
+    };
+    auto colliderType = [&](entt::entity e) {
+      auto const* info = _registry.try_get<CColliderInfo const>(e);
+      return info ? info->type : ColliderType::None;
+    };
     _registry.view<CIslandDescendants const>().each([&](CIslandDescendants const& descendants) {
       MOCHI_ERROR_RETURN(error);
-      for (auto rod : descendants.rodActors) {
-        if (!_registry.all_of<TagDifferentiableRod>(rod)) {
-          continue;
-        }
-        auto const* rodLayer = _registry.try_get<CContactLayer const>(rod);
-        auto checkCollider = [&](entt::entity other) {
-          if (other == rod || !error.IsOK()) {
-            return;
-          }
-          auto const* colliderInfo = _registry.try_get<CColliderInfo const>(other);
-          if (!colliderInfo || colliderInfo->type == ColliderType::None) {
-            return; // not a collider: the rod cannot touch it
-          }
-          auto const* otherLayer = _registry.try_get<CContactLayer const>(other);
-          bool const enabled = (rodLayer && otherLayer)
-              ? filter.IsContactEnabled(rod, other, rodLayer->id, otherLayer->id)
-              : filter.IsEntityContactEnabled(rod, other);
-          MOCHI_ERROR_IF(
-              enabled,
-              error,
-              "Rod contact adjoints are implemented against static colliders only: a "
-              "differentiable rod shares its island with a dynamic collider it may contact (sync "
-              "contact has no previous-state adjoint). Disable contact between them with contact "
-              "layers or enable_actor_contact.");
-        };
+      auto forEachIslandActor = [&](auto&& fn) {
         for (auto e : descendants.rigidActors) {
-          checkCollider(e);
+          fn(e);
         }
         for (auto e : descendants.softActors) {
-          checkCollider(e);
+          fn(e);
         }
         for (auto e : descendants.shellActors) {
-          checkCollider(e);
+          fn(e);
         }
         for (auto e : descendants.rodActors) {
-          checkCollider(e);
+          fn(e);
         }
-      }
+      };
+      forEachIslandActor([&](entt::entity deformable) {
+        // Differentiable actors carry the adjoint containers.
+        if (!error.IsOK() || !isDeformable(deformable) ||
+            !_registry.all_of<CDiffStateGrad>(deformable)) {
+          return;
+        }
+        forEachIslandActor([&](entt::entity other) {
+          if (!error.IsOK() || other == deformable) {
+            return;
+          }
+          // The deformable as the collider of the other actor's samples.
+          MOCHI_ERROR_IF(
+              colliderType(deformable) != ColliderType::None &&
+                  _registry.all_of<TagUseContact>(other) && contactEnabled(other, deformable),
+              error,
+              "Deformable contact adjoints cover the deformable's own samples against SDF "
+              "colliders only: a differentiable soft or rod actor is a collider of a dynamic "
+              "actor of its island (its mapped / point-cloud collider has no stage-start SDF "
+              "Hessian). Set the deformable's collider type to NONE (its own samples still "
+              "detect contact) or disable contact between them with contact layers or "
+              "enable_actor_contact.");
+          // The other actor as the collider of the deformable's samples.
+          auto const otherType = colliderType(other);
+          if (otherType == ColliderType::None || !contactEnabled(deformable, other)) {
+            return;
+          }
+          MOCHI_ERROR_IF(
+              isDeformable(other) || otherType == ColliderType::PointCloud,
+              error,
+              "Deformable contact adjoints against a dynamic collider need its stage-start SDF "
+              "Hessians (sphere, box, plane and grid-SDF colliders): a differentiable soft or "
+              "rod actor may contact a deformable or point-cloud collider of its island. Use an "
+              "SDF collider or disable contact between them with contact layers or "
+              "enable_actor_contact.");
+        });
+      });
     });
     MOCHI_ERROR_RETURN(error);
   }
@@ -3259,6 +3275,17 @@ void MakeSceneDifferentiableInternal(Scene* scene, Error& error) {
   sceneImpl->ForEachActor([&](Actor* actor) {
     auto e = GetEntity(reg, actor->GetHandle(), error);
     MOCHI_ERROR_RETURN(error);
+    // The stage-start contact query of a differentiable scene computes SDF Hessians (the
+    // derivative of the explicit stage-start normal in the previous-state assembly), which mesh
+    // colliders do not provide (the query asserts); sphere, box, plane and grid-SDF colliders do.
+    if (auto const* colliderInfo = reg.try_get<CColliderInfo const>(e);
+        colliderInfo && colliderInfo->type == ColliderType::Mesh) {
+      MOCHI_ERROR_SET(
+          error,
+          "Mesh colliders are not supported in differentiable scenes (no SDF Hessians for the "
+          "stage-start contact query). Use a box, sphere, plane or SDF collider.");
+      return;
+    }
     if (actor->IsStatic() || actor->GetType() == ActorType::Rigid) {
       return;
     } else if (actor->GetType() == ActorType::Articulated) {

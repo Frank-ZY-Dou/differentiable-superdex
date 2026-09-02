@@ -843,7 +843,8 @@ MOCHI_FORCE_INLINE void SetupCollidingJacobians(
       samples,
       outJacobians,
       jacobianBody.value,
-      jacobianBody.dofs);
+      jacobianBody.dofs,
+      /*stageStartContacts*/ kTimeStep == TimeStep::StageStart);
 }
 
 // Compute the contact Jacobians as collider actor
@@ -856,13 +857,15 @@ MOCHI_FORCE_INLINE void SetupColliderJacobians(
     CArticulatedRigidJacobian const& jacobianBody,
     CRigidBodyInertia const& rigidInertia,
     CCollJacs<CollRole::Collider>& outJacobians) {
+  static_assert(kTimeStep == TimeStep::Current || kTimeStep == TimeStep::StageStart);
   mochi::rigid::SetupColliderJacobiansImpl(
       state.value,
       reg.get<CDofOffset const>(entArticulated.entity),
       rigidInertia,
       outJacobians,
       jacobianBody.value,
-      jacobianBody.dofs);
+      jacobianBody.dofs,
+      /*stageStartContacts*/ kTimeStep == TimeStep::StageStart);
 }
 
 /*

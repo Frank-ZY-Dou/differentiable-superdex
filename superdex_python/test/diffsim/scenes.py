@@ -465,7 +465,16 @@ def rod_free(num_elements: int = 8, length: float = 0.4):
     return scene, rod
 
 
-def _rod_actor(scene, nodes, name="rod", axis_hint=(0.0, 1.0, 0.0), material=None, layer="", contact=None):
+def _rod_actor(
+    scene,
+    nodes,
+    name="rod",
+    axis_hint=(0.0, 1.0, 0.0),
+    material=None,
+    layer="",
+    contact=None,
+    collider_type=None,
+):
     """An open rod actor along ``nodes`` (N x 3) with material frame axes from
     ``axis_hint`` projected orthogonal to each element, 4 DoFs per node."""
     ex = physics.experimental
@@ -497,6 +506,8 @@ def _rod_actor(scene, nodes, name="rod", axis_hint=(0.0, 1.0, 0.0), material=Non
         params["layer"] = layer
     if contact is not None:
         params["contact"] = contact
+    if collider_type is not None:
+        params["collider_type"] = collider_type
     return ex.create_rod_actor(scene, ex.RodActorParams(**params))
 
 
@@ -539,6 +550,97 @@ def rod_with_cube(cube_velocity=(0.3, 0.0, 0.0)):
         rigid_local_pos=[0.0, 0.0, half],
         stiffness=2e3,
     )
+    cube.set_velocity(list(cube_velocity), [0.0, 0.0, 0.0])
+    return scene, rod, cube
+
+
+def soft_cube_under_rigid(friction: str = "rich", rigid_velocity=(0.2, 0.0, 0.0)):
+    """A soft cube on the ground with a dynamic rigid box resting on top of it (1 mm
+    into it, like the other contact scenes) and sliding with ``rigid_velocity``:
+    sync contact of the soft cube's samples against the box's SDF, in one island.
+    The reverse direction (the box's samples against the soft's mapped SDF) is
+    disabled by the asymmetric layer filter: deformable colliders have no
+    stage-start SDF Hessian, and the backward rejects them. Returns (scene, soft,
+    rigid)."""
+    scene = physics.create_scene(f"diffsim_soft_under_rigid_{friction}")
+    scene.set_gravity(GRAVITY)
+    cp = contact_params(friction)
+    scene.create_rigid_actor(
+        name="ground",
+        shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+        is_static=True,
+        contact=cp,
+    )
+    soft = scene.create_soft_actor(
+        name="jelly",
+        layer="Soft",
+        shape=cube_shape(),
+        material=physics.SoftMaterialParams(),
+        contact=cp,
+        world_from_local=physics.TransformRT([0.0, 0.0, 0.099]),
+    )
+    rigid = scene.create_rigid_actor(
+        name="rigid",
+        layer="Rigid",
+        shape=cube_shape(),
+        density=1000.0,
+        contact=cp,
+        collider_type=physics.ColliderType.BOX,
+        world_from_local=physics.TransformRT([0.0, 0.0, 0.298]),
+    )
+    scene.enable_layer_contact_asymmetric("Rigid", "Soft", False)
+    rigid.set_velocity(list(rigid_velocity), [0.0, 0.0, 0.0])
+    return scene, soft, rigid
+
+
+def rod_onto_cube(
+    friction: str = "coulomb",
+    ground_friction: str = "none",
+    cube_velocity=(0.3, 0.0, 0.0),
+    cube_collider=physics.ColliderType.BOX,
+    rod_as_collider: bool = False,
+):
+    """A dynamic cube sliding on the ground with a horizontal rod dropped onto it:
+    sync contact of the rod's centerline samples against the cube's SDF (one
+    island), with the rod-cube pair in the ``friction`` regime and the cube-ground
+    pair in ``ground_friction`` (a pair combines both owners' parameters by
+    geometric mean, so "none" on the ground makes that pair frictionless: with
+    Coulomb friction on both pairs the cube-velocity gradient was 2.3e-4 off its
+    rollout FD, the rod-cube pair alone 2.6e-5 and the ground pair alone 5.5e-5,
+    2026-09-02). Rods are no colliders by default; with ``rod_as_collider`` the
+    rod gets a point-cloud collider that the cube's samples test against (that
+    direction has no adjoint). ``cube_collider`` selects the cube's collider
+    type (MESH colliders have no SDF Hessian). Returns (scene, rod, cube)."""
+    scene = physics.create_scene(f"diffsim_rod_onto_cube_{friction}")
+    scene.set_gravity(GRAVITY)
+    cp = contact_params(friction)
+    scene.create_rigid_actor(
+        name="ground",
+        shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+        is_static=True,
+        contact=contact_params(ground_friction),
+    )
+    cube = scene.create_rigid_actor(
+        name="cube",
+        layer="Rigid",
+        shape=cube_shape(),
+        density=1000.0,
+        contact=cp,
+        collider_type=cube_collider,
+        world_from_local=physics.TransformRT([0.15, 0.0, 0.099]),
+    )
+    x = np.linspace(0.0, 0.3, 7)
+    nodes = np.stack([x, np.zeros(7), np.full(7, 0.215)], axis=1)
+    rod = _rod_actor(
+        scene,
+        nodes,
+        layer="Rod",
+        contact=cp,
+        collider_type=physics.ColliderType.POINT_CLOUD if rod_as_collider else None,
+    )
+    velocities = np.zeros(rod.get_num_dofs())
+    velocities[2::4] = -0.5
+    rod.set_node_velocities_local(velocities)
     cube.set_velocity(list(cube_velocity), [0.0, 0.0, 0.0])
     return scene, rod, cube
 

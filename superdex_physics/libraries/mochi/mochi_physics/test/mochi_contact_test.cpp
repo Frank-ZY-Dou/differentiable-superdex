@@ -866,6 +866,8 @@ INSTANTIATE_TEST_SUITE_P(
 class MochiSoftRigidContact : public MochiContactTestBase {
   ColumnVector<real> _posA;
   TransformRT _posB;
+  ColumnVector<real> _posAold;
+  TransformRT _posBold;
 
  public:
   MochiSoftRigidContact() {
@@ -899,6 +901,8 @@ class MochiSoftRigidContact : public MochiContactTestBase {
     posBold.SetTranslation(_posB.GetTranslation() + Real3(0.02_r, 0.01_r, -0.01_r));
     posBold.SetRotation(
         Quaternion::FromRotationVector(Vec4r(-0.1_r, -0.1_r, -0.2_r)) * _posB.GetRotation());
+    _posAold = posAold.value.Duplicate();
+    _posBold = posBold;
 
     InitSoftCubeStageStart(_colliding);
   }
@@ -908,6 +912,11 @@ class MochiSoftRigidContact : public MochiContactTestBase {
     reg.get<CDisplacementSlice<real, TimeStep::Current>>(_colliding).value = _posA;
     reg.get<CRigidState<TimeStep::Current>>(_collider).value = _posB;
     SetTransformFromState(_collider, _posB);
+    // The previous-state tests perturb the stage-start states: restore them too.
+    reg.get<CDisplacementSlice<real, TimeStep::StageStart>>(_colliding).value = _posAold;
+    InitSoftCubeStageStart(_colliding);
+    reg.get<CRigidState<TimeStep::StageStart>>(_collider).value = _posBold;
+    SetStageStartTransformFromState(_collider, _posBold);
   }
 
   void AddToState(int globalDof, real eps) override {
@@ -928,6 +937,25 @@ class MochiSoftRigidContact : public MochiContactTestBase {
         rigidState.SetRotation(Quaternion::FromRotationVector(delta) * rigidState.GetRotation());
       }
       SetTransformFromState(_collider, rigidState);
+    }
+  }
+
+  void AddToOldState(int globalDof, real eps) override {
+    auto [entity, localDof] = GetEntityAndLocalDofFromGlobalDof(globalDof);
+    auto& reg = GetRegistry();
+    if (entity == _colliding) {
+      // Change the stage-start state of a node of object A (and its stage-start samples).
+      reg.get<CDisplacementSlice<real, TimeStep::StageStart>>(_colliding).value[localDof] += eps;
+      InitSoftCubeStageStart(_colliding);
+    } else {
+      Vec4r delta = SimdBasisVector(localDof % 3) * eps;
+      auto& rigidState = reg.get<CRigidState<TimeStep::StageStart>>(_collider).value;
+      if (localDof < 3) {
+        rigidState.SetTranslation(rigidState.GetTranslation() + ToReal3(delta));
+      } else {
+        rigidState.SetRotation(Quaternion::FromRotationVector(delta) * rigidState.GetRotation());
+      }
+      SetStageStartTransformFromState(_collider, rigidState);
     }
   }
 };
@@ -983,7 +1011,15 @@ INSTANTIATE_TEST_SUITE_P(
             true,
             1e-3_r,
             1e-3_r,
-            true}),
+            true},
+        // Previous-state (stage-start) derivatives of the soft samples against a moving rigid
+        // collider: the sync-contact adjoint of deformable colliding actors (2026-09-02). The
+        // residual matched the finite differences of the objective to 1.3e-7 (viscous), 5.8e-7
+        // (Coulomb) and 3.2e-6 (damping) relative.
+        TestParams{"NoFrictionPrevious", GradTarget::Previous, 0_r, 0_r, 0_r, true, {}, {}},
+        TestParams{"ViscousPrevious", GradTarget::Previous, 0_r, 1_r, 0_r, true, 1e-4_r, {}},
+        TestParams{"CoulombPrevious", GradTarget::Previous, 0.5_r, 0_r, 0_r, true, 1e-4_r, {}},
+        TestParams{"DampingPrevious", GradTarget::Previous, 0_r, 0_r, 1_r, true, 1e-4_r, {}}),
     [](::testing::TestParamInfo<TestParams> const& info) { return info.param.name; });
 
 class MochiRigidSoftContact : public MochiContactTestBase {
@@ -1069,6 +1105,10 @@ INSTANTIATE_TEST_SUITE_P(
         TestParams{"ViscousExplicit", GradTarget::Current, 0_r, 10_r, 0_r, true, 1e-3_r, 2e-2_r},
         TestParams{"CoulombExplicit", GradTarget::Current, 0.5_r, 0_r, 0_r, true, 1e-3_r, 3e-1_r},
         TestParams{"DampingExplicit", GradTarget::Current, 0_r, 0_r, 10_r, true, 2e-3_r, 1e-2_r}),
+    // No previous-state variants: the soft actor is the collider here, and the mapped (soft)
+    // collider provides no stage-start SDF Hessian for the explicit-normal derivative (the
+    // previous-state assembly asserts). Differentiable scenes reject soft colliders of dynamic
+    // colliding actors for the same reason.
     [](::testing::TestParamInfo<TestParams> const& info) { return info.param.name; });
 
 // Scene with 2 soft actors. Actor A is a translated soft cube. Actor B is a soft cube at the
@@ -1153,6 +1193,10 @@ INSTANTIATE_TEST_SUITE_P(
         TestParams{"ViscousExplicit", GradTarget::Current, 0_r, 10_r, 0_r, true, 1e-3_r, 1e-1_r},
         TestParams{"CoulombExplicit", GradTarget::Current, 0.5_r, 0_r, 0_r, true, 1e-3_r, 1e-1_r},
         TestParams{"DampingExplicit", GradTarget::Current, 0_r, 0_r, 10_r, true, 1e-3_r, 5e-3_r}),
+    // No previous-state variants: the soft actor is the collider here, and the mapped (soft)
+    // collider provides no stage-start SDF Hessian for the explicit-normal derivative (the
+    // previous-state assembly asserts). Differentiable scenes reject soft colliders of dynamic
+    // colliding actors for the same reason.
     [](::testing::TestParamInfo<TestParams> const& info) { return info.param.name; });
 
 class MochiSoftSoftContactDeepFlow : public MochiSoftSoftContact {

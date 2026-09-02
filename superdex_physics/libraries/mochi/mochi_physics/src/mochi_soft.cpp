@@ -345,8 +345,14 @@ static void AssembleBodyGradTarget(
     ActorSnle& outSnle,
     CActiveVolumeElements const* activeVolElems) {
   MOCHI_PROFILE_SCOPE();
-  MOCHI_ASSERT_VERBOSE(
-      !params.assemObj && params.assemRes && !params.assemDRes, "Invalid request");
+  MOCHI_ASSERT_VERBOSE(params.assemRes && !params.assemDRes, "Invalid request");
+  // With assemObj the objective is the previous-state-dependent part of the step objective
+  // (inertia and mass damping; the elastic energy does not depend on the previous state), so
+  // its finite differences w.r.t. the previous state match the residual assembled below. It
+  // must be reset like the Current path does: the actor's storage persists across assemblies.
+  if (params.assemObj) {
+    outSnle.objective = 0.0;
+  }
 
   auto const gradTarget = params.gradTarget;
   if (gradTarget == GradTarget::CurrentInput || gradTarget == GradTarget::PreviousInput) {

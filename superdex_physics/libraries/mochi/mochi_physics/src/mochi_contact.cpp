@@ -1329,20 +1329,20 @@ static void InitCollidingJacobians(
   ecs::ScheduleInvokeForEach(
       sem,
       "deformable::SetupCollidingJacobians<TagSoftActor, CFemBoundaryDiscretization>",
-      &deformable::SetupCollidingJacobians<TagSoftActor, CFemBoundaryDiscretization>,
+      &deformable::SetupCollidingJacobians<TagSoftActor, CFemBoundaryDiscretization, kTimeStep>,
       reg,
       descendants.softActors);
   ecs::ScheduleInvokeForEach(
       sem,
       "deformable::SetupCollidingJacobians<TagShellActor, CFemSurfaceDiscretization>",
-      &deformable::SetupCollidingJacobians<TagShellActor, CFemSurfaceDiscretization>,
+      &deformable::SetupCollidingJacobians<TagShellActor, CFemSurfaceDiscretization, kTimeStep>,
       reg,
       descendants.shellActors);
   // Centerline Jacobians for rods without surface contact.
   ecs::ScheduleInvokeForEach(
       sem,
       "deformable::SetupCollidingJacobians<TagRodActor, CFemSegmentDiscretization>",
-      &deformable::SetupCollidingJacobians<TagRodActor, CFemSegmentDiscretization>,
+      &deformable::SetupCollidingJacobians<TagRodActor, CFemSegmentDiscretization, kTimeStep>,
       reg,
       descendants.rodActors);
   // Jacobians for rods with surface contact.

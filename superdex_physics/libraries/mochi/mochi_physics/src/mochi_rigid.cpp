@@ -455,7 +455,8 @@ void rigid::SetupCollidingJacobiansImpl(
     CContactSamples<TimeStep::Current> const& samples,
     CCollJacs<CollRole::Colliding>& outJacobians,
     MatrixView<real const> jacAux,
-    Span<int const> dofsAux) {
+    Span<int const> dofsAux,
+    bool stageStartContacts) {
   MOCHI_PROFILE_SCOPE();
 
   // Create sync-rigid differentiable map, shared by all Jacobians
@@ -470,13 +471,18 @@ void rigid::SetupCollidingJacobiansImpl(
         dmapSyncRigid.GetJac(jac.query->sampleIndices, jacs);
       } else {
         // Create regular differentiable map
+        MOCHI_ASSERT(
+            !stageStartContacts || !jac.query->jacColliderFromWorldStageStart.empty(),
+            "Stage-start collider-space Jacobians are missing for the stage-start contact "
+            "Jacobian");
         DMapRTInput dtransform(
             0,
             state,
             transform,
             dofOffset.dofsOffset,
             samples.positions,
-            jac.query->jacColliderFromWorld,
+            stageStartContacts ? jac.query->jacColliderFromWorldStageStart
+                               : jac.query->jacColliderFromWorld,
             jacAux,
             dofsAux);
         DMap<DMapRTInput> dmap(&dtransform);
@@ -493,12 +499,19 @@ void rigid::SetupColliderJacobiansImpl(
     CRigidBodyInertia const& rigidInertia,
     CCollJacs<CollRole::Collider>& outJacobians,
     MatrixView<real const> jacAux,
-    Span<int const> dofsAux) {
+    Span<int const> dofsAux,
+    bool stageStartContacts) {
   MOCHI_PROFILE_SCOPE();
 
   // Create differentiable maps
   DMapRTOutput dtransform(
-      0, state, dofOffset.dofsOffset, rigidInertia.GetCenterOfMassLocal(), jacAux, dofsAux);
+      0,
+      state,
+      dofOffset.dofsOffset,
+      rigidInertia.GetCenterOfMassLocal(),
+      jacAux,
+      dofsAux,
+      stageStartContacts);
   DMap<DMapRTOutput> dmap(&dtransform);
   DMapSyncRigid dsyncRigid(0, dofOffset.dofsOffset, jacAux, dofsAux);
   DMap<DMapSyncRigid> dmapSyncRigid(&dsyncRigid);
