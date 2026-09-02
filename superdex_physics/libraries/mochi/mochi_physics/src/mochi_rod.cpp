@@ -94,6 +94,8 @@ void InitializeOnce(entt::registry& reg) {
   ecs::RegisterComponent<CRodContactSkinningData>(reg);
   ecs::RegisterComponent<CRodDeformedContactSkinNodes>(reg);
   ecs::RegisterComponent<TagRodSurfaceContact>(reg);
+  ecs::RegisterComponent<TagDifferentiableRod>(reg);
+  ecs::RegisterComponent<CRodCarriedFrameGrad>(reg);
 }
 
 // Serializes frame axes to the packed pose vector layout [displacement_twist | axes].
@@ -164,14 +166,39 @@ void EntityPostNewIncrement(
     ColumnVectorView<real const> reference,
     ColumnVectorView<real const> increment,
     ecs::Included<TagRodActor>,
+    ecs::OptionalTag<TagDifferentiableRod> isDifferentiable,
     CDofOffset const& dofOffset,
     CActorDofInfo const& actorDofInfo,
     CPolylineMesh const& mesh,
+    CRodPose<TimeStep::StageStart> const& stageStartPose,
     CRodPose<TimeStep::Current>& currPose) {
   MOCHI_PROFILE_SCOPE();
   auto const refPose = reference.MiddleRows(dofOffset.poseOffset, actorDofInfo.poseSize);
   auto const refDisplacement = refPose.MiddleRows(0, actorDofInfo.dofsSize);
   auto const dofDelta = increment.MiddleRows(dofOffset.dofsOffset, actorDofInfo.dofsSize);
+
+  if (isDifferentiable) {
+    // [Differentiability] Retract from the stage-start pose with the total increment. Chaining
+    // the transport from the reference iterate makes the frame axes depend on the Newton path
+    // (the holonomy of the tangents visited), while the adjoint differentiates a step map in
+    // which the axes are a function of the step's displacement-twist DoFs alone. The stage-start
+    // twist DoFs are zero (EntityIncrementStep), so the twist entries of the total increment are
+    // the DoFs themselves.
+    int const numDofs = actorDofInfo.dofsSize;
+    MOCHI_FILO_STACK_ALLOCATOR(allocator, 4 * 256 * sizeof(real));
+    ColumnVector<real> totalDelta(numDofs, &allocator);
+    AsView(totalDelta) = refDisplacement;
+    AsView(totalDelta) += dofDelta;
+    AsView(totalDelta) -= stageStartPose.value.displacements;
+    rod::ApplyLieDeltaToPose(
+        mesh.nodes,
+        AsConstView(stageStartPose.value.displacements),
+        MakeConstSpan(stageStartPose.value.frameAxes),
+        AsConstView(totalDelta),
+        currPose.value.displacements,
+        MakeSpan(currPose.value.frameAxes));
+    return;
+  }
 
   // Reference axes are stored contiguously after displacement DoFs in the packed pose vector,
   // with the same memory layout as Real3. Unflatten directly to avoid copying.
@@ -1641,11 +1668,361 @@ static void AddExternalForces(
   };
 }
 
+namespace {
+
+// Deformed edge vector of a rod element (node 1 minus node 0).
+Real3 ElementEdge(Span<Real3 const> meshNodes, ColumnVectorView<real const> displacements, Int2 nodes) {
+  auto position = [&](int n) {
+    int const dof = fem::kNumRodFields * n;
+    return meshNodes[n] + Real3{displacements[dof], displacements[dof + 1], displacements[dof + 2]};
+  };
+  return position(nodes[1]) - position(nodes[0]);
+}
+
+// Adds g, a vector orthogonal to the element's tangent t, times the transpose of the tangent's
+// Jacobian w.r.t. the two node displacements to outGrad: dt/dx_1 = (I - t t^T)/|edge| = -dt/dx_0,
+// so (dt/dx_1)^T g = g/|edge| for g orthogonal to t.
+void AddTangentGradient(Int2 nodes, real invEdgeLength, Real3 const& g, ColumnVectorView<real> outGrad) {
+  for (int d = 0; d < 3; ++d) {
+    real const value = g[d] * invEdgeLength;
+    outGrad[fem::kNumRodFields * nodes[1] + d] += value;
+    outGrad[fem::kNumRodFields * nodes[0] + d] -= value;
+  }
+}
+
+// Bend/twist stress alone (no damping): the only term of the rod energy that depends on the frame
+// axes, hence on the previous state through their transport.
+[[nodiscard]] ElOpFnType<fem::RodStencilElement, fem::kNumRodFields> MakeBatchedBendTwistOp(
+    Span<Real3 const> meshNodes,
+    Span<Real3 const> frameAxes,
+    Span<Real3 const> referenceAxes,
+    Real2 flexuralStiffness,
+    real torsionalStiffness) {
+  constexpr int kBatchSize = kDefaultFemBatchSize;
+  return [=](NdArray<int, kBatchSize> const& elemIndices,
+             Span<int const> indicesFlat,
+             fem::BatchRodVector<kBatchSize> const& displ,
+             BatchDouble<kBatchSize>* outEnergy,
+             fem::BatchRodVector<kBatchSize>* outRes,
+             fem::BatchRodMatrix<kBatchSize>* outDRes,
+             bool /*projectPsd*/) -> bool {
+    return fem::RodBendTwistStress<kBatchSize>(
+        meshNodes,
+        frameAxes,
+        referenceAxes,
+        displ,
+        elemIndices,
+        indicesFlat,
+        outEnergy,
+        outRes,
+        outDRes,
+        flexuralStiffness,
+        torsionalStiffness);
+  };
+}
+
+// Inertia against the predicted target (stage-start displacement plus dt times the stage-start
+// velocity) and, optionally, mass damping against the stage-start displacement: the terms of the
+// forward assembly (MakeBatchedBodyOp) that depend on the previous state.
+[[nodiscard]] ElOpFnType<fem::RodStencilElement, fem::kNumRodFields> MakeBatchedInertiaOp(
+    Span<real const> nodalMasses,
+    Span<real const> elementRotationalInertias,
+    real massDampingCoefficient,
+    Span<real const> stageStartDispl,
+    Span<real const> stageStartVel,
+    real dtStage,
+    bool includeMassDamping) {
+  constexpr int kBatchSize = kDefaultFemBatchSize;
+  constexpr int kStencilDofs = fem::kNumRodStencilDofs;
+  real const dtfi2 = 1_r / Sqr(dtStage);
+  bool const hasMassDamping = includeMassDamping && massDampingCoefficient > 0_r;
+  real const massDampingScale = hasMassDamping ? massDampingCoefficient / dtStage : 0_r;
+  return [=](NdArray<int, kBatchSize> const& elemIndices,
+             Span<int const> indicesFlat,
+             fem::BatchRodVector<kBatchSize> const& displ,
+             BatchDouble<kBatchSize>* outEnergy,
+             fem::BatchRodVector<kBatchSize>* outRes,
+             fem::BatchRodMatrix<kBatchSize>* outDRes,
+             bool /*projectPsd*/) -> bool {
+    using V = BatchReal<kBatchSize>;
+    bool out = false;
+    NdArray<V, fem::kNumRodFields> batchPredTarget MOCHI_NO_INIT;
+    NdArray<V, fem::kNumRodFields> massDampingTarget MOCHI_NO_INIT;
+    if (outEnergy || outRes) {
+      alignas(alignof(V)) real predStaging[fem::kNumRodFields][V::kSize]{};
+      alignas(alignof(V)) real dampStaging[fem::kNumRodFields][V::kSize]{};
+      for (int b = 0; b < kBatchSize; ++b) {
+        int const globalDof = indicesFlat[elemIndices[b] * kStencilDofs];
+        for (int f = 0; f < fem::kNumRodFields; ++f) {
+          predStaging[f][b] =
+              stageStartDispl[globalDof + f] + dtStage * stageStartVel[globalDof + f];
+          dampStaging[f][b] = stageStartDispl[globalDof + f];
+        }
+      }
+      for (int f = 0; f < fem::kNumRodFields; ++f) {
+        batchPredTarget[f] = Load<V>(predStaging[f]);
+        massDampingTarget[f] = Load<V>(dampStaging[f]);
+      }
+    }
+    out |= fem::RodInertia<kBatchSize>(
+        nodalMasses,
+        elementRotationalInertias,
+        displ,
+        batchPredTarget,
+        elemIndices,
+        indicesFlat,
+        outEnergy,
+        outRes,
+        outDRes,
+        dtfi2);
+    if (hasMassDamping) {
+      out |= fem::RodInertia<kBatchSize>(
+          nodalMasses,
+          elementRotationalInertias,
+          displ,
+          massDampingTarget,
+          elemIndices,
+          indicesFlat,
+          outEnergy,
+          outRes,
+          outDRes,
+          massDampingScale);
+    }
+    return out;
+  };
+}
+
+// [Differentiability] Derivative of the step objective w.r.t. a previous-step quantity, in the
+// chart of the stage-start state (displacements, and the twist gauge of the frame axes: a twist
+// rotation of the axes about their tangents in the convention of the twist DoF).
+//
+// Previous state (GradTarget::Previous), at fixed step DoFs:
+//   inertia  = M/(2 dt^2) |u - (u_prev + dt v_prev)|^2       -> d/du_prev = -R_inertia
+//   damping  = alpha M/(2 dt) |u - u_prev|^2                 -> d/du_prev = -R_damping
+//   (their twist components vanish: the twist predictor's base is the stage-start twist DoF,
+//   always zero, not the frame's twist gauge)
+//   bend/twist energy E(a_end) with a_end = TransportFrameAxis(t_prev -> t_end, theta, a_prev):
+//     twist gauge  d/dphi_prev = dE/dtheta            (the gauge is transported unchanged)
+//     tangent      d/du_prev   = -dE/dtheta (dt_prev/du_prev)^T c(t_prev, t_end)  (holonomy)
+// Previous step delta (GradTarget::PreviousDelta), through v_prev = Delta_prev / dt:
+//   d/dDelta_prev = -R_inertia (all fields).
+// Stiffness damping (stage-start strains) is rejected by ValidateDifferentiabilitySupport; rods
+// have no differentiable inputs.
+void AssembleBodyGradTarget(
+    AssemblyParams const& params,
+    CLocal2GlobalMap const& l2g,
+    CNodalBasedStructure const& nbs,
+    CPolylineMesh const& polylineMesh,
+    CRodPose<TimeStep::Current> const& currPose,
+    CReferenceElementFrameAxes const& referenceAxes,
+    CNodalMasses const& nodalMasses,
+    CElementRotationalInertias const& elementRotationalInertias,
+    CRodMaterialParams const& materialParams,
+    CTimeIntegratorState const& intState,
+    CRodPose<TimeStep::StageStart> const& stageStartPose,
+    CVelocitySlice<real, TimeStep::StageStart> const& stageStartVel,
+    CActorSnle& outActorSnle) {
+  MOCHI_PROFILE_SCOPE();
+  MOCHI_ASSERT_VERBOSE(
+      !params.assemObj && params.assemRes && !params.assemDRes, "Invalid request");
+  auto const gradTarget = params.gradTarget;
+  if (gradTarget == GradTarget::CurrentInput || gradTarget == GradTarget::PreviousInput) {
+    // Rod actors have no differentiable inputs: contribute no input rows.
+    outActorSnle.fullResidual.Resize(0);
+    return;
+  }
+  MOCHI_ASSERT_VERBOSE(
+      gradTarget == GradTarget::Previous || gradTarget == GradTarget::PreviousDelta,
+      "Unexpected gradient target");
+  MOCHI_ASSERT_VERBOSE(
+      materialParams.stiffnessDampingCoefficient == 0_r,
+      "Differentiable rods reject stiffness damping (ValidateDifferentiabilitySupport)");
+  bool const isPrevious = gradTarget == GradTarget::Previous;
+  int const numDofs = isize(currPose.value.displacements);
+  outActorSnle.fullResidual.Resize(numDofs);
+  outActorSnle.fullResidual.SetZero();
+  auto residual = AsView(outActorSnle.fullResidual);
+
+  // Inertia predictor and, for the previous state, mass damping: the forward kernels, negated.
+  {
+    auto const inertiaOp = MakeBatchedInertiaOp(
+        MakeConstSpan(nodalMasses.values),
+        MakeConstSpan(elementRotationalInertias.values),
+        materialParams.massDampingCoefficient,
+        stageStartPose.value.displacements,
+        stageStartVel.value,
+        intState.dtStage,
+        /*includeMassDamping*/ isPrevious);
+    AssembleObjResDRes<fem::RodStencilElement, fem::kNumRodFields>(
+        l2g,
+        nbs,
+        inertiaOp,
+        currPose.value.displacements,
+        AssemblyResults<real>{
+            .outObj = &outActorSnle.objective,
+            .outRes = residual,
+            .outDRes = AsView(outActorSnle.fullDResidual),
+            .params = params});
+    residual *= -1_r;
+  }
+  if (!isPrevious) {
+    return;
+  }
+  for (int dof = fem::kRodThetaDofOffset; dof < numDofs; dof += fem::kNumRodFields) {
+    residual[dof] = 0_r;
+  }
+
+  // Bend/twist energy through the transported frame axes.
+  if (Max(materialParams.flexuralStiffness) > 0_r || materialParams.torsionalStiffness > 0_r) {
+    ColumnVector<real> bendTwistResidual = ColumnVector<real>::Zero(numDofs);
+    auto const bendTwistOp = MakeBatchedBendTwistOp(
+        polylineMesh.nodes,
+        MakeConstSpan(currPose.value.frameAxes),
+        referenceAxes.axes,
+        materialParams.flexuralStiffness,
+        materialParams.torsionalStiffness);
+    AssembleObjResDRes<fem::RodStencilElement, fem::kNumRodFields>(
+        l2g,
+        nbs,
+        bendTwistOp,
+        currPose.value.displacements,
+        AssemblyResults<real>{
+            .outObj = &outActorSnle.objective,
+            .outRes = AsView(bendTwistResidual),
+            .outDRes = AsView(outActorSnle.fullDResidual),
+            .params = params});
+    auto const currDispl = AsConstView(currPose.value.displacements);
+    auto const ssDispl = AsConstView(stageStartPose.value.displacements);
+    int const numElements = polylineMesh.NumElements();
+    for (int e = 0; e < numElements; ++e) {
+      real const dEdTheta = bendTwistResidual[fem::kNumRodFields * e + fem::kRodThetaDofOffset];
+      if (dEdTheta == 0_r) {
+        continue;
+      }
+      Int2 const nodes = polylineMesh.ElementNodes(e);
+      residual[fem::kNumRodFields * e + fem::kRodThetaDofOffset] += dEdTheta;
+      Real3 const edgeSs = ElementEdge(polylineMesh.nodes, ssDispl, nodes);
+      real const lengthSs = Norm(edgeSs);
+      Real3 const tangentSs = edgeSs / lengthSs;
+      Real3 const tangentEnd = Normalize(ElementEdge(polylineMesh.nodes, currDispl, nodes));
+      AddTangentGradient(
+          nodes,
+          1_r / lengthSs,
+          -dEdTheta * rod::FrameTransportConnection(tangentSs, tangentEnd),
+          residual);
+    }
+  }
+}
+
+} // namespace
+
+Real3 FrameTransportConnection(Real3 const& tangentFrom, Real3 const& tangentTo) {
+  real const dot = tangentFrom[0] * tangentTo[0] + tangentFrom[1] * tangentTo[1] +
+      tangentFrom[2] * tangentTo[2];
+  return Cross(tangentFrom, tangentTo) / (1_r + dot);
+}
+
+void ShiftDerivedStateGradient(
+    ecs::Included<TagRodActor>,
+    CDiffContainerDerivedState& outDerivedStateGrad) {
+  auto grad = AsView(outDerivedStateGrad);
+  int const numDofs = grad.Rows();
+  MOCHI_ASSERT_VERBOSE(numDofs % fem::kNumRodFields == 0, "Unexpected rod DoF count");
+  for (int dof = 0; dof < numDofs; ++dof) {
+    grad[dof] = (dof % fem::kNumRodFields == fem::kRodThetaDofOffset) ? 0_r : -grad[dof];
+  }
+}
+
+void PrepareCarriedFrameGradient(
+    ecs::Included<TagRodActor>,
+    CPolylineMesh const& mesh,
+    CRodPose<TimeStep::Current> const& currPose,
+    CRodPose<TimeStep::StageStart> const& stageStartPose,
+    CDiffStateGrad const& stateGrad,
+    CDiffContainerState& outContainer,
+    CRodCarriedFrameGrad& outCarried) {
+  auto container = AsView(outContainer);
+  auto carried = AsView(outCarried.value);
+  carried.SetZero();
+  auto const currDispl = AsConstView(currPose.value.displacements);
+  auto const ssDispl = AsConstView(stageStartPose.value.displacements);
+  int const numElements = mesh.NumElements();
+  for (int e = 0; e < numElements; ++e) {
+    int const thetaDof = fem::kNumRodFields * e + fem::kRodThetaDofOffset;
+    real const gPhi = stateGrad.value[thetaDof];
+    if (gPhi == 0_r) {
+      continue;
+    }
+    Int2 const nodes = mesh.ElementNodes(e);
+    Real3 const edgeEnd = ElementEdge(mesh.nodes, currDispl, nodes);
+    real const lengthEnd = Norm(edgeEnd);
+    Real3 const edgeSs = ElementEdge(mesh.nodes, ssDispl, nodes);
+    real const lengthSs = Norm(edgeSs);
+    Real3 const connection =
+        -gPhi * FrameTransportConnection(edgeSs / lengthSs, edgeEnd / lengthEnd);
+    // (1) End-state chart -> DoF chart (the same connection as TransportGradient).
+    AddTangentGradient(nodes, 1_r / lengthEnd, connection, container);
+    // (2) Carried through the frame at fixed DoFs: twist gauge, and the holonomy w.r.t. the
+    // start tangents.
+    carried[thetaDof] += gPhi;
+    AddTangentGradient(nodes, 1_r / lengthSs, connection, carried);
+  }
+}
+
+void ValidateDifferentiabilitySupport(
+    entt::registry const& reg,
+    entt::entity e,
+    Error& error) {
+  MOCHI_ERROR_RETURN(error);
+  MOCHI_ASSERT_VERBOSE(reg.all_of<TagRodActor>(e), "Expected a rod actor.");
+  auto const& mesh = reg.get<CPolylineMesh const>(e);
+  MOCHI_ERROR_IF(
+      mesh.isClosedLoop,
+      error,
+      "Differentiable rods must be open polylines (closed loops are not supported yet).");
+  MOCHI_ERROR_IF(
+      reg.any_of<TagRodSurfaceContact>(e),
+      error,
+      "Differentiable rods do not support contact through a contact skin (use_visual_mesh_contact): "
+      "only the centerline contact of the rod, against static colliders, is differentiated.");
+  MOCHI_ERROR_IF(
+      reg.any_of<TagUsePointCloudContact>(e),
+      error,
+      "Differentiable rods cannot be colliders (collider_type must be NONE): the contact adjoints "
+      "of a point-cloud collider are not implemented.");
+  auto const& material = reg.get<CRodMaterialParams const>(e);
+  MOCHI_ERROR_IF(
+      material.stiffnessDampingCoefficient > 0_r,
+      error,
+      "Differentiable rods do not support stiffness damping: the previous-state derivative of "
+      "the viscous stress is not implemented. Set stiffnessDampingCoefficient to zero.");
+  auto const* bc = reg.try_get<CDofPositionsBC const>(e);
+  MOCHI_ERROR_IF(
+      bc && !bc->dofIndices.empty(),
+      error,
+      "Differentiable rods do not support Dirichlet boundary conditions yet.");
+}
+
+void InitDifferentiableRodActor(entt::registry& reg, entt::entity e) {
+  MOCHI_ASSERT_VERBOSE(!reg.any_of<TagStaticActor>(e), "Do not call on static actors");
+  // The derived state of a rod actor is its displacement-twist step, one value per DoF.
+  int const numDofs = reg.get<CActorDofInfo const>(e).dofsSize;
+  ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
+      &EmplaceDifferentiabilityComponents, reg, e, numDofs);
+  // Contact-force adjoint containers: read by the generic backward accumulation for every dynamic
+  // actor; they stay zero (differentiable rods have no contact).
+  ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
+      &EmplaceDifferentiableContactComponents, reg, e);
+  reg.emplace<TagDifferentiableRod>(e);
+  reg.emplace<CRodCarriedFrameGrad>(e, numDofs);
+}
+
 void AssembleBody(
     AssemblyParams const& params,
     ecs::Included<TagRodActor>,
     ecs::CtxGlobal<CSceneGravity const> sceneGravity,
     ecs::OptionalTag<TagUseGravity> hasGravityTag,
+    ecs::OptionalTag<TagDifferentiableRod> isDifferentiable,
     CLocal2GlobalMap const& l2g,
     CPolylineMesh const& polylineMesh,
     CRodPose<TimeStep::Current> const& currPose,
@@ -1662,6 +2039,26 @@ void AssembleBody(
     CNodalBasedStructure const& nbs) {
   MOCHI_PROFILE_SCOPE();
   bool const hasGravity = hasGravityTag;
+
+  // [Differentiability] Non-Current gradient targets ask for the derivative of the step objective
+  // w.r.t. a previous-step quantity instead of the standard residual.
+  if (params.gradTarget != GradTarget::Current) {
+    AssembleBodyGradTarget(
+        params,
+        l2g,
+        nbs,
+        polylineMesh,
+        currPose,
+        referenceAxes,
+        nodalMasses,
+        elementRotationalInertias,
+        materialParams,
+        intState,
+        stageStartPose,
+        stageStartVel,
+        outActorSnle);
+    return;
+  }
 
   // Clear SNLE data
   if (params.assemObj) {
@@ -1723,6 +2120,61 @@ void AssembleBody(
         params.assemObj ? &outActorSnle.objective : nullptr,
         params.assemRes ? &resView : nullptr);
   }
+
+  // [Differentiability] Make the residual the exact gradient of the step energy in the chart of
+  // the step DoFs. The bend/twist kernel differentiates positions with the frame axes
+  // co-transported from the current tangents, while the twist DoF (and its inertia) is measured
+  // from the frame transported directly from the stage start; the two charts differ by the
+  // connection of the frame transport, so the kernel's displacement residual misses
+  // -(dt/du)^T c dE_bendtwist/dtheta per element (c = FrameTransportConnection of the element's
+  // stage-start and current tangents). Without it the residual is not the gradient of one energy
+  // (the mismatch is the twist-inertia residual times the connection) and the adjoint, which
+  // relies on that, is off by the step's tangent rotation times the twist-position coupling
+  // (measured +-16 percent on a rotating rod, 2026-09-02). Differentiable rods only.
+  if (isDifferentiable && params.assemRes) {
+    int const numDofs = isize(currPose.value.displacements);
+    ColumnVector<real> bendTwistResidual = ColumnVector<real>::Zero(numDofs);
+    if (Max(materialParams.flexuralStiffness) > 0_r || materialParams.torsionalStiffness > 0_r) {
+      AssemblyParams bendTwistParams = params;
+      bendTwistParams.assemObj = false;
+      bendTwistParams.assemDRes = false;
+      auto const bendTwistOp = MakeBatchedBendTwistOp(
+          polylineMesh.nodes,
+          MakeConstSpan(currPose.value.frameAxes),
+          referenceAxes.axes,
+          materialParams.flexuralStiffness,
+          materialParams.torsionalStiffness);
+      AssembleObjResDRes<fem::RodStencilElement, fem::kNumRodFields>(
+          l2g,
+          nbs,
+          bendTwistOp,
+          currPose.value.displacements,
+          AssemblyResults<real>{
+              .outObj = &outActorSnle.objective,
+              .outRes = AsView(bendTwistResidual),
+              .outDRes = AsView(outActorSnle.fullDResidual),
+              .params = bendTwistParams});
+    }
+    auto residual = AsView(outActorSnle.fullResidual);
+    auto const currDispl = AsConstView(currPose.value.displacements);
+    auto const ssDispl = AsConstView(stageStartPose.value.displacements);
+    int const numElements = polylineMesh.NumElements();
+    for (int e = 0; e < numElements; ++e) {
+      real const dEdTheta = bendTwistResidual[fem::kNumRodFields * e + fem::kRodThetaDofOffset];
+      if (dEdTheta == 0_r) {
+        continue;
+      }
+      Int2 const nodes = polylineMesh.ElementNodes(e);
+      Real3 const edge = ElementEdge(polylineMesh.nodes, currDispl, nodes);
+      real const length = Norm(edge);
+      Real3 const tangentSs = Normalize(ElementEdge(polylineMesh.nodes, ssDispl, nodes));
+      AddTangentGradient(
+          nodes,
+          1_r / length,
+          -dEdTheta * rod::FrameTransportConnection(tangentSs, edge / length),
+          residual);
+    }
+  }
 }
 
 void AssembleAsyncContact(
@@ -1744,6 +2196,21 @@ void AssembleAsyncContact(
     CActorSnle& outActorSnle) {
   MOCHI_PROFILE_SCOPE();
   MOCHI_ASSERT(params.assemObj || params.assemRes || params.assemDRes, "Must assemble something");
+
+  // [Differentiability] Contact is first-order: the merit depends on the current and on the
+  // stage-start (previous) sample positions, but not on the previous step delta, and rods have
+  // no differentiable inputs. GradTarget::Previous assembles d(contact merit)/d(u_prev) through
+  // the generic deformable response (deformable::ComputeAsyncContactResponse); async contact is
+  // contact against static colliders. Sync (dynamic-dynamic) rod contact is not assembled here;
+  // its previous-state derivative is not implemented and SceneImpl::BackPropagate rejects it.
+  if (!IsAssemblyNeeded(StateDependency::FirstOrder, false /*inputDependency*/, params.gradTarget)) {
+    return;
+  }
+  if (params.gradTarget == GradTarget::Previous) {
+    MOCHI_ASSERT_VERBOSE(
+        !params.assemObj && params.assemRes && !params.assemDRes,
+        "GradTarget::Previous async contact assembly supports the residual only.");
+  }
 
   if (collisions.empty()) {
     // No contacts.

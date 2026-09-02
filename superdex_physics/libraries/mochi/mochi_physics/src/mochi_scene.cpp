@@ -1236,7 +1236,10 @@ void SceneImpl::PrepareBackPropagate(StateHandle stateNew, StateHandle stateOld,
   RestoreStatePair(stateNew, stateOld, error);
   MOCHI_ERROR_RETURN(error);
 
-  _registry.ctx<CStatePair>() = CStatePair{.stateNew = stateNew, .stateOld = stateOld};
+  _registry.ctx<CStatePair>() = CStatePair{
+      .stateNew = stateNew,
+      .stateOld = stateOld,
+      .stepDt = _registry.ctx<CSceneTime const>().DeltaTime()};
 
   PrepareBackPropagation(_registry);
   _registry.set<TagBackPropagationPrepared>();
@@ -1268,7 +1271,7 @@ void SceneImpl::BackPropagate(Error& error) {
   ForEachActor([&](Actor* actor) {
     allActorsValid &=
         (actor->GetType() == ActorType::Rigid || actor->GetType() == ActorType::Articulated ||
-         actor->GetType() == ActorType::Soft);
+         actor->GetType() == ActorType::Soft || actor->GetType() == ActorType::Rod);
     if (!allActorsValid) {
       return;
     }
@@ -1276,7 +1279,7 @@ void SceneImpl::BackPropagate(Error& error) {
       actors.push_back(GetEntity(_registry, actor->GetHandle(), ErrorAssert{}));
     }
   });
-  MOCHI_ERROR_IF(!allActorsValid, error, "All actors must be rigid, articulated or soft");
+  MOCHI_ERROR_IF(!allActorsValid, error, "All actors must be rigid, articulated, soft or rod");
   MOCHI_ERROR_RETURN(error);
 
   // Soft-body contact adjoints cover async contact (against static colliders) only. Sync
@@ -1297,6 +1300,57 @@ void SceneImpl::BackPropagate(Error& error) {
   });
   MOCHI_ERROR_RETURN(error);
 
+  // Rod contact adjoints cover async contact (against static colliders) only. A rod's contact
+  // with a dynamic actor is sync contact (same island), whose previous-state derivative is not
+  // implemented on either side. Rods share islands with dynamic actors through constraints as
+  // well (a tendon and its bones), so instead of the soft-body island criterion require contact
+  // to be filtered out between a differentiable rod and every dynamic collider of its island.
+  {
+    auto const& filter = _registry.ctx<CContactFilterTable const>();
+    _registry.view<CIslandDescendants const>().each([&](CIslandDescendants const& descendants) {
+      MOCHI_ERROR_RETURN(error);
+      for (auto rod : descendants.rodActors) {
+        if (!_registry.all_of<TagDifferentiableRod>(rod)) {
+          continue;
+        }
+        auto const* rodLayer = _registry.try_get<CContactLayer const>(rod);
+        auto checkCollider = [&](entt::entity other) {
+          if (other == rod || !error.IsOK()) {
+            return;
+          }
+          auto const* colliderInfo = _registry.try_get<CColliderInfo const>(other);
+          if (!colliderInfo || colliderInfo->type == ColliderType::None) {
+            return; // not a collider: the rod cannot touch it
+          }
+          auto const* otherLayer = _registry.try_get<CContactLayer const>(other);
+          bool const enabled = (rodLayer && otherLayer)
+              ? filter.IsContactEnabled(rod, other, rodLayer->id, otherLayer->id)
+              : filter.IsEntityContactEnabled(rod, other);
+          MOCHI_ERROR_IF(
+              enabled,
+              error,
+              "Rod contact adjoints are implemented against static colliders only: a "
+              "differentiable rod shares its island with a dynamic collider it may contact (sync "
+              "contact has no previous-state adjoint). Disable contact between them with contact "
+              "layers or enable_actor_contact.");
+        };
+        for (auto e : descendants.rigidActors) {
+          checkCollider(e);
+        }
+        for (auto e : descendants.softActors) {
+          checkCollider(e);
+        }
+        for (auto e : descendants.shellActors) {
+          checkCollider(e);
+        }
+        for (auto e : descendants.rodActors) {
+          checkCollider(e);
+        }
+      }
+    });
+    MOCHI_ERROR_RETURN(error);
+  }
+
   // Enforce scheduler binding to this thread, for parallel work.
   ScopedSchedulerBinding schedulerBinding(*_context);
 
@@ -1315,6 +1369,7 @@ void SceneImpl::BackPropagate(Error& error) {
 
     ecs::TryInvokeOnEntity(rigid::ProjectDerivedStateGradient, _registry, e);
     ecs::TryInvokeOnEntity(soft::ProjectDerivedStateGradient, _registry, e);
+    ecs::TryInvokeOnEntity(rod::ProjectDerivedStateGradient, _registry, e);
     ecs::TryInvokeOnEntity(articulated::compound::ProjectDerivedStateGradient, _registry, e);
     ecs::TryInvokeOnEntity<ecs::policy::AllowReadWriteSameComponent>(
         articulated::compound::ProjectContactForceAdjoints<GradTarget::Current>, _registry, e);
@@ -1322,6 +1377,9 @@ void SceneImpl::BackPropagate(Error& error) {
     auto container = AsView(_registry.get<CDiffContainerState>(e));
     container += _registry.get<CDiffStateGrad const>(e).value;
     container += _registry.get<CDiffContactGrad<GradTarget::Current> const>(e);
+    // Rods: convert the state adjoint into the chart of the step DoFs and compute the
+    // carried-frame contribution to the previous state's adjoint (added in step 3 below).
+    ecs::TryInvokeOnEntity(rod::PrepareCarriedFrameGradient, _registry, e);
   });
 
   // Perform back-propagation solve (linear solve for z and gradient assembly):
@@ -1360,6 +1418,7 @@ void SceneImpl::BackPropagate(Error& error) {
 
     ecs::TryInvokeOnEntity(rigid::ShiftDerivedStateGradient, _registry, e);
     ecs::TryInvokeOnEntity(soft::ShiftDerivedStateGradient, _registry, e);
+    ecs::TryInvokeOnEntity(rod::ShiftDerivedStateGradient, _registry, e);
     ecs::TryInvokeOnEntity(articulated::compound::ShiftDerivedStateGradient, _registry, e);
 
     _registry.get<CDiffStateGrad>(e).value = _registry.get<CDiffContainerState const>(e);
@@ -1375,6 +1434,7 @@ void SceneImpl::BackPropagate(Error& error) {
   ParallelForEach("UpdateAdjointsStep3", actors, 1, [&](entt::entity e) {
     ecs::TryInvokeOnEntity(rigid::ProjectDerivedStateGradient, _registry, e);
     ecs::TryInvokeOnEntity(soft::ProjectDerivedStateGradient, _registry, e);
+    ecs::TryInvokeOnEntity(rod::ProjectDerivedStateGradient, _registry, e);
     ecs::TryInvokeOnEntity(articulated::compound::ProjectDerivedStateGradient, _registry, e);
     ecs::TryInvokeOnEntity<ecs::policy::AllowReadWriteSameComponent>(
         articulated::compound::ProjectContactForceAdjoints<GradTarget::Previous>, _registry, e);
@@ -1382,6 +1442,7 @@ void SceneImpl::BackPropagate(Error& error) {
     auto stateGrad = AsView(_registry.get<CDiffStateGrad>(e).value);
     stateGrad += _registry.get<CDiffContainerState const>(e);
     stateGrad += _registry.get<CDiffContactGrad<GradTarget::Previous> const>(e);
+    ecs::TryInvokeOnEntity(rod::AddCarriedFrameGradient, _registry, e);
   });
 
   backPropStats.totalDurationSec = ToSeconds(totalBackPropTimer.GetElapsed());
@@ -3202,6 +3263,8 @@ void MakeSceneDifferentiableInternal(Scene* scene, Error& error) {
       articulated::compound::ValidateDifferentiabilitySupport(reg, e, error);
     } else if (actor->GetType() == ActorType::Soft) {
       soft::ValidateDifferentiabilitySupport(reg, e, error);
+    } else if (actor->GetType() == ActorType::Rod) {
+      rod::ValidateDifferentiabilitySupport(reg, e, error);
     } else {
       MOCHI_ERROR_SET(error, "Actor type is not differentiable.");
     }
@@ -3223,6 +3286,8 @@ void MakeSceneDifferentiableInternal(Scene* scene, Error& error) {
     } else if (actor->GetType() == ActorType::Soft) {
       // Handle standalone soft actor
       soft::InitDifferentiableSoftActor(reg, e);
+    } else if (actor->GetType() == ActorType::Rod) {
+      rod::InitDifferentiableRodActor(reg, e);
     } else {
       // Handle articulated actor
       MOCHI_ASSERT(actor->GetType() == ActorType::Articulated);

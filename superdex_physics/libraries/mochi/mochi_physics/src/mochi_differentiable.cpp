@@ -22,6 +22,7 @@
 #include "mochi_constraint.h"
 #include "mochi_materials.h"
 #include "mochi_rigid.h"
+#include "mochi_rod.h"
 #include "mochi_simulation.h"
 #include "mochi_soft.h"
 #include "mochi_solve.h"

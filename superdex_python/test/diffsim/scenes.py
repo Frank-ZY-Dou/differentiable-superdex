@@ -415,3 +415,153 @@ def chain_pushing_cube_with_params(
         )
     )
     return scene, chain, cube
+
+
+def rod_free(num_elements: int = 8, length: float = 0.4):
+    """An open elastic rod (no contact, no damping) released under gravity with an
+    initial velocity field that bends and twists it: a rigid translation, a
+    linearly varying transverse velocity and a twist rate. Exercises the rod
+    inertia (incl. the twist inertia), the axial and bend/twist stresses and the
+    parallel transport of the material frames between steps. Returns (scene, rod);
+    the rod has 4 DoFs per node (3 displacements + twist)."""
+    ex = physics.experimental
+    scene = physics.create_scene("diffsim_rod_free")
+    scene.set_gravity(GRAVITY)
+    num_nodes = num_elements + 1
+    s = np.linspace(0.0, length, num_nodes)
+    # A slightly curved rest polyline (bending is then active from the first step).
+    nodes = np.stack([s, 0.03 * np.sin(np.pi * s / length), 0.5 + 0.0 * s], axis=1)
+    axes = []
+    for e in range(num_elements):
+        t = nodes[e + 1] - nodes[e]
+        t /= np.linalg.norm(t)
+        z = np.array([0.0, 0.0, 1.0])
+        a = z - (z @ t) * t
+        axes.append(a / np.linalg.norm(a))
+    model = ex.generate_tubular_rod_model_data(
+        nodes=nodes.tolist(),
+        element_frame_axes=[a.tolist() for a in axes],
+        radius=0.004,
+        num_cross_section_segments=6,
+        is_closed_loop=False,
+    )
+    shape = physics.create_model_shape(model)
+    material = ex.RodMaterialParams(
+        linear_density=0.05,
+        linear_rotational_inertia=2e-6,
+        axial_stiffness=2e2,
+        torsional_stiffness=2e-2,
+        flexural_stiffness=[2e-2, 2e-2],
+    )
+    rod = ex.create_rod_actor(
+        scene,
+        ex.RodActorParams(name="rod", shape=shape, material=material, has_gravity=True),
+    )
+    velocities = np.zeros(4 * num_nodes)
+    for i in range(num_nodes):
+        velocities[4 * i : 4 * i + 3] = [0.2, 0.0, 0.1 + 0.8 * (s[i] / length)]
+        velocities[4 * i + 3] = 3.0 * (1.0 - s[i] / length)  # twist rate [rad/s]
+    rod.set_node_velocities_local(velocities)
+    return scene, rod
+
+
+def _rod_actor(scene, nodes, name="rod", axis_hint=(0.0, 1.0, 0.0), material=None, layer="", contact=None):
+    """An open rod actor along ``nodes`` (N x 3) with material frame axes from
+    ``axis_hint`` projected orthogonal to each element, 4 DoFs per node."""
+    ex = physics.experimental
+    nodes = np.asarray(nodes, dtype=np.float64)
+    axes = []
+    for e in range(len(nodes) - 1):
+        t = nodes[e + 1] - nodes[e]
+        t /= np.linalg.norm(t)
+        a = np.asarray(axis_hint, dtype=np.float64)
+        a = a - (a @ t) * t
+        axes.append(a / np.linalg.norm(a))
+    model = ex.generate_tubular_rod_model_data(
+        nodes=nodes.tolist(),
+        element_frame_axes=[a.tolist() for a in axes],
+        radius=0.004,
+        num_cross_section_segments=6,
+        is_closed_loop=False,
+    )
+    if material is None:
+        material = ex.RodMaterialParams(
+            linear_density=0.05,
+            linear_rotational_inertia=2e-6,
+            axial_stiffness=2e2,
+            torsional_stiffness=2e-2,
+            flexural_stiffness=[2e-2, 2e-2],
+        )
+    params = dict(name=name, shape=physics.create_model_shape(model), material=material, has_gravity=True)
+    if layer:
+        params["layer"] = layer
+    if contact is not None:
+        params["contact"] = contact
+    return ex.create_rod_actor(scene, ex.RodActorParams(**params))
+
+
+def rod_with_cube(cube_velocity=(0.3, 0.0, 0.0)):
+    """A vertical rod pinned at its top node (node position constraint) carrying a
+    small rigid cube attached to its bottom node (deformable-node-to-rigid
+    constraint): rod-rigid coupling through constraints in one island, no contact.
+    The cube starts with ``cube_velocity`` and swings. Returns (scene, rod, cube)."""
+    ex = physics.experimental
+    scene = physics.create_scene("diffsim_rod_with_cube")
+    scene.set_gravity(GRAVITY)
+    num_nodes = 7
+    z = np.linspace(0.6, 0.3, num_nodes)
+    nodes = np.stack([0.0 * z, 0.0 * z, z], axis=1)
+    material = ex.RodMaterialParams(
+        linear_density=0.05,
+        linear_rotational_inertia=2e-6,
+        axial_stiffness=2e3,
+        torsional_stiffness=2e-1,
+        flexural_stiffness=[2e-1, 2e-1],
+    )
+    rod = _rod_actor(scene, nodes, axis_hint=(1.0, 0.0, 0.0), material=material)
+    scene.create_deformable_node_position_constraint(
+        actor=rod.get_handle(), node_index=0, position=nodes[0].tolist(), stiffness=2e3
+    )
+    half = 0.025
+    cube = scene.create_rigid_actor(
+        name="cube",
+        shape=physics.create_tet_mesh_shape(
+            coordinates=(np.asarray(CUBE_COORDS) * (half / 0.1)).tolist(), connectivity=CUBE_CONN
+        ),
+        density=400.0,
+        collider_type=physics.ColliderType.NONE,
+        world_from_local=physics.TransformRT([0.0, 0.0, 0.3 - half]),
+    )
+    scene.create_deformable_node_to_rigid_constraint(
+        deformable_actor=rod.get_handle(),
+        rigid_actor=cube.get_handle(),
+        deformable_node_index=num_nodes - 1,
+        rigid_local_pos=[0.0, 0.0, half],
+        stiffness=2e3,
+    )
+    cube.set_velocity(list(cube_velocity), [0.0, 0.0, 0.0])
+    return scene, rod, cube
+
+
+def rod_on_plane(friction: str = "coulomb", height: float = 0.03):
+    """A horizontal rod released ``height`` above a static ground plane with a
+    downward velocity: centerline contact of the rod against a static collider
+    (the one contact case differentiable rods support). Returns (scene, rod)."""
+    scene = physics.create_scene(f"diffsim_rod_on_plane_{friction}")
+    scene.set_gravity(GRAVITY)
+    cp = contact_params(friction)
+    scene.create_rigid_actor(
+        name="ground",
+        shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+        is_static=True,
+        contact=cp,
+    )
+    num_nodes = 7
+    x = np.linspace(0.0, 0.3, num_nodes)
+    nodes = np.stack([x, 0.0 * x, height + 0.01 * np.sin(np.pi * x / 0.3)], axis=1)
+    rod = _rod_actor(scene, nodes, contact=cp)
+    velocities = np.zeros(4 * num_nodes)
+    velocities[2::4] = -0.5
+    velocities[0::4] = 0.3
+    rod.set_node_velocities_local(velocities)
+    return scene, rod

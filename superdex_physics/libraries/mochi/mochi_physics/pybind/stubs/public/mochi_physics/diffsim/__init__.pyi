@@ -153,9 +153,16 @@ def make_scene_differentiable(scene: mochi_physics.Scene) -> None:
     """Make a scene differentiable.
 
     For accuracy reasons, differentiability is only recommended in double precision.
-    Differentiability is only supported for rigid and articulated actors, and
-    requires :attr:`~superdex.physics.SolverParams.integration_method` to be
-    :class:`BACKWARD_EULER <superdex.physics.IntegrationMethod>`. It adds internal
+    Differentiability is supported for rigid, articulated, standalone soft and rod
+    actors, and requires :attr:`~superdex.physics.SolverParams.integration_method`
+    to be :class:`BACKWARD_EULER <superdex.physics.IntegrationMethod>`. Rod actors
+    (``physics.experimental.create_rod_actor``) must be open polylines without
+    stiffness damping, contact skin or collider role, and may contact static
+    colliders only (contact with a dynamic actor must be filtered out, or
+    back-propagation fails); their poses are then retracted from the stage-start
+    pose and their residual is the exact gradient of the step energy in that chart,
+    a differentiable-scene-only change of the forward that is exact to the
+    holonomy of the material-frame transport. It adds internal
     data to support the invocation of the functions
     :func:`~superdex.physics.diffsim.back_propagate` and
     :func:`~superdex.physics.diffsim.get_step_jacobian`. It also calls
@@ -373,21 +380,24 @@ def get_displacements_backward(
     grad_output: mochi_physics.ArrayLikeReal,
 ) -> None:
     """Backward pass for :meth:`~superdex.physics.Actor.get_displacements`
-    (standalone soft actors).
+    (standalone soft actors and rod actors).
 
-    Accumulates the gradient of the loss with respect to this soft actor's
-    current nodal displacements into the engine's state adjoint. A soft
-    actor's solver state is its nodal displacement vector, so the chain from
-    the displacement output to the state is the identity. Call between
+    Accumulates the gradient of the loss with respect to this actor's current
+    nodal displacements into the engine's state adjoint. A soft actor's solver
+    state is its nodal displacement vector and a rod's its displacement-twist
+    vector, so the chain from the displacement output to the state is the
+    identity. Call between
     :func:`~superdex.physics.diffsim.prepare_back_propagate` and
     :func:`~superdex.physics.diffsim.back_propagate`, exactly like the
     rigid-body output-gradient functions.
 
     Args:
-        actor (Actor): The standalone soft actor.
+        actor (Actor): The standalone soft actor or rod actor.
         grad_output (ArrayLikeReal): Gradient of the loss wrt the current
-            displacements. Must be of size 3 x number of nodes. Accumulated
-            into the state adjoint.
+            displacements. Must be of size 3 x number of nodes for soft actors
+            and 4 x number of nodes for rods (the twist entries are gradients
+            wrt the twist of the element's material frame). Accumulated into
+            the state adjoint.
 
     Raises:
         :class:`~superdex.physics.Error`: If an error occurs.
@@ -422,19 +432,21 @@ def set_node_velocities_local_backward(
 ) -> None:
     """Backward pass for
     :meth:`~superdex.physics.Actor.set_node_velocities_local` (standalone
-    soft actors).
+    soft actors and rod actors).
 
     Reads the gradient of the loss with respect to the nodal velocities this
-    soft actor started the back-propagated window with. The velocities
-    determine the derived displacement step ``Delta_u = v * dt``, so
-    ``dL/dv = dt * dL/dDelta_u``. Valid after the reverse sweep has reached
-    the first step.
+    actor started the back-propagated window with. The velocities determine
+    the derived displacement step ``Delta_u = v * dt``, so
+    ``dL/dv = dt * dL/dDelta_u`` with the time step of the first
+    back-propagated step. Valid after the reverse sweep has reached the first
+    step.
 
     Args:
-        actor (Actor): The standalone soft actor.
+        actor (Actor): The standalone soft actor or rod actor.
         out_grad_velocities (ArrayLikeReal): Gradient wrt the initial nodal
-            velocities. Must be of size 3 x number of nodes. Overwritten, not
-            accumulated into.
+            velocities. Must be of size 3 x number of nodes for soft actors
+            and 4 x number of nodes for rods (velocities and twist rates).
+            Overwritten, not accumulated into.
 
     Raises:
         :class:`~superdex.physics.Error`: If an error occurs.

@@ -1,0 +1,341 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Discrete adjoints of rod actors (open elastic rods with a twist DoF per node).
+
+What is differentiated (2026-09-02): the rod's inertia (translational and twist),
+axial and bend/twist stresses, mass damping, gravity, constraints to rigid or
+articulated actors, and centerline contact against static colliders. The material
+frame axes are a carried state: they are parallel-transported from the previous
+step and re-twisted, so the previous-state assembly differentiates the bend/twist
+energy through that transport (the twist gauge and the holonomy w.r.t. the
+previous tangents), and the end frame's dependence on the start frame at fixed
+DoFs is carried explicitly. Differentiable rods retract poses from the stage-start
+pose and carry a residual that is the exact gradient of the step energy in that
+chart (a differentiable-scene-only change of the forward; see rod::AssembleBody).
+
+Every gradient below is checked against independent rollout central finite
+differences at two step sizes, counting an entry only where the two agree
+(self-consistency), with the same protocol as test_diffsim_gradients.
+
+Not supported (rejected by make_scene_differentiable or back_propagate): closed
+loops, stiffness damping, user Dirichlet boundary conditions, contact skins,
+rods as colliders, and contact with dynamic colliders.
+"""
+
+from __future__ import annotations
+
+import os
+import unittest
+
+import numpy as np
+import superdex.physics as physics
+from superdex.physics.diffsim_rollout import DifferentiableRollout
+
+from . import scenes
+from .harness import configure_for_differentiability, diffsim
+
+_NUM_WORKER_THREADS = int(os.environ.get("SUPERDEX_DIFFSIM_TEST_THREADS", "0"))
+
+
+def setUpModule() -> None:
+    if not physics.uses_double_precision():
+        raise unittest.SkipTest("rod adjoint tests require SUPERDEX_PRECISION=double")
+    physics.initialize(num_worker_threads=_NUM_WORKER_THREADS)
+
+
+def tearDownModule() -> None:
+    if physics.is_initialized():
+        physics.shutdown()
+
+
+def _node_position(rod, node: int) -> np.ndarray:
+    ref = np.asarray(rod.get_mesh().coordinates).reshape(-1, 3)[node]
+    return ref + np.asarray(rod.get_displacements())[4 * node : 4 * node + 3]
+
+
+class _TipLoss:
+    """0.5 |x_node - goal|^2 on a rod node."""
+
+    def __init__(self, rod, node: int, goal):
+        self.rod, self.node, self.goal = rod, node, np.asarray(goal, dtype=np.float64)
+
+    def value(self) -> float:
+        d = _node_position(self.rod, self.node) - self.goal
+        return 0.5 * float(d @ d)
+
+    def accumulate_output_grad(self) -> None:
+        d = _node_position(self.rod, self.node) - self.goal
+        g = np.zeros(self.rod.get_num_dofs())
+        g[4 * self.node : 4 * self.node + 3] = d
+        diffsim.get_displacements_backward(self.rod, g)
+
+
+class _CubeLoss:
+    def __init__(self, cube, goal):
+        self.cube, self.goal = cube, np.asarray(goal, dtype=np.float64)
+
+    def value(self) -> float:
+        d = np.asarray(self.cube.get_center_of_mass_transform().translation) - self.goal
+        return 0.5 * float(d @ d)
+
+    def accumulate_output_grad(self) -> None:
+        d = np.asarray(self.cube.get_center_of_mass_transform().translation) - self.goal
+        g = np.zeros(7)
+        g[:3] = d
+        diffsim.get_center_of_mass_transform_backward(self.cube, g)
+
+
+def _initial_velocity_check(test, build, loss_of, v0, num_steps, dt, entries, tol):
+    """Adjoint dL/dv0 (rod nodal velocities, 4 per node) vs rollout central FD at
+    eps 1e-5 and 1e-6; an entry counts only when the two FD estimates agree to
+    1e-4 relative, and at least two entries must count."""
+    scene, actors = build()
+    test.addCleanup(physics.destroy_scene, scene)
+    configure_for_differentiability(scene)
+    rod = actors[0]
+    rod.set_node_velocities_local(v0)
+    result = DifferentiableRollout(scene, dt=dt, num_steps=num_steps).run(
+        apply_inputs=lambda step: None, terminal_losses=[loss_of(actors)]
+    )
+    test.assertTrue(result.fd_valid, result.flagged_steps)
+    grad = result.gradients[rod.get_name()].initial_velocity
+
+    def rollout_loss(v):
+        sc, acts = build()
+        try:
+            configure_for_differentiability(sc)
+            acts[0].set_node_velocities_local(v)
+            loss = loss_of(acts)
+            for _ in range(num_steps):
+                sc.step(dt)
+            return loss.value()
+        finally:
+            physics.destroy_scene(sc)
+
+    rel_errors, skipped = {}, {}
+    for k in entries:
+        fds = []
+        for eps in (1e-5, 1e-6):
+            dv = np.zeros_like(v0)
+            dv[k] = eps
+            fds.append((rollout_loss(v0 + dv) - rollout_loss(v0 - dv)) / (2.0 * eps))
+        denom = max(abs(fds[0]), 1e-30)
+        fd_self = abs(fds[0] - fds[1]) / denom
+        if fd_self > 1e-4:
+            skipped[k] = fd_self
+            continue
+        rel_errors[k] = abs(grad[k] - fds[0]) / denom
+    test.assertGreaterEqual(len(rel_errors), 2, f"too few smooth entries: skipped {skipped}")
+    test.assertLessEqual(max(rel_errors.values()), tol, (rel_errors, skipped))
+    return rel_errors
+
+
+class RodFreeAdjointTest(unittest.TestCase):
+    """A free rod with a curved rest shape released under gravity with a velocity
+    field that bends and twists it: inertia (incl. twist), axial and bend/twist
+    stresses, and the frame transport between steps. Measured 2026-09-02:
+    displacement-velocity entries 2e-8..3e-7, twist-rate entries 3e-7..8e-6
+    (with FD self-consistency 2e-5), over 20 steps of 5 ms."""
+
+    def test_initial_velocity_gradients(self) -> None:
+        def build():
+            scene, rod = scenes.rod_free()
+            return scene, (rod,)
+
+        scene, (rod,) = build()
+        n = rod.get_num_dofs()
+        num_nodes = n // 4
+        physics.destroy_scene(scene)
+        s = np.linspace(0.0, 0.4, num_nodes)
+        v0 = np.zeros(n)
+        for i in range(num_nodes):
+            v0[4 * i : 4 * i + 3] = [0.2, 0.0, 0.1 + 0.8 * (s[i] / 0.4)]
+            v0[4 * i + 3] = 3.0 * (1.0 - s[i] / 0.4)
+        tip = num_nodes - 1
+        entries = [4 * 7 + 2, 4 * 8 + 2, 4 * 6 + 2, 4 * 7 + 1, 4 * 3 + 2, 4 * 6 + 1, 4 * 3 + 3, 4 * 6 + 3]
+        _initial_velocity_check(
+            self,
+            build,
+            lambda acts: _TipLoss(acts[0], tip, [0.6, 0.1, 0.3]),
+            v0,
+            num_steps=20,
+            dt=0.005,
+            entries=entries,
+            tol=1e-4,
+        )
+
+
+class RodRigidConstraintAdjointTest(unittest.TestCase):
+    """A rod pinned at the top carrying a rigid cube through a node-to-rigid
+    constraint: the gradient of the cube's final position w.r.t. the cube's
+    initial velocity (rigid accessor) and the rod's initial nodal velocities flows
+    through the constraint and the rod's elasticity."""
+
+    def test_cube_velocity_gradient_through_the_rod(self) -> None:
+        dt, num_steps = 0.005, 20
+        goal = np.array([0.05, 0.0, 0.2])
+        v0_cube = np.array([0.3, 0.0, 0.0])
+
+        def build():
+            return scenes.rod_with_cube(cube_velocity=tuple(v0_cube))
+
+        scene, rod, cube = build()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        result = DifferentiableRollout(scene, dt=dt, num_steps=num_steps).run(
+            apply_inputs=lambda step: None, terminal_losses=[_CubeLoss(cube, goal)]
+        )
+        self.assertTrue(result.fd_valid, result.flagged_steps)
+        grad = result.gradients["cube"].initial_velocity[:3]
+
+        def rollout_loss(v):
+            sc, rd, cb = scenes.rod_with_cube(cube_velocity=tuple(v))
+            try:
+                configure_for_differentiability(sc)
+                loss = _CubeLoss(cb, goal)
+                for _ in range(num_steps):
+                    sc.step(dt)
+                return loss.value()
+            finally:
+                physics.destroy_scene(sc)
+
+        fd = np.zeros(3)
+        for k in range(3):
+            fds = []
+            for eps in (1e-5, 1e-6):
+                dv = np.zeros(3)
+                dv[k] = eps
+                fds.append((rollout_loss(v0_cube + dv) - rollout_loss(v0_cube - dv)) / (2.0 * eps))
+            fd[k] = fds[0]
+            if abs(fds[0]) > 1e-8:
+                self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), 1e-4, "rough FD")
+        # Norm-relative: the scene is symmetric in y, so that component's true
+        # derivative vanishes (a component-relative error would be meaningless).
+        self.assertGreater(np.linalg.norm(fd), 0.0)
+        rel = np.linalg.norm(grad - fd) / np.linalg.norm(fd)
+        self.assertLessEqual(rel, 1e-5, (grad, fd))
+
+    def test_rod_velocity_gradient_through_the_constraint(self) -> None:
+        def build():
+            scene, rod, cube = scenes.rod_with_cube()
+            return scene, (rod, cube)
+
+        scene, (rod, cube) = build()
+        n = rod.get_num_dofs()
+        physics.destroy_scene(scene)
+        v0 = np.zeros(n)
+        v0[0::4] = 0.2
+        v0[3::4] = 1.0
+        entries = [4 * 3 + 0, 4 * 5 + 0, 4 * 6 + 0, 4 * 4 + 2, 4 * 2 + 1, 4 * 3 + 3]
+        _initial_velocity_check(
+            self,
+            build,
+            lambda acts: _CubeLoss(acts[1], [0.05, 0.0, 0.2]),
+            v0,
+            num_steps=20,
+            dt=0.005,
+            entries=entries,
+            tol=1e-4,
+        )
+
+
+class RodStaticContactAdjointTest(unittest.TestCase):
+    """A rod landing on a static ground plane: centerline contact against a static
+    collider goes through the generic deformable previous-state contact path
+    (the same as soft bodies), with the stage-start SDF Hessian of the plane."""
+
+    def test_initial_velocity_gradients_through_contact(self) -> None:
+        def build():
+            scene, rod = scenes.rod_on_plane("coulomb")
+            return scene, (rod,)
+
+        scene, (rod,) = build()
+        n = rod.get_num_dofs()
+        num_nodes = n // 4
+        physics.destroy_scene(scene)
+        v0 = np.zeros(n)
+        v0[2::4] = -0.5
+        v0[0::4] = 0.3
+        # Verify the rollout actually touches the plane.
+        sc, rd = scenes.rod_on_plane("coulomb")
+        configure_for_differentiability(sc)
+        min_z = np.inf
+        for _ in range(30):
+            sc.step(0.005)
+            min_z = min(min_z, min(_node_position(rd, i)[2] for i in range(num_nodes)))
+        physics.destroy_scene(sc)
+        self.assertLess(min_z, 0.005, "test is vacuous: the rod never reached the plane")
+        entries = [4 * 3 + 2, 4 * 6 + 2, 4 * 0 + 0, 4 * 3 + 0, 4 * 6 + 0, 4 * 4 + 1, 4 * 2 + 3]
+        _initial_velocity_check(
+            self,
+            build,
+            lambda acts: _TipLoss(acts[0], num_nodes - 1, [0.4, 0.0, 0.05]),
+            v0,
+            num_steps=30,
+            dt=0.005,
+            entries=entries,
+            tol=1e-4,
+        )
+
+
+class RodSupportBoundaryTest(unittest.TestCase):
+    """The unsupported cases must fail loudly, never silently drop a term."""
+
+    def test_stiffness_damping_is_rejected(self) -> None:
+        ex = physics.experimental
+        scene = physics.create_scene("rod_damping")
+        self.addCleanup(physics.destroy_scene, scene)
+        material = ex.RodMaterialParams(stiffness_damping_coefficient=0.1)
+        nodes = np.stack([np.linspace(0, 0.3, 5), np.zeros(5), np.full(5, 0.5)], axis=1)
+        scenes._rod_actor(scene, nodes, material=material)
+        with self.assertRaisesRegex(Exception, "stiffness damping"):
+            diffsim.make_scene_differentiable(scene)
+
+    def test_contact_with_a_dynamic_collider_fails_at_back_propagate(self) -> None:
+        scene = physics.create_scene("rod_dynamic_contact")
+        self.addCleanup(physics.destroy_scene, scene)
+        scene.set_gravity(scenes.GRAVITY)
+        cp = scenes.contact_params("coulomb")
+        # A dynamic cube resting on the ground, and a rod dropped onto it.
+        scene.create_rigid_actor(
+            name="ground",
+            shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+            is_static=True,
+            contact=cp,
+        )
+        scene.create_rigid_actor(
+            name="cube",
+            shape=scenes.cube_shape(),
+            density=1000.0,
+            contact=cp,
+            collider_type=physics.ColliderType.BOX,
+            world_from_local=physics.TransformRT([0.15, 0.0, 0.099]),
+        )
+        x = np.linspace(0.0, 0.3, 7)
+        nodes = np.stack([x, np.zeros(7), np.full(7, 0.215)], axis=1)
+        rod = scenes._rod_actor(scene, nodes, contact=cp)
+        configure_for_differentiability(scene)
+        v = np.zeros(rod.get_num_dofs())
+        v[2::4] = -0.5
+        rod.set_node_velocities_local(v)
+        with self.assertRaisesRegex(Exception, "static colliders only"):
+            DifferentiableRollout(scene, dt=0.005, num_steps=20).run(
+                apply_inputs=lambda step: None,
+                terminal_losses=[_TipLoss(rod, 6, [0.3, 0.0, 0.1])],
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

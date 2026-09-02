@@ -48,6 +48,11 @@ struct TagBackPropagationPrepared {};
 struct CStatePair {
   StateHandle stateNew;
   StateHandle stateOld;
+  // Time step of the prepared step (stateOld -> stateNew), recorded by
+  // SceneImpl::PrepareBackPropagate. The velocity backward accessors need it after the sweep,
+  // when the scene holds the restored old state whose own delta time is that of the step
+  // before it (the default 1e-2 for the initial state).
+  double stepDt = 0.0;
 };
 
 // Tag to denote a constraint with differentiable input (e.g. pose controller).

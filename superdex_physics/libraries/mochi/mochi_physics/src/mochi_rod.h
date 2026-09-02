@@ -18,6 +18,7 @@
 
 #include "mochi_common_components.h"
 #include "mochi_contact.h"
+#include "mochi_differentiable.h"
 #include "mochi_discretization_components.h"
 #include "mochi_ecs.h"
 #include "mochi_physics/mochi_physics_experimental.h"
@@ -165,6 +166,21 @@ struct CReferenceNodeCurvatureBinormal : public NoCopy {
   DynamicArray<Real3> values;
 };
 
+// [Differentiability] Tag on the rod actors of a differentiable scene. The solver then retracts
+// poses from the stage-start pose with the total increment (a path-independent frame transport,
+// see rod::EntityPostNewIncrement) and the rod adjoint systems apply.
+struct TagDifferentiableRod {};
+
+// [Differentiability] Contribution of a step's end-state adjoint to its start-state adjoint that
+// is carried through the frame axes at fixed step DoFs: the frame's twist gauge is transported
+// unchanged, and the holonomy of the parallel transport couples it to the start tangents. Computed
+// before the adjoint solve (both states available) and added after it. One value per DoF, in the
+// start state's chart.
+struct CRodCarriedFrameGrad : public NoCopy {
+  explicit CRodCarriedFrameGrad(int numDofs) : value(ColumnVector<real>::Zero(numDofs)) {}
+  ColumnVector<real> value;
+};
+
 struct CRodMaterialParams : public experimental::RodMaterialParams {};
 
 // Generate variable-width rod connectivity and matching stencil positions. Each node gets an
@@ -229,6 +245,7 @@ void AssembleBody(
     ecs::Included<TagRodActor>,
     ecs::CtxGlobal<CSceneGravity const> sceneGravity,
     ecs::OptionalTag<TagUseGravity> hasGravityTag,
+    ecs::OptionalTag<TagDifferentiableRod> isDifferentiable,
     CLocal2GlobalMap const& l2g,
     CPolylineMesh const& polylineMesh,
     CRodPose<TimeStep::Current> const& currPose,
@@ -288,10 +305,84 @@ void EntityPostNewIncrement(
     ColumnVectorView<real const> reference,
     ColumnVectorView<real const> increment,
     ecs::Included<TagRodActor>,
+    ecs::OptionalTag<TagDifferentiableRod> isDifferentiable,
     CDofOffset const& dofOffset,
     CActorDofInfo const& actorDofInfo,
     CPolylineMesh const& mesh,
+    CRodPose<TimeStep::StageStart> const& stageStartPose,
     CRodPose<TimeStep::Current>& currPose);
+
+/*
+ * [Differentiability] Validation and initialization of a differentiable rod actor. Supported:
+ * open rods without contact, stiffness damping or user boundary conditions.
+ */
+void ValidateDifferentiabilitySupport(entt::registry const& reg, entt::entity e, Error& error);
+void InitDifferentiableRodActor(entt::registry& reg, entt::entity e);
+
+/*
+ * [Differentiability] Connection of the frame transport of a rod element. Transporting a frame
+ * axis from tangentFrom to a target tangent t directly, or through tangentTo first, differs by a
+ * rotation about t whose angle grows with the target as c . dt, where
+ * c = (tangentFrom x tangentTo) / (1 + tangentFrom . tangentTo). Perturbing the middle tangent
+ * of the composition transport(tangentTo -> t) o transport(tangentFrom -> tangentTo) rotates the
+ * result by -c . dtangentTo. Both were verified numerically. A twist DoF theta rotates the axis
+ * by +theta (right-hand) about the tangent (RodApplyLieDeltaToPose.PureTwistRotatesAxes), so an
+ * axis rotation of +omega is a twist of +omega: transporting a frame directly instead of through
+ * an intermediate tangent shifts the twist coordinate by -c . dt, and perturbing the start
+ * tangent of a transport shifts the transported frame's twist by -c . dtangentFrom.
+ */
+[[nodiscard]] Real3 FrameTransportConnection(Real3 const& tangentFrom, Real3 const& tangentTo);
+
+/*
+ * [Differentiability] System to project a derived state gradient: dg/dq = dg/dx dx/dq. A rod's
+ * derived state (its displacement-twist step) lives in the chart of the step DoFs, so the
+ * projection is the identity.
+ */
+MOCHI_FORCE_INLINE void ProjectDerivedStateGradient(
+    ecs::Included<TagRodActor>,
+    CDiffContainerDerivedState const& derivedStateGrad,
+    CDiffContainerState& outStateGrad) {
+  AsView(outStateGrad) = derivedStateGrad;
+}
+
+/*
+ * [Differentiability] System to shift a derived state gradient: dg/dxold = dg/dDeltax dDeltax/dxold.
+ * Minus the identity on the displacement fields (Delta u = u - u_old) and zero on the twist field:
+ * the step's twist DoF is measured from the transported previous frame, so at fixed DoFs it does
+ * not depend on the previous state (the previous frame's twist gauge is carried through
+ * CRodCarriedFrameGrad instead).
+ */
+void ShiftDerivedStateGradient(
+    ecs::Included<TagRodActor>,
+    CDiffContainerDerivedState& outDerivedStateGrad);
+
+/*
+ * [Differentiability] Before the adjoint solve of a step, with the step's start (stage-start) and
+ * end (current) states available: (1) adds to the DoF-chart adjoint container the connection term
+ * that converts the end state's adjoint (whose twist entries are gradients w.r.t. the frame's twist
+ * gauge in the chart at the end state) into the chart of the step DoFs; (2) computes the
+ * carried-frame contribution to the start state's adjoint: at fixed DoFs the end frame rotates
+ * with the start frame (twist gauge carried unchanged) and with the start tangents (holonomy).
+ */
+void PrepareCarriedFrameGradient(
+    ecs::Included<TagRodActor>,
+    CPolylineMesh const& mesh,
+    CRodPose<TimeStep::Current> const& currPose,
+    CRodPose<TimeStep::StageStart> const& stageStartPose,
+    CDiffStateGrad const& stateGrad,
+    CDiffContainerState& outContainer,
+    CRodCarriedFrameGrad& outCarried);
+
+/*
+ * [Differentiability] After the adjoint solve, with the start state restored: adds the
+ * carried-frame contribution to its adjoint.
+ */
+MOCHI_FORCE_INLINE void AddCarriedFrameGradient(
+    ecs::Included<TagRodActor>,
+    CRodCarriedFrameGrad const& carried,
+    CDiffStateGrad& outStateGrad) {
+  AsView(outStateGrad.value) += carried.value;
+}
 
 /*
  * System executed before the time step. Saves current state to previous and resets velocity.

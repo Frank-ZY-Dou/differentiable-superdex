@@ -2920,7 +2920,9 @@ void diffsim::SetArticulatedTargetVelocityBackward(
   //   target_old = target_current - dt * velocity
   // Therefore: dL/dvelocity = - dt * dL/dtarget_old
   auto const& targetPoseGrad = reg.get<CDiffTargetPoseGrad const>(e);
-  auto const dt = static_cast<real>(reg.ctx<CSceneTime const>().DeltaTime());
+  // The time step of the back-propagated step (not the scene's delta time: after the sweep the
+  // scene holds the restored old state, whose delta time is that of the step before it).
+  auto const dt = static_cast<real>(reg.ctx<CStatePair const>().stepDt);
   AsView(outGradTargetVelocity) = AsConstView(targetPoseGrad.previous);
   AsView(outGradTargetVelocity) *= -dt;
 
@@ -2981,7 +2983,9 @@ void diffsim::SetArticulatedJointVelocitiesBackward(
   //
   // 2. Controller path (if pose controller exists): v sets target_old = target_current - dt * v,
   //    so dL/dv += -dt · dL/d(target_old).
-  auto const dt = static_cast<real>(reg.ctx<CSceneTime const>().DeltaTime());
+  // The time step of the back-propagated step (not the scene's delta time: after the sweep the
+  // scene holds the restored old state, whose delta time is that of the step before it).
+  auto const dt = static_cast<real>(reg.ctx<CStatePair const>().stepDt);
   auto const& derivedStepGrad = reg.get<CDiffDerivedStepGrad const>(e);
   auto const& jacobian = reg.get<CArticulatedJacobian const>(e);
 
@@ -3114,7 +3118,9 @@ void diffsim::SetVelocityBackward(
   // with J_l the left Jacobian of SO(3) (exp(φ + dφ) = exp(J_l(φ) dφ) exp(φ), i.e.
   // DRotIncrementDRotVector) and dφ/dω = (θ/|ω|) (I - u uᵀ) + (dt / cos θ) u uᵀ, u = ω/|ω|,
   // θ = asin(dt |ω|). For |ω| → 0 both factors tend to the identity and dL/dω → dt · λ_δ.
-  auto const dt = static_cast<real>(reg.ctx<CSceneTime const>().DeltaTime());
+  // The time step of the back-propagated step (not the scene's delta time: after the sweep the
+  // scene holds the restored old state, whose delta time is that of the step before it).
+  auto const dt = static_cast<real>(reg.ctx<CStatePair const>().stepDt);
   auto const& derivedStepGrad = reg.get<CDiffDerivedStepGrad const>(e);
 
   // Linear velocity gradient: first RigidSize::kDTrans components.
@@ -3158,18 +3164,22 @@ void diffsim::SetVelocityBackward(
 void diffsim::GetDisplacementsBackward(Actor* actor, Span<real const> gradOutput, Error& error) {
   MOCHI_ERROR_RETURN_IF_BACKWARD_NOT_SUPPORTED();
   MOCHI_ERROR_IF_NOT(
-      actor->GetType() == ActorType::Soft && !reg.any_of<TagNestedSoftActor>(e),
+      (actor->GetType() == ActorType::Soft && !reg.any_of<TagNestedSoftActor>(e)) ||
+          actor->GetType() == ActorType::Rod,
       error,
-      "Only standalone soft actors are supported.");
+      "Only standalone soft actors and rod actors are supported.");
   MOCHI_ERROR_RETURN(error);
   int const numDofs = reg.get<CActorDofInfo const>(e).dofsSize;
   MOCHI_ERROR_IF_NOT(
-      isize(gradOutput) == numDofs, error, "gradOutput size must be 3 x number of nodes.");
+      isize(gradOutput) == numDofs,
+      error,
+      "gradOutput size must be the number of DoFs (3 per node for soft actors, 4 for rods).");
   MOCHI_ERROR_IF_NOT(IsFinite(gradOutput), error, "gradOutput must be finite.");
   MOCHI_ERROR_RETURN(error);
 
-  // A soft actor's solver state is its nodal displacement vector, so the chain from the
-  // displacement output to the state is the identity.
+  // The solver state of a soft actor is its nodal displacement vector, and that of a rod its
+  // displacement-twist vector, so the chain from the displacement output to the state is the
+  // identity.
   AsView(reg.get<CDiffStateGrad>(e).value) += AsConstView(gradOutput);
 }
 
@@ -3178,6 +3188,7 @@ void diffsim::SetDisplacementsBackward(
     Span<real> outGradDisplacements,
     Error& error) {
   MOCHI_ERROR_RETURN_IF_BACKWARD_NOT_SUPPORTED(const);
+  // Actor::SetDisplacements does not support rod actors, so neither does its backward.
   MOCHI_ERROR_IF_NOT(
       actor->GetType() == ActorType::Soft && !reg.any_of<TagNestedSoftActor>(e),
       error,
@@ -3201,20 +3212,24 @@ void diffsim::SetNodeVelocitiesLocalBackward(
     Error& error) {
   MOCHI_ERROR_RETURN_IF_BACKWARD_NOT_SUPPORTED(const);
   MOCHI_ERROR_IF_NOT(
-      actor->GetType() == ActorType::Soft && !reg.any_of<TagNestedSoftActor>(e),
+      (actor->GetType() == ActorType::Soft && !reg.any_of<TagNestedSoftActor>(e)) ||
+          actor->GetType() == ActorType::Rod,
       error,
-      "Only standalone soft actors are supported.");
+      "Only standalone soft actors and rod actors are supported.");
   MOCHI_ERROR_RETURN(error);
   int const numDofs = reg.get<CActorDofInfo const>(e).dofsSize;
   MOCHI_ERROR_IF_NOT(
       isize(outGradVelocities) == numDofs,
       error,
-      "outGradVelocities size must be 3 x number of nodes.");
+      "outGradVelocities size must be the number of DoFs (3 per node for soft actors, 4 for "
+      "rods).");
   MOCHI_ERROR_RETURN(error);
 
   // SetNodeVelocitiesLocal sets the nodal velocities v, which determine the derived
   // displacement step Delta_u = v * dt. Therefore dL/dv = dt * dL/dDelta_u.
-  auto const dt = static_cast<real>(reg.ctx<CSceneTime const>().DeltaTime());
+  // The time step of the back-propagated step (not the scene's delta time: after the sweep the
+  // scene holds the restored old state, whose delta time is that of the step before it).
+  auto const dt = static_cast<real>(reg.ctx<CStatePair const>().stepDt);
   AsView(outGradVelocities) = AsConstView(reg.get<CDiffDerivedStepGrad const>(e).value);
   AsView(outGradVelocities) *= dt;
 }

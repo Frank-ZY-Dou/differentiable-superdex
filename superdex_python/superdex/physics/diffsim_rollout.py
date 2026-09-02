@@ -33,8 +33,9 @@ low-level. :class:`DifferentiableRollout` wraps it into one object that
   steps it flagged, worst adjoint residual, worst operator asymmetry, summed
   solve time) across the sweep.
 
-Requirements are those of ``diffsim`` itself: rigid, articulated and
-standalone soft actors (soft contact against static colliders only),
+Requirements are those of ``diffsim`` itself: rigid, articulated,
+standalone soft and rod actors (soft and rod contact against static colliders
+only; a rod's initial state exposes its nodal velocities, 4 per node),
 Backward Euler, double precision recommended (the driver also runs on the
 single-precision build; gradients are then float32-accurate), and the
 per-step protocol -
@@ -89,6 +90,7 @@ class _ActorEntry:
     name: str
     articulated: bool
     soft: bool
+    rod: bool
     dofs_size: int
     pose_size: int
     has_controller: bool
@@ -103,13 +105,14 @@ def _collect_actors(scene) -> list[_ActorEntry]:
         if actor.is_static() or actor.is_nested_link_actor():
             continue
         soft = actor.get_type() == physics.ActorType.SOFT
+        rod = actor.get_type() == physics.ActorType.ROD
         articulated = actor.get_type() == physics.ActorType.ARTICULATED
         dofs = actor.get_num_dofs()
         has_controller = articulated and actor.has_articulated_pose_controller()
-        if soft:
-            # Soft actors carry no external forces and no controller; their
-            # differentiable "inputs" are the initial nodal state read at the
-            # end of the sweep (plus the scene-level parameter gradients).
+        if soft or rod:
+            # Soft and rod actors carry no differentiable external forces and no
+            # controller; their differentiable "inputs" are the initial nodal state
+            # read at the end of the sweep (plus the scene-level parameter gradients).
             force_dofs = []
         elif articulated:
             force_dofs = []
@@ -134,8 +137,9 @@ def _collect_actors(scene) -> list[_ActorEntry]:
                 name,
                 articulated,
                 soft,
+                rod,
                 dofs,
-                dofs if (articulated or soft) else RIGID_POSE_SIZE,
+                dofs if (articulated or soft or rod) else RIGID_POSE_SIZE,
                 has_controller,
                 force_dofs,
             )
@@ -259,6 +263,13 @@ class DifferentiableRollout:
                 gv = np.zeros(entry.dofs_size, dtype=real)
                 diffsim.set_node_velocities_local_backward(entry.actor, gv)
                 out.initial_pose = gu.astype(np.float64)
+                out.initial_velocity = gv.astype(np.float64)
+            elif entry.rod:
+                # Rods take initial velocities (4 per node, incl. the twist rate) but no
+                # initial displacements through the public API, so only the velocity
+                # gradient is read back.
+                gv = np.zeros(entry.dofs_size, dtype=real)
+                diffsim.set_node_velocities_local_backward(entry.actor, gv)
                 out.initial_velocity = gv.astype(np.float64)
             elif entry.articulated:
                 gp = np.zeros(entry.dofs_size, dtype=real)
