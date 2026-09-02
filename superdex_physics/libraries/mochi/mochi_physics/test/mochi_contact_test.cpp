@@ -26,6 +26,7 @@
 #include <mochi_physics/src/mochi_articulated_body.h>
 #include <mochi_physics/src/mochi_contact.h>
 #include <mochi_physics/src/mochi_context.h>
+#include <mochi_physics/src/mochi_differentiable.h>
 #include <mochi_physics/src/mochi_group.h>
 #include <mochi_physics/src/mochi_island.h>
 #include <mochi_physics/src/mochi_rigid.h>
@@ -377,6 +378,13 @@ class MochiContactTestBase : public test::MochiSceneTestBase,
 
     InitializeScene(
         params.coulombCoefficient, params.viscousCoefficient, params.dampingCoefficient);
+
+    // The previous-state assembly differentiates the explicit stage-start normal through the
+    // collider's SDF Hessian, which the stage-start contact query computes only for
+    // differentiable scenes (the assembly asserts otherwise). Tag the scene as such.
+    if (params.gradTarget == GradTarget::Previous) {
+      GetRegistry().set<TagDifferentiableScene>();
+    }
 
     InitState();
     PreStep();

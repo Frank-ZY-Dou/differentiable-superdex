@@ -29,8 +29,9 @@ low-level. :class:`DifferentiableRollout` wraps it into one object that
   actor; the single-DoF joints of an articulated one; soft actors take no
   external forces),
 - optionally clips each gradient block to a maximum L2 norm, and
-- aggregates the solver diagnostics (finite-difference validity, worst
-  adjoint residual, summed solve time) across the sweep.
+- aggregates the solver diagnostics (finite-difference validity and the
+  steps it flagged, worst adjoint residual, worst operator asymmetry, summed
+  solve time) across the sweep.
 
 Requirements are those of ``diffsim`` itself: rigid, articulated and
 standalone soft actors (soft contact against static colliders only),
@@ -185,6 +186,12 @@ class RolloutResult:
     max_adjoint_residual: float
     solve_time_sec: float
     steps_swept: int
+    # Diagnostics of the adjoint solves across the sweep (both only meaningful with
+    # ``BackPropagationSolverParams.validate_finite_diff`` set): the largest relative
+    # asymmetry of the adjoint operator measured by the engine's symmetry probe, and
+    # the 0-based steps whose finite-difference self-check failed.
+    max_hessian_asymmetry: float = 0.0
+    flagged_steps: list = dataclasses.field(default_factory=list)
 
     @property
     def control_gradients(self) -> dict[str, np.ndarray]:
@@ -318,6 +325,8 @@ class DifferentiableRollout:
 
         fd_valid = True
         max_residual = 0.0
+        max_asymmetry = 0.0
+        flagged_steps: list[int] = []
         solve_time = 0.0
         steps_swept = 0
 
@@ -336,7 +345,10 @@ class DifferentiableRollout:
 
             stats = diffsim.get_back_propagation_scene_stats(self.scene)
             fd_valid = fd_valid and stats.finite_diff_valid
+            if not stats.finite_diff_valid:
+                flagged_steps.append(i - 1)
             max_residual = max(max_residual, stats.residual_norm)
+            max_asymmetry = max(max_asymmetry, stats.hessian_asymmetry)
             solve_time += stats.solve_duration_sec
 
             self._read_step_input_grads(grads, i - 1)
@@ -368,4 +380,6 @@ class DifferentiableRollout:
             max_adjoint_residual=max_residual,
             solve_time_sec=solve_time,
             steps_swept=steps_swept,
+            max_hessian_asymmetry=max_asymmetry,
+            flagged_steps=flagged_steps[::-1],
         )

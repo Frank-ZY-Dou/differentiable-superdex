@@ -524,5 +524,114 @@ class TargetVelocityBackwardTest(unittest.TestCase):
         )
 
 
+class AdjointOperatorDiagnosticsTest(unittest.TestCase):
+    """The adjoint solve (PCG, MINRES fallback) assumes a symmetric step
+    Jacobian, i.e. that the residual is the gradient of one merit function.
+    With ``validate_finite_diff`` set the engine now probes that assumption
+    after every solve (relative asymmetry |rhs.(H z) - z.(H rhs)| from two
+    extra Hessian-vector products) and reports the TRUE residual |H z - rhs|
+    of the returned solution instead of the solver's internal estimate (the
+    MINRES implicit residual under-reported by 240x on the FR3 + 2F-85 grasp
+    island, 2026-09-01).
+
+    Measured 2026-09-01: with the analytic operator (an exactly assembled
+    matrix) the probe reads 1e-15; with the finite-difference operator it has
+    a noise floor set by the products' own error - 1.3e-3 on the frictional
+    articulated-vs-rigid island below at epsilon 1e-7, 1.3e-4 at 1e-8 (the
+    default since 2026-09-02), i.e. linear in the epsilon, and present on the
+    frictionless (potential-only, hence exactly symmetric) variant too - while
+    the gradients stay within 1e-6 of rollout finite differences at every
+    epsilon.
+    So the model's step Jacobian is symmetric and the symmetric solve is
+    justified; the probe can only flag asymmetry above that floor. With
+    validation off the probe does not run and reports exactly 0."""
+
+    def _rollout_diagnostics(self, validate: bool, eps: float | None = None):
+        contact = physics.ContactParams(
+            penalty_coefficient=1e8, coulomb_friction_coefficient=0.5
+        )
+        scene, chain, cube = scenes.chain_pushing_cube_with_params(contact)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        dp = diffsim.get_back_propagation_solver_params(scene)
+        dp.validate_finite_diff = validate
+        if eps is not None:
+            dp.eps_finite_diff = eps
+        diffsim.set_back_propagation_solver_params(scene, dp)
+        dt, num_steps = 0.01, 30
+        goal = np.array([0.5, 0.0, 0.1])
+        controls = np.stack(
+            [np.linspace(0.0, -1.2, num_steps), np.zeros(num_steps)], axis=1
+        )
+
+        class CubeLoss:
+            def value(self):
+                d = np.asarray(cube.get_center_of_mass_transform().translation) - goal
+                return 0.5 * float(d @ d)
+
+            def accumulate_output_grad(self):
+                d = np.asarray(cube.get_center_of_mass_transform().translation) - goal
+                g = np.zeros(7)
+                g[:3] = d
+                diffsim.get_center_of_mass_transform_backward(cube, g)
+
+        result = DifferentiableRollout(scene, dt=dt, num_steps=num_steps).run(
+            apply_inputs=lambda step: chain.set_articulated_target_pose(
+                np.ascontiguousarray(controls[step])
+            ),
+            terminal_losses=[CubeLoss()],
+        )
+        # The cube must have been pushed, else the island never couples.
+        self.assertGreater(
+            np.linalg.norm(result.gradients["chain"].control_targets), 0.0
+        )
+        return result
+
+    def test_symmetry_probe_sees_only_finite_difference_noise(self):
+        result = self._rollout_diagnostics(validate=True)
+        self.assertEqual(result.steps_swept, 30)
+        self.assertGreater(result.max_adjoint_residual, 0.0)
+        # The floor at the default epsilon (1.3e-4 measured); a non-symmetric
+        # operator reads 1e-1..1.
+        self.assertLessEqual(result.max_hessian_asymmetry, 1e-2)
+        # ... and it is finite-difference noise: it shrinks with the epsilon
+        # (1.3e-3 at 1e-7 -> 1.3e-4 at 1e-8 measured).
+        coarser = self._rollout_diagnostics(validate=True, eps=1e-7)
+        finer = self._rollout_diagnostics(validate=True, eps=1e-8)
+        self.assertLessEqual(finer.max_hessian_asymmetry, 0.3 * coarser.max_hessian_asymmetry)
+
+    def test_probe_is_exact_with_the_analytic_operator(self):
+        scene, cube = scenes.rigid_on_plane("coulomb")
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        dp = diffsim.get_back_propagation_solver_params(scene)
+        dp.validate_finite_diff = True
+        dp.use_analytic_hvp = True
+        diffsim.set_back_propagation_solver_params(scene, dp)
+        goal = np.array([0.5, 0.0, 0.1])
+
+        class CubeLoss:
+            def value(self):
+                d = np.asarray(cube.get_center_of_mass_transform().translation) - goal
+                return 0.5 * float(d @ d)
+
+            def accumulate_output_grad(self):
+                d = np.asarray(cube.get_center_of_mass_transform().translation) - goal
+                g = np.zeros(7)
+                g[:3] = d
+                diffsim.get_center_of_mass_transform_backward(cube, g)
+
+        result = DifferentiableRollout(scene, dt=0.01, num_steps=30).run(
+            apply_inputs=lambda step: None, terminal_losses=[CubeLoss()]
+        )
+        self.assertGreater(np.linalg.norm(result.gradients["cube"].initial_velocity), 0.0)
+        self.assertLessEqual(result.max_hessian_asymmetry, 1e-12)
+
+    def test_probe_is_off_without_validation(self):
+        result = self._rollout_diagnostics(validate=False)
+        self.assertEqual(result.max_hessian_asymmetry, 0.0)
+        self.assertEqual(result.flagged_steps, [])
+
+
 if __name__ == "__main__":
     unittest.main()

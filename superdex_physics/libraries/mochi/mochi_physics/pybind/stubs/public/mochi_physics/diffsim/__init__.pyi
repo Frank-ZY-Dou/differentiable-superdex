@@ -43,7 +43,13 @@ class BackPropagationSolverParams:
     """Absolute convergence tolerance for the inner (linear) solver."""
     eps_finite_diff: float
     """Finite-difference step size used for Hessian-vector products in the adjoint
-    solve.
+    solve (per pose component; default 1e-8 in double precision, 1e-4 in single).
+
+    Stiff islands (a closed-loop gripper with stiff pose-controller gains holding
+    a cube) need 1e-8: at 1e-7 their adjoint solves end with true residuals up to
+    8e-3, the finite-difference self-check fails on 13 of 100 steps and the control
+    gradient is 11 percent off, while 1e-8 and 1e-9 agree to 3e-6 (2026-09-01).
+    When :attr:`validate_finite_diff` flags steps, reduce this value.
     """
     validate_finite_diff: bool
     """Validate analytic Hessian-vector products against finite differences
@@ -52,11 +58,14 @@ class BackPropagationSolverParams:
     use_analytic_hvp: bool
     """[Experimental] Use the analytically assembled Hessian as the outer-solve
     operator instead of finite-difference Hessian-vector products (Krylov outer
-    solver only). Valid only for islands of rigid actors contacting static
-    colliders; articulated terms and dynamic-dynamic contact coupling are
-    Gauss-Newton-grade in the assembly, so those islands need the FD operator.
-    With :attr:`validate_finite_diff` also set, each solve cross-checks the
-    analytic operator against one finite-difference product.
+    solver only). The assembly is exactly symmetric but Gauss-Newton-grade
+    everywhere: on a rigid cube sliding on a static plane its gradients are
+    off by 7e-4 (rich friction) to 4e-2 (frictionless) relative, where the
+    finite-difference operator is exact to 1e-7; articulated islands and
+    dynamic-dynamic contact coupling are worse (5e-2 and up). A fast
+    approximate operator only; the finite-difference operator is the accurate
+    one. With :attr:`validate_finite_diff` also set, each solve cross-checks
+    the analytic operator against one finite-difference product.
     """
     @overload
     def __init__(self) -> None: ...
@@ -86,7 +95,13 @@ class BackPropagationSceneStats:
     back-propagation step.
     """
     residual_norm: float
-    """Final residual norm of the adjoint solve in the last back-propagation step."""
+    """Final residual norm of the adjoint solve in the last back-propagation step.
+
+    With :attr:`~superdex.physics.diffsim.BackPropagationSolverParams.validate_finite_diff`
+    set, this is the true residual ``|H z - rhs|`` of the returned solution, recomputed
+    with a fresh Hessian-vector product (MINRES's implicit residual can under-report);
+    otherwise the solver's own estimate.
+    """
     finite_diff_valid: bool
     """True if every finite-difference Hvp validation check across every island and
     every Hvp evaluation in this back-prop step passed its tolerance.
@@ -95,6 +110,21 @@ class BackPropagationSceneStats:
         Only meaningful when
         :attr:`~superdex.physics.diffsim.BackPropagationSolverParams.validate_finite_diff`
         is set; otherwise stays at its default of true.
+    """
+    hessian_asymmetry: float
+    """Relative asymmetry of the adjoint operator (the step Jacobian ``H``), measured after
+    the solve as ``|rhs.(H z) - z.(H rhs)| / mean(|rhs.(H z)|, |z.(H rhs)|)`` with two extra
+    Hessian-vector products; maximum across islands.
+
+    Note:
+        Only computed when
+        :attr:`~superdex.physics.diffsim.BackPropagationSolverParams.validate_finite_diff`
+        is set (0 otherwise). With the finite-difference operator the probe has a noise
+        floor set by the products' own error (measured 1.3e-4 at the default epsilon 1e-8
+        on an articulated-vs-rigid frictional island, 1.3e-3 at 1e-7; the gradients
+        themselves are unaffected at that level); with the analytic operator it is exact.
+        Values well above the floor mean the residual is not the gradient of one merit
+        function, and the symmetric adjoint solve (PCG / MINRES) is then only approximate.
     """
     @overload
     def __init__(self) -> None: ...
@@ -106,6 +136,7 @@ class BackPropagationSceneStats:
         max_outer_iters: int = ...,
         residual_norm: float = ...,
         finite_diff_valid: bool = ...,
+        hessian_asymmetry: float = ...,
     ) -> None: ...
 
 def make_scene_differentiable(scene: mochi_physics.Scene) -> None:

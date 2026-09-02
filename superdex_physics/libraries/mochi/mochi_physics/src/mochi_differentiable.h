@@ -92,6 +92,10 @@ struct CIslandBackPropSolverStats : NoCopy {
   // is set; otherwise stays at its default of true. Aggregated into
   // BackPropagationSceneStats::finiteDiffValid via logical AND across islands.
   bool finiteDiffValid = true;
+  // Relative asymmetry of the adjoint operator measured by KrylovSolveZ's symmetry probe
+  // (only with validateFiniteDiff; 0 otherwise). Aggregated into
+  // BackPropagationSceneStats::hessianAsymmetry via max across islands.
+  double hessianAsymmetry = 0.0;
 };
 
 // Stores information on the size of the differentiable input of an actor, necessary for indexing

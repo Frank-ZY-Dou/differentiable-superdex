@@ -456,6 +456,7 @@ class GradientCheckCase:
         grad_force = np.zeros((self.total_dofs, self.num_steps))
         fd_valid_all = True
         max_residual = 0.0
+        max_asymmetry = 0.0
         solve_time = 0.0
         for i in range(self.num_steps, 0, -1):
             if i != self.num_steps:
@@ -466,6 +467,7 @@ class GradientCheckCase:
             step_stats = diffsim.get_back_propagation_scene_stats(self.scene)
             fd_valid_all = fd_valid_all and step_stats.finite_diff_valid
             max_residual = max(max_residual, step_stats.residual_norm)
+            max_asymmetry = max(max_asymmetry, step_stats.hessian_asymmetry)
             for entry in self.entries:
                 if entry.input_size > 0:
                     g = np.zeros(entry.input_size)
@@ -515,6 +517,7 @@ class GradientCheckCase:
             "init_vel": grad_init_vel,
             "fd_valid_all": fd_valid_all,
             "max_residual": max_residual,
+            "max_asymmetry": max_asymmetry,
             "solve_time": solve_time,
         }
 
@@ -621,6 +624,7 @@ class GradientCheckCase:
                 )
         self.fd_valid_all = grads["fd_valid_all"]
         self.max_residual = grads["max_residual"]
+        self.max_asymmetry = grads["max_asymmetry"]
         self.solve_time = grads["solve_time"]
         self.scene.release_all_states()
         return reports

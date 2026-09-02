@@ -330,11 +330,13 @@ static void ComputeAggregateBackPropSolverSceneStats(
   double sqrResNorm = 0.0;
   outStats.maxOuterIters = 0;
   outStats.finiteDiffValid = true;
+  outStats.hessianAsymmetry = 0.0;
   reg.view<CIslandBackPropSolverStats>().each([&](auto& islandSolverStats) {
     auto const& stats = islandSolverStats.stats;
     sqrResNorm += Sqr((double)stats.resNorm);
     outStats.maxOuterIters = Max(outStats.maxOuterIters, stats.numIterDone);
     outStats.finiteDiffValid = outStats.finiteDiffValid && islandSolverStats.finiteDiffValid;
+    outStats.hessianAsymmetry = Max(outStats.hessianAsymmetry, islandSolverStats.hessianAsymmetry);
   });
   outStats.residualNorm = Sqrt(sqrResNorm);
 }
@@ -591,10 +593,8 @@ void SceneImpl::SetSolverParams(SolverParams const& params, Error& error) {
     // both bodies and the previous-state adjoint assembly (GradTarget::Previous) treats it as a
     // constant: the previous-state coupling then misses the derivative of the factor w.r.t. the
     // stage-start rotations, and the gradients are wrong by an amount that grows with the
-    // relative rotation of the contacting surfaces (measured 1e-2..1e1 relative).
-    MOCHI_LOG_WARNING(
-        "Differentiable scenes require fadeFriction = false (friction fading by normal alignment "
-        "makes the contact residual non-conservative). Overriding input params.");
+    // relative rotation of the contacting surfaces (measured 1e-2..1e1 relative). The flag's
+    // default is true, so the override is silent (documented in EvalParams and the bindings).
     storedParams.experimentalEval.fadeFriction = false;
   }
 }
@@ -1135,10 +1135,7 @@ void SceneImpl::ApplyImprovedConvergenceSettings(bool logWarnings) {
 
   // Set SolverParams.experimentalEval.fadeFriction = false: the fading factor makes the friction
   // residual non-conservative, which breaks the adjoint (see SceneImpl::SetSolverParams).
-  if (logWarnings && solverParams.experimentalEval.fadeFriction) {
-    MOCHI_LOG_WARNING_ONCE(
-        "\nOverriding SolverParams.experimentalEval.fadeFriction = true. Setting to false");
-  }
+  // Do not log a warning; true is the default value (documented override).
   solverParams.experimentalEval.fadeFriction = false;
 
   // Set SolverParams.nonlinearSolver.lineSearchType = LineSearchType::Armijo.

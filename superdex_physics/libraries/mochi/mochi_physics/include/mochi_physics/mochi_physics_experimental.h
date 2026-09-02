@@ -51,9 +51,17 @@ struct NewtonSolverParams;
 
 /**
  * @brief Default finite-difference epsilon used by @ref BackPropagationSolverParams::epsFiniteDiff.
+ *
+ * Double precision: 1e-8 (was 1e-7 until 2026-09-01). Measured on the FR3 + 2F-85 grasp island
+ * (a closed-loop gripper with stiff pose-controller gains holding a cube): at 1e-7 the adjoint
+ * solves end with true residuals up to 8e-3, 13 of 100 steps fail the finite-difference
+ * self-check and the control gradient is 11 percent off; at 1e-8 and 1e-9 every solve converges
+ * (residual 1e-7) and the two gradients agree to 3e-6. Rigid-contact and articulated chain
+ * scenes are as accurate at 1e-8 as at 1e-7 (gradients within 1e-7..1e-6 of rollout finite
+ * differences); round-off starts to show at 1e-9.
  */
 inline constexpr real kDefaultBackPropagationEpsFiniteDiff =
-    MOCHI_USE_DOUBLE_PRECISION ? 1e-7_r : 1e-4_r;
+    MOCHI_USE_DOUBLE_PRECISION ? 1e-8_r : 1e-4_r;
 } // namespace mochi
 
 namespace mochi::experimental {

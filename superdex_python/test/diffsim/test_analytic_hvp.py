@@ -17,10 +17,15 @@ operator (``BackPropagationSolverParams.use_analytic_hvp``).
 
 Pins down what was measured when the flag was added:
 
-- VALID: islands of rigid actors contacting static colliders. The analytic
-  operator (exact ``psdDRes = false`` assembly with exact saturation Hessians)
-  reproduces the rollout-FD gradients through frictionless, viscous and
-  Coulomb contact.
+- VALID at the harness's 3e-2 tolerance: islands of rigid actors contacting
+  static colliders. The analytic operator (``psdDRes = false`` assembly with
+  exact saturation Hessians) reproduces the rollout-FD gradients through
+  frictionless, viscous and Coulomb contact at that level only: measured
+  with the two-step-size rollout protocol (AnalyticHvpPrecisionPinTest,
+  2026-09-01) it is off by 7e-4 (rich friction) to 4e-2 (frictionless)
+  relative on the sliding cube, where the finite-difference operator is
+  exact to 1e-7. The assembled matrix is exactly symmetric, so the missing
+  part is symmetric too (Gauss-Newton-grade rotational coupling).
 - INVALID by design of the current assembly: articulated actors (the
   assembled dresidual is not the true residual derivative there - the same
   reason ``get_step_jacobian`` is rigid-only) and dynamic-dynamic contact
@@ -48,8 +53,10 @@ from .harness import (
     ArticulatedPoseErrorLoss,
     GradientCheckCase,
     TranslationErrorLoss,
+    configure_for_differentiability,
     diffsim,
 )
+from superdex.physics.diffsim_rollout import DifferentiableRollout
 
 _NUM_WORKER_THREADS = int(os.environ.get("SUPERDEX_DIFFSIM_TEST_THREADS", "0"))
 TOL_CONTACT = 3e-2
@@ -131,6 +138,90 @@ class AnalyticHvpLimitDetectionTest(unittest.TestCase):
             "articulated scenes to the valid domain and update the "
             "use_analytic_hvp documentation",
         )
+
+
+class AnalyticHvpPrecisionPinTest(unittest.TestCase):
+    """The accuracies behind the valid-domain claim, measured with rollout
+    central finite differences of the loss w.r.t. the cube's initial velocity
+    at two step sizes (1e-5, 1e-6; each component must be self-consistent to
+    1e-5). Sliding cube on a static plane, 2026-09-01: the finite-difference
+    operator's gradient is within 3e-8 (rich friction) / 2e-7 (frictionless)
+    of the rollout gradient in norm; the analytic operator's is off by 7e-4 /
+    3.5e-2. A fix of the assembly flips the second assertion - then promote
+    the operator in the documentation instead of loosening anything here."""
+
+    NUM_STEPS = 30
+    DT = 0.01
+    V0 = np.array([0.5, 0.0, 0.0])
+    GOAL = np.array([0.5, 0.0, 0.1])
+
+    class CubeLoss:
+        def __init__(self, cube, goal):
+            self.cube, self.goal = cube, goal
+
+        def value(self):
+            d = np.asarray(self.cube.get_center_of_mass_transform().translation) - self.goal
+            return 0.5 * float(d @ d)
+
+        def accumulate_output_grad(self):
+            d = np.asarray(self.cube.get_center_of_mass_transform().translation) - self.goal
+            g = np.zeros(7)
+            g[:3] = d
+            diffsim.get_center_of_mass_transform_backward(self.cube, g)
+
+    def _adjoint(self, friction: str, analytic: bool) -> np.ndarray:
+        scene, cube = scenes.rigid_on_plane(friction, initial_velocity=tuple(self.V0))
+        configure_for_differentiability(scene)
+        dp = diffsim.get_back_propagation_solver_params(scene)
+        dp.validate_finite_diff = True
+        dp.use_analytic_hvp = analytic
+        diffsim.set_back_propagation_solver_params(scene, dp)
+        result = DifferentiableRollout(scene, dt=self.DT, num_steps=self.NUM_STEPS).run(
+            apply_inputs=lambda step: None, terminal_losses=[self.CubeLoss(cube, self.GOAL)]
+        )
+        g = result.gradients["cube"].initial_velocity[:3].copy()
+        physics.destroy_scene(scene)
+        return g
+
+    def _rollout_loss(self, friction: str, v0: np.ndarray) -> float:
+        scene, cube = scenes.rigid_on_plane(friction, initial_velocity=tuple(v0))
+        configure_for_differentiability(scene)
+        loss = self.CubeLoss(cube, self.GOAL)
+        for _ in range(self.NUM_STEPS):
+            scene.step(self.DT)
+        value = loss.value()
+        physics.destroy_scene(scene)
+        return value
+
+    def _rollout_fd(self, friction: str) -> np.ndarray:
+        fd = np.zeros(3)
+        for k in range(3):
+            estimates = []
+            for h in (1e-5, 1e-6):
+                dv = np.zeros(3)
+                dv[k] = h
+                estimates.append(
+                    (self._rollout_loss(friction, self.V0 + dv) - self._rollout_loss(friction, self.V0 - dv))
+                    / (2.0 * h)
+                )
+            self.assertLessEqual(
+                abs(estimates[0] - estimates[1]) / abs(estimates[0]),
+                1e-5,
+                f"rollout FD not self-consistent for dv0[{k}] ({friction})",
+            )
+            fd[k] = estimates[0]
+        return fd
+
+    def test_fd_operator_is_exact_and_the_analytic_operator_is_not(self) -> None:
+        for friction in ("rich", "none"):
+            with self.subTest(friction):
+                fd = self._rollout_fd(friction)
+                rel_fd = np.linalg.norm(self._adjoint(friction, False) - fd) / np.linalg.norm(fd)
+                rel_analytic = np.linalg.norm(self._adjoint(friction, True) - fd) / np.linalg.norm(fd)
+                self.assertLessEqual(rel_fd, 1e-6, f"finite-difference operator: {rel_fd:.2e}")
+                self.assertGreaterEqual(
+                    rel_analytic, 1e-4, f"analytic operator unexpectedly exact: {rel_analytic:.2e}"
+                )
 
 
 if __name__ == "__main__":

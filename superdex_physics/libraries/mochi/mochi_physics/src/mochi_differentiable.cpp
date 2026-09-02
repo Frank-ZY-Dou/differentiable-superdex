@@ -455,6 +455,36 @@ static void KrylovSolveZ(
     }
   }
 
+  // With validation on, replace the solver's residual estimate by the true residual of the
+  // returned solution (a fresh Hessian-vector product: MINRES's implicit residual can be far
+  // from it, see the integrity check above) and probe the symmetry of the operator. The adjoint
+  // solve assumes H = H^T (the residual is the gradient of one merit function), which both PCG
+  // and MINRES rely on; the probe compares rhs.(H z) with z.(H rhs), which agree for a symmetric
+  // H up to the finite-difference noise of the products. Two extra products per solve.
+  if (backpropParams.validateFiniteDiff) {
+    MOCHI_FILO_STACK_ALLOCATOR(probeAllocator, 2 * 256 * sizeof(real));
+    ColumnVector<real> hz(rhs.Rows(), &probeAllocator);
+    hessianOp(AsConstView(outZ), AsView(hz));
+    real const rhsDotHz = hz.Dot(rhs);
+    hz -= rhs;
+    outerResult.residualNorm = static_cast<double>(hz.Norm());
+    ColumnVector<real> hRhs(rhs.Rows(), &probeAllocator);
+    hessianOp(rhs, AsView(hRhs));
+    real const zDotHRhs = hRhs.Dot(outZ);
+    real const scale =
+        0.5_r * (std::abs(rhsDotHz) + std::abs(zDotHRhs)) + std::numeric_limits<real>::min();
+    real const asymmetry = std::abs(rhsDotHz - zDotHRhs) / scale;
+    islandBackPropSolverStats.hessianAsymmetry = static_cast<double>(asymmetry);
+    // Above the finite-difference noise of the products (measured 1.3e-4 at the default
+    // epsilon 1e-8 on an articulated-vs-rigid frictional island, 1.3e-3 at 1e-7).
+    real constexpr kAsymmetryWarnTol = 1e-2_r;
+    if (asymmetry > kAsymmetryWarnTol && backpropParams.verbosity >= VerbosityLevel::Warning) {
+      MOCHI_LOG_WARNING(
+          "Adjoint operator symmetry probe: relative asymmetry %e. The step Jacobian is not symmetric, so the symmetric adjoint solve is only approximate.",
+          static_cast<double>(asymmetry));
+    }
+  }
+
   // Record statistics
   StageSolverStats stats;
   stats.numIterDone = outerResult.numIterDone;
