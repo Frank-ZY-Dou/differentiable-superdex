@@ -184,12 +184,15 @@ template <class ElementT, int kBatchSize = kDefaultFemBatchSize, size_t kMassDof
 }
 
 // Compute the contact Jacobians as colliding actor. For TimeStep::StageStart (the previous-state
-// assembly of differentiable scenes) the samples' collider-space Jacobians and the root transform
-// are the stage-start ones.
+// assembly of differentiable scenes) the root transform and the samples' collider-space Jacobians
+// are the stage-start ones; the latter come from the collider's stage-start root transform (rigid
+// and articulated-link colliders share one Jacobian per pair; colliders with per-contact
+// Jacobians - mapped or point-cloud - have no stage-start version and are rejected).
 template <typename ActorTag, typename DiscretizationType, TimeStep kTimeStep>
 void SetupCollidingJacobians(
     ecs::Included<ActorTag>,
     ecs::Excluded<TagRomActor, TagNestedSoftActor, TagRodSurfaceContact>,
+    ecs::PartialRegistry<CRootTransform const> reg,
     DiscretizationType const& discretization,
     CRootTransform const& transform,
     CDofOffset const& dofOffset,

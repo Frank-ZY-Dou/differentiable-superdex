@@ -417,6 +417,76 @@ def chain_pushing_cube_with_params(
     return scene, chain, cube
 
 
+def chain_pushing_soft_cube(friction: str = "rich"):
+    """:func:`chain_pushing_cube` with a soft cube: the controlled chain's lower link
+    pushes a FEM cube along the ground. The soft cube's samples are tested against
+    the links' SDF colliders (sync contact, one island with the articulated actor
+    and its controller); soft actors created from Python carry no collider, so the
+    links' samples see nothing (one-directional contact, the deformable norm).
+    Returns (scene, chain, soft)."""
+    cp = contact_params(friction)
+    scene = physics.create_scene(f"diffsim_chain_pushing_soft_cube_{friction}")
+    scene.set_gravity(GRAVITY)
+    scene.create_rigid_actor(
+        name="ground",
+        shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+        is_static=True,
+        contact=cp,
+    )
+    soft = scene.create_soft_actor(
+        name="jelly",
+        shape=cube_shape(),
+        material=physics.SoftMaterialParams(),
+        contact=cp,
+        world_from_local=physics.TransformRT([0.25, 0.0, 0.099]),
+    )
+    joints = [
+        physics.ArticulatedJointParams(
+            name="j0", type=physics.ArticulatedJointType.REVOLUTE, axis=[0, 1, 0]
+        ),
+        physics.ArticulatedJointParams(
+            name="j1",
+            type=physics.ArticulatedJointType.REVOLUTE,
+            axis=[0, 1, 0],
+            parent_link_from_joint=physics.TransformRT([0.0, 0.0, -0.25]),
+        ),
+    ]
+    links = [
+        physics.ArticulatedLinkParams(
+            name="l0",
+            parent_link=-1,
+            shape=cube_shape(),
+            density=1000.0,
+            contact=cp,
+            collider_type=physics.ColliderType.SDF,
+        ),
+        physics.ArticulatedLinkParams(
+            name="l1",
+            parent_link=0,
+            shape=cube_shape(),
+            density=1000.0,
+            contact=cp,
+            collider_type=physics.ColliderType.SDF,
+        ),
+    ]
+    chain = scene.create_articulated_actor(
+        physics.ArticulatedActorParams(
+            name="chain",
+            joints=joints,
+            links=links,
+            world_from_root=physics.TransformRT([0.0, 0.0, 0.352]),
+        )
+    )
+    chain.add_articulated_pose_controller(
+        physics.PoseControllerParams(
+            joint_tracking=[
+                physics.PoseTrackingParams(stiffness=80.0, damping=8.0, saturation=-1.0)
+            ]
+        )
+    )
+    return scene, chain, soft
+
+
 def rod_free(num_elements: int = 8, length: float = 0.4):
     """An open elastic rod (no contact, no damping) released under gravity with an
     initial velocity field that bends and twists it: a rigid translation, a

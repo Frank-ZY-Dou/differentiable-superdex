@@ -417,6 +417,7 @@ template <typename ActorTag, typename DiscretizationType, TimeStep kTimeStep>
 void deformable::SetupCollidingJacobians(
     ecs::Included<ActorTag>,
     ecs::Excluded<TagRomActor, TagNestedSoftActor, TagRodSurfaceContact>,
+    ecs::PartialRegistry<CRootTransform const> reg,
     DiscretizationType const& discretization,
     CRootTransform const& transform,
     CDofOffset const& dofOffset,
@@ -451,16 +452,24 @@ void deformable::SetupCollidingJacobians(
         "deformable::SetupCollidingJacobians Range", syncJacs, kMinPerTask, [&](JacData* jac) {
           MOCHI_ASSERT_VERBOSE(jac->type == ContactType::Sync);
 
-          // Create differentiable map
+          // Create differentiable map. At stage start the collider-space Jacobian is the
+          // transpose rotation of the collider's stage-start root transform (one shared
+          // Jacobian per pair, as the current query stores for rigid colliders).
           using DQuad = DMapQuad<typename DiscretizationT::ElementT>;
-          MOCHI_ASSERT(
-              !kStageStart || !jac->query->jacColliderFromWorldStageStart.empty(),
-              "Stage-start collider-space Jacobians are missing for the stage-start contact "
-              "Jacobian");
-          DQuad dquad(
-              discretizationImpl.femElements,
-              kStageStart ? jac->query->jacColliderFromWorldStageStart
-                          : jac->query->jacColliderFromWorld);
+          VMatrix3x3r jacColliderFromWorldStageStart = {};
+          Span<VMatrix3x3r const> toColliderJacs = jac->query->jacColliderFromWorld;
+          if constexpr (kStageStart) {
+            MOCHI_ASSERT(
+                jac->query->jacColliderFromWorld.size() == 1,
+                "Stage-start contact Jacobians of deformable samples are implemented for "
+                "colliders with one shared collider-space Jacobian (rigid and articulated-link "
+                "SDF colliders) only.");
+            jacColliderFromWorldStageStart = ToVMatrix3x3Transpose(
+                reg.get<CRootTransform const>(jac->otherEntity)
+                    .worldFromLocalStageStart.GetRotation());
+            toColliderJacs = MakeSingletonConstSpan(jacColliderFromWorldStageStart);
+          }
+          DQuad dquad(discretizationImpl.femElements, toColliderJacs);
           DMap<DQuad, DMapRTConst, DMapDeformable<kNumFields>> dmap(&dquad, &dtransform, &dsoft);
 
           auto& jacs = *(jac->jacs);
@@ -474,6 +483,7 @@ void deformable::SetupCollidingJacobians(
   template void deformable::SetupCollidingJacobians<ACTOR_TAG, DISCRETIZATION_TYPE, TIME_STEP>( \
       ecs::Included<ACTOR_TAG>,                                                                 \
       ecs::Excluded<TagRomActor, TagNestedSoftActor, TagRodSurfaceContact>,                     \
+      ecs::PartialRegistry<CRootTransform const> reg,                                           \
       DISCRETIZATION_TYPE const& discretization,                                                \
       CRootTransform const& transform,                                                          \
       CDofOffset const& dofOffset,                                                              \

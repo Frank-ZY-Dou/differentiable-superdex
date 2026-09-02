@@ -613,6 +613,94 @@ class SoftSyncContactGradientTest(unittest.TestCase):
         self.assertLessEqual(max(rel_errors.values()), 1e-4, (rel_errors, skipped))
 
 
+class SoftArticulatedContactGradientTest(unittest.TestCase):
+    """A controlled chain pushing a soft cube along the ground
+    (:func:`scenes.chain_pushing_soft_cube`): the gradient of the cube's mean
+    displacement w.r.t. the chain's per-step joint targets flows through the
+    sync contact of the soft's samples against the link's SDF (an articulated
+    collider: reduced-coordinate collider Jacobians at the stage-start state)."""
+
+    dt, num_steps = 0.01, 30
+    goal = np.array([0.08, 0.0, -0.01])
+
+    @classmethod
+    def controls(cls):
+        return np.stack(
+            [np.linspace(0.0, -1.2, cls.num_steps), np.zeros(cls.num_steps)], axis=1
+        )
+
+    class _MeanDisplacementLoss:
+        def __init__(self, soft, goal):
+            self.soft, self.goal = soft, np.asarray(goal, dtype=np.float64)
+            self.num_nodes = soft.get_num_dofs() // 3
+
+        def _mean(self) -> np.ndarray:
+            return np.asarray(self.soft.get_displacements()).reshape(-1, 3).mean(axis=0)
+
+        def value(self) -> float:
+            d = self._mean() - self.goal
+            return 0.5 * float(d @ d)
+
+        def accumulate_output_grad(self) -> None:
+            d = self._mean() - self.goal
+            diffsim.get_displacements_backward(self.soft, np.tile(d / self.num_nodes, self.num_nodes))
+
+    def _rollout_loss(self, controls) -> float:
+        scene, chain, soft = scenes.chain_pushing_soft_cube()
+        try:
+            _configure(scene)
+            loss = self._MeanDisplacementLoss(soft, self.goal)
+            for step in range(self.num_steps):
+                chain.set_articulated_target_pose(np.ascontiguousarray(controls[step]))
+                scene.step(self.dt)
+            return loss.value()
+        finally:
+            physics.destroy_scene(scene)
+
+    def test_control_gradients_through_soft_link_contact(self) -> None:
+        controls = self.controls()
+        scene, chain, soft = scenes.chain_pushing_soft_cube()
+        self.addCleanup(physics.destroy_scene, scene)
+        _configure(scene)
+        result = DifferentiableRollout(scene, dt=self.dt, num_steps=self.num_steps).run(
+            apply_inputs=lambda step: chain.set_articulated_target_pose(
+                np.ascontiguousarray(controls[step])
+            ),
+            terminal_losses=[self._MeanDisplacementLoss(soft, self.goal)],
+        )
+        self.assertTrue(result.fd_valid, result.flagged_steps)
+        self.assertEqual(result.minres_fallbacks, 0)
+        grad = result.gradients["chain"].control_targets  # (2, num_steps)
+        self.assertGreater(np.linalg.norm(grad), 0.0, "the cube was not pushed")
+        # Directional derivative along the gradient (the clean check), then the
+        # largest entries at their own finite-difference self-consistency level.
+        direction = grad / np.linalg.norm(grad)
+        fds = [
+            (self._rollout_loss(controls + eps * direction.T)
+             - self._rollout_loss(controls - eps * direction.T)) / (2.0 * eps)
+            for eps in (1e-5, 1e-6)
+        ]
+        self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), 1e-4, "rough directional FD")
+        self.assertLessEqual(abs(np.linalg.norm(grad) - fds[0]) / abs(fds[0]), 1e-4, fds)
+        rel_errors, skipped = {}, {}
+        for flat in np.argsort(-np.abs(grad).ravel())[:4]:
+            d, s = divmod(int(flat), self.num_steps)
+            fds = []
+            for eps in (1e-5, 1e-6):
+                plus, minus = controls.copy(), controls.copy()
+                plus[s, d] += eps
+                minus[s, d] -= eps
+                fds.append((self._rollout_loss(plus) - self._rollout_loss(minus)) / (2.0 * eps))
+            denom = max(abs(fds[0]), 1e-30)
+            fd_self = abs(fds[0] - fds[1]) / denom
+            if fd_self > 1e-3:
+                skipped[(d, s)] = fd_self
+                continue
+            rel_errors[(d, s)] = abs(grad[d, s] - fds[0]) / denom
+        self.assertGreaterEqual(len(rel_errors), 3, f"too few smooth entries: {skipped}")
+        self.assertLessEqual(max(rel_errors.values()), 1e-3, (rel_errors, skipped))
+
+
 class SoftContactParameterGradientTest(unittest.TestCase):
     """Contact-parameter and gravity gradients on the soft contact scene.
 
