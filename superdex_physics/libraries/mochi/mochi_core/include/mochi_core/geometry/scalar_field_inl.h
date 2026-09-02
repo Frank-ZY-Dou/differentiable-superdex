@@ -446,6 +446,155 @@ void DenseGrid3D<T>::TrilinearSample(
 }
 
 template <typename T>
+template <int kBatchSize, GridExtrapolation kExtrapolationType>
+MOCHI_FORCE_INLINE void DenseGrid3D<T>::TrilinearSampleHessianBatch(
+    NdArray<Simd<real, kBatchSize>, 3> const& points,
+    NdArray<Simd<T, kBatchSize>, 3, 3>& outHessians) const {
+  using TVec = Simd<T, kBatchSize>;
+  using IVec = Simd<IType, kBatchSize>;
+  using TVec3 = NdArray<TVec, 3>;
+  using IVec3 = NdArray<IVec, 3>;
+
+  static_assert(
+      std::is_floating_point_v<T> && TVec::kIsSupported && IVec::kIsSupported,
+      "Trilinear sampler only supported for floating point types with SIMD support");
+  static_assert(std::is_same_v<T const, real const>, "Configuration not supported");
+
+  if constexpr (
+      (kExtrapolationType == GridExtrapolation::Unsupported) && MOCHI_ASSERT_VERBOSE_ENABLED) {
+    for (int i = 0; i < 3; ++i) {
+      MOCHI_ASSERT_VERBOSE(
+          AllTrue((points[i] >= _bounds.GetMin()[i]) && (points[i] <= _bounds.GetMax()[i])),
+          "Point falls outside grid.");
+    }
+  }
+
+  // Same cell lookup and corner values as TrilinearSampleBatch.
+  TVec3 param;
+  IVec3 indexLo, indexUp;
+  GetClampedParametricCoordsAt<kBatchSize, kExtrapolationType>(points, param, indexLo, indexUp);
+
+  TVec const v000 = operator()(indexLo[0], indexLo[1], indexLo[2]);
+  TVec const v001 = operator()(indexLo[0], indexLo[1], indexUp[2]);
+  TVec const v010 = operator()(indexLo[0], indexUp[1], indexLo[2]);
+  TVec const v011 = operator()(indexLo[0], indexUp[1], indexUp[2]);
+  TVec const v100 = operator()(indexUp[0], indexLo[1], indexLo[2]);
+  TVec const v101 = operator()(indexUp[0], indexLo[1], indexUp[2]);
+  TVec const v110 = operator()(indexUp[0], indexUp[1], indexLo[2]);
+  TVec const v111 = operator()(indexUp[0], indexUp[1], indexUp[2]);
+
+  TVec const dv00dz = v001 - v000;
+  TVec const dv01dz = v011 - v010;
+  TVec const dv10dz = v101 - v100;
+  TVec const dv11dz = v111 - v110;
+  TVec const v00 = v000 + param[2] * dv00dz;
+  TVec const v01 = v010 + param[2] * dv01dz;
+  TVec const v10 = v100 + param[2] * dv10dz;
+  TVec const v11 = v110 + param[2] * dv11dz;
+
+  // Mixed second derivatives of f(x,y,z) = lerp_x(v0(y,z), v1(y,z), x) in parametric space (the
+  // pure second derivatives of a trilinear interpolant vanish):
+  //   d2f/dxdy = d/dy (v1 - v0) = (v11 - v10) - (v01 - v00)
+  //   d2f/dxdz = d/dz (v1 - v0) = (1-y) (dv10dz - dv00dz) + y (dv11dz - dv01dz)
+  //   d2f/dydz = (1-x) (dv01dz - dv00dz) + x (dv11dz - dv10dz)
+  TVec const one = TVec{1};
+  TVec const dxy = (v11 - v10) - (v01 - v00);
+  TVec const dxz = (one - param[1]) * (dv10dz - dv00dz) + param[1] * (dv11dz - dv01dz);
+  TVec const dyz = (one - param[0]) * (dv01dz - dv00dz) + param[0] * (dv11dz - dv10dz);
+
+  TVec hxx = TVec{};
+  TVec hyy = TVec{};
+  TVec hzz = TVec{};
+  TVec hxy = dxy * (_deltaInv[0] * _deltaInv[1]);
+  TVec hxz = dxz * (_deltaInv[0] * _deltaInv[2]);
+  TVec hyz = dyz * (_deltaInv[1] * _deltaInv[2]);
+
+  if constexpr (
+      kExtrapolationType == GridExtrapolation::Clamp ||
+      kExtrapolationType == GridExtrapolation::UpperBound) {
+    // Match the extrapolation of TrilinearSampleBatch's gradient: a coordinate outside the grid
+    // is evaluated at the clamped point, so the interpolant does not vary with it.
+    auto const bounds = GetBounds();
+    auto const minBounds = bounds.GetMin();
+    auto const maxBounds = bounds.GetMax();
+    TVec3 const interiorIndicator = {
+        (points[0] >= minBounds[0]) & (points[0] <= maxBounds[0]),
+        (points[1] >= minBounds[1]) & (points[1] <= maxBounds[1]),
+        (points[2] >= minBounds[2]) & (points[2] <= maxBounds[2])};
+    hxy = Select(interiorIndicator[0] & interiorIndicator[1], hxy, SimdZero<TVec>());
+    hxz = Select(interiorIndicator[0] & interiorIndicator[2], hxz, SimdZero<TVec>());
+    hyz = Select(interiorIndicator[1] & interiorIndicator[2], hyz, SimdZero<TVec>());
+
+    if constexpr (kExtrapolationType == GridExtrapolation::UpperBound) {
+      // The exterior coordinates of the gradient are the unit direction g/|g| from the closest
+      // point on the grid boundary; its Jacobian on the exterior block is (I - g gT / |g|^2) / |g|.
+      auto const halfExtents = bounds.GetHalfExtents();
+      auto const center = bounds.GetCenter();
+      TVec3 const exteriorGrad = {
+          points[0] - center[0] +
+              Clamp(center[0] - points[0], TVec{-halfExtents[0]}, TVec{halfExtents[0]}),
+          points[1] - center[1] +
+              Clamp(center[1] - points[1], TVec{-halfExtents[1]}, TVec{halfExtents[1]}),
+          points[2] - center[2] +
+              Clamp(center[2] - points[2], TVec{-halfExtents[2]}, TVec{halfExtents[2]})};
+      TVec const exteriorGradNorm = Norm(exteriorGrad) + std::numeric_limits<T>::min();
+      TVec const invNorm = one / exteriorGradNorm;
+      TVec3 const gUnit = {
+          exteriorGrad[0] * invNorm, exteriorGrad[1] * invNorm, exteriorGrad[2] * invNorm};
+      TVec3 const exterior = {
+          Select(interiorIndicator[0], SimdZero<TVec>(), one),
+          Select(interiorIndicator[1], SimdZero<TVec>(), one),
+          Select(interiorIndicator[2], SimdZero<TVec>(), one)};
+      hxx += exterior[0] * (one - gUnit[0] * gUnit[0]) * invNorm;
+      hyy += exterior[1] * (one - gUnit[1] * gUnit[1]) * invNorm;
+      hzz += exterior[2] * (one - gUnit[2] * gUnit[2]) * invNorm;
+      hxy -= exterior[0] * exterior[1] * gUnit[0] * gUnit[1] * invNorm;
+      hxz -= exterior[0] * exterior[2] * gUnit[0] * gUnit[2] * invNorm;
+      hyz -= exterior[1] * exterior[2] * gUnit[1] * gUnit[2] * invNorm;
+    }
+  } else {
+    static_assert(
+        kExtrapolationType == GridExtrapolation::Unsupported, "Unimplemented extrapolation type");
+  }
+
+  outHessians[0][0] = hxx;
+  outHessians[0][1] = hxy;
+  outHessians[0][2] = hxz;
+  outHessians[1][0] = hxy;
+  outHessians[1][1] = hyy;
+  outHessians[1][2] = hyz;
+  outHessians[2][0] = hxz;
+  outHessians[2][1] = hyz;
+  outHessians[2][2] = hzz;
+}
+
+template <typename T>
+template <GridExtrapolation kExtrapolationType>
+void DenseGrid3D<T>::TrilinearSampleHessian(
+    Span<Real3 const> points,
+    Span<NdArray<T, 3, 3>> outHessians,
+    TrilinearSamplerOptions<kExtrapolationType>) const {
+  int constexpr kBatchSize = Simd<T>::kSize;
+  using TVec = Simd<T, kBatchSize>;
+  using TVec3x3 = NdArray<TVec, 3, 3>;
+  int const numPoints = isize(points);
+  MOCHI_ASSERT_VERBOSE(isize(outHessians) >= numPoints);
+  for (int i = 0; i < numPoints; i += kBatchSize) {
+    int const count = Min(kBatchSize, numPoints - i);
+    auto const pts = VectorizePoints<kBatchSize>(points.subspan(i, count));
+    TVec3x3 hess MOCHI_NO_INIT;
+    TrilinearSampleHessianBatch<kBatchSize, kExtrapolationType>(pts, hess);
+    for (int ii = 0; ii < count; ++ii) {
+      for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+          outHessians[i + ii][r][c] = Get(hess[r][c], ii);
+        }
+      }
+    }
+  }
+}
+
+template <typename T>
 template <GridExtrapolation kExtrapolationType>
 void DenseGrid3D<T>::TrilinearSampleGradient(
     Span<Real3 const> points,

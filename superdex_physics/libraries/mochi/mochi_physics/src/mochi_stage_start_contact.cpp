@@ -264,6 +264,16 @@ static void AddPerCollisionMissingStageStartContacts(
   current.posCollidingStageStart.reserve(newSize);
   current.sdfInfoStageStart.val.reserve(newSize);
   current.sdfInfoStageStart.grad.reserve(newSize);
+  // The stage-start Hessians follow the stage-start detection's request; a current result without
+  // stage-start contacts yet inherits it.
+  MOCHI_ASSERT(
+      current.sdfInfoStageStart.empty() ||
+          current.sdfInfoStageStart.hasHessian == stageStart.sdfInfo.hasHessian,
+      "Inconsistent SDF Hessian requests between the stage-start and current contact data.");
+  current.sdfInfoStageStart.hasHessian = stageStart.sdfInfo.hasHessian;
+  if (stageStart.sdfInfo.hasHessian) {
+    current.sdfInfoStageStart.hess.reserve(newSize);
+  }
   if (isMappedCollider) {
     current.jacColliderFromWorld.reserve(newSize);
     current.jacColliderFromWorldStageStart.reserve(newSize);
@@ -301,6 +311,9 @@ static void AddPerCollisionMissingStageStartContacts(
     current.posCollidingStageStart.push_back(stageStart.posColliding[contactIdx]);
     current.sdfInfoStageStart.val.push_back(stageStart.sdfInfo.val[contactIdx]);
     current.sdfInfoStageStart.grad.push_back(stageStart.sdfInfo.grad[contactIdx]);
+    if (stageStart.sdfInfo.hasHessian) {
+      current.sdfInfoStageStart.hess.push_back(stageStart.sdfInfo.hess[contactIdx]);
+    }
     if (isMappedCollider) {
       current.jacColliderFromWorld.push_back(stageStart.jacColliderFromWorld[contactIdx]);
       current.jacColliderFromWorldStageStart.push_back(stageStart.jacColliderFromWorld[contactIdx]);

@@ -639,7 +639,8 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
     bool assemEnergy,
     bool assemForce,
     bool assemDForce,
-    bool isSdfGradUnitary) {
+    bool isSdfGradUnitary,
+    BatchReal3x3<kBatchSize> const* sdfHessStageStart = nullptr) {
   static_assert(
       kCollResponseMaxBatchSize == 8,
       "Please update batched contact functions if the max batch size changes");
@@ -656,6 +657,10 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
   // Define the normal for dissipation.
   // If the colliding normal is invalid, override any request to use the colliding normal.
   V3 normal MOCHI_NO_INIT;
+  // Inverse norm of the SDF gradient the normal was normalized from (1 for unit gradients, 0 where
+  // the gradient vanished and the normal was replaced). Needed by the previous-state derivative of
+  // the normal: d(g/|g|)/dp = (I - n n^T) H / |g|.
+  V gradNormInv = V{1_r};
   bool const useColliderNormal = params.frictionWithColliderNormal || !config.validCollidingNormals;
   if (useColliderNormal) {
     // Normalize the SDF gradient to get the collider normal direction.
@@ -665,6 +670,7 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
     if (!isSdfGradUnitary) {
       V norm = Norm(normal);
       normal *= 1_r / norm;
+      gradNormInv = 1_r / norm;
 
       V isNearZero = norm < kNormalIsZeroThreshold;
       if (AnyTrue(isNearZero))
@@ -679,6 +685,7 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
             normal[1] = Select(isNearZero, V{0_r}, normal[1]);
             normal[2] = Select(isNearZero, V{0_r}, normal[2]);
           }
+          gradNormInv = Select(isNearZero, V{0_r}, gradNormInv);
         }
     }
     MOCHI_ASSERT_VERBOSE(
@@ -709,6 +716,15 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
   V3 dEnergyFactor MOCHI_NO_INIT;
   bool const computeEnergyFactor =
       assemEnergy || (kGradTarget == GradTarget::Previous && assemForce);
+
+  // Force coefficients, kept for the previous-state derivative of the normal (see the end):
+  // tangential force = -(coefCoulomb + coefViscous) * pRelT, normal damping force = -coefNormal *
+  // pRelN, with coefCoulomb = kC * fN * dSmoother/|pRelT|.
+  V coefCoulomb = V{};
+  V coefViscous = V{};
+  V coefNormal = V{};
+  V coulombDdSmoother = V{};
+  V coulombDSmootherPtNorm = V{};
 
   // Coulomb friction
   if (params.coulombFrictionCoefficient > 0) {
@@ -742,6 +758,9 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
 
     if (assemForce || assemDForce) {
       V tmp = (coulombCoefficient * fPenalty) * dSmoother_ptNorm;
+      coefCoulomb = tmp;
+      coulombDdSmoother = ddSmoother;
+      coulombDSmootherPtNorm = dSmoother_ptNorm;
 
       // Output force
       if (assemForce) {
@@ -813,6 +832,7 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
 
     if (assemForce || assemDForce) {
       V tmp = viscousCoefficient * fPenalty;
+      coefViscous = tmp;
 
       // Output force
       if (assemForce) {
@@ -855,6 +875,7 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
 
     if (assemForce || assemDForce) {
       V tmp = normalDampingCoefficient * fPenalty;
+      coefNormal = tmp;
 
       // Output force: force = -coeff * fN * pn / dtFactor (damping in normal direction)
       if (assemForce) {
@@ -954,6 +975,61 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
       outDForce[7] += row2[0]; // zx
       outDForce[8] += row2[1]; // zy
     }
+
+    // Add Previous-target terms from differentiating the explicit stage-start normal. With
+    // n = g/|g| the normalized stage-start SDF gradient, the dissipation energy fN * E(pRel, n)
+    // depends on the stage-start position also through n: dn/dp = (I - n n^T) H / |g| with H the
+    // SDF Hessian. From E = kC * smoother(|pRelT|) + 1/2 kV |pRelT|^2 + 1/2 kN (pRel . n)^2 and
+    // pRelT = pRel - (pRel . n) n:
+    //   dE/dn = -s (kC dSmoother/|pRelT| + kV) pRelT + kN s pRel,   s = pRel . n
+    // so (I - n n^T) fN dE/dn = s b pRelT with b = coefNormal - coefViscous - coefCoulomb, and the
+    // force (= -gradient) gets  -(s b / |g|) H pRelT.
+    if ((assemForce || assemDForce) && sdfHessStageStart != nullptr) {
+      MOCHI_ASSERT(
+          useColliderNormal,
+          "GradTarget::Previous with dissipation requires ContactParams::frictionWithColliderNormal "
+          "= true: the dependence of the colliding normal on the stage-start orientations is not "
+          "differentiated.");
+      auto const& hess = *sdfHessStageStart;
+      V const s = pRelNScalar;
+      V const b = coefNormal - coefViscous - coefCoulomb;
+      V3 const hPRelT = DotMatVec(hess, pRelT);
+      if (assemForce) {
+        outForce -= (gradNormInv * s * b) * hPRelT;
+      }
+      if (assemDForce) {
+        // Derivative of that force w.r.t. the current position, stored transposed like the other
+        // Previous-target dforce terms (entry [i][j] = d force_j / d p_i). With w = s b pRelT:
+        //   (dw/dp)^T H = b n u^T + s b (H - n (H n)^T) - s kC fN kappa pRelT u^T,
+        //   u = H pRelT, kappa = (ddSmoother - dSmoother/|pRelT|) / |pRelT|^2,
+        // and the stored block is -(1/|g|) times that.
+        V3 const hNormal = DotMatVec(hess, normal);
+        V kappaTerm = V{};
+        if (params.coulombFrictionCoefficient > 0) {
+          V const ptMask = (pRelTNorm > 1e-11_r);
+          V const ptNormSqrInv =
+              1_r / (pRelTNorm * pRelTNorm + std::numeric_limits<real>::min());
+          V const kappa =
+              Select(ptMask, (coulombDdSmoother - coulombDSmootherPtNorm) * ptNormSqrInv, V{});
+          kappaTerm = s * (params.coulombFrictionCoefficient * fPenalty) * kappa;
+        }
+        V const sb = s * b;
+        auto entry = [&](int i, int j) {
+          return (-gradNormInv) *
+              (b * normal[i] * hPRelT[j] + sb * (hess[i][j] - normal[i] * hNormal[j]) -
+               kappaTerm * pRelT[i] * hPRelT[j]);
+        };
+        outDForce[0] += entry(0, 0); // xx
+        outDForce[1] += entry(1, 1); // yy
+        outDForce[2] += entry(2, 2); // zz
+        outDForce[3] += entry(0, 1); // xy
+        outDForce[4] += entry(0, 2); // xz
+        outDForce[5] += entry(1, 2); // yz
+        outDForce[6] += entry(1, 0); // yx
+        outDForce[7] += entry(2, 0); // zx
+        outDForce[8] += entry(2, 1); // zy
+      }
+    }
   }
 }
 
@@ -977,6 +1053,9 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
  * @param[in] distance Signed distances at contact points (negative = penetration)
  * @param[in] distanceGrad Gradient of signed distance at current state
  * @param[in] distanceStageStart Signed distances at stage start (used only with explicit normals)
+ * @param[in] distanceHessStageStart Hessian of signed distance at stage start (used only with
+ *            explicit normals and GradTarget::Previous, where the dissipative terms differentiate
+ *            the explicit normal; may be empty otherwise)
  * @param[in] distanceGradStageStart Gradient of signed distance at stage start (used only with
  * explicit normals)
  * @param[in] normalColliding Surface normals of the colliding body at the contact points (used only
@@ -1008,6 +1087,7 @@ MOCHI_FORCE_INLINE
         Span<Real3 const> distanceGrad,
         Span<real const> distanceStageStart,
         Span<Real3 const> distanceGradStageStart,
+        Span<Matrix3x3r const> distanceHessStageStart,
         Span<Real3 const> normalColliding,
         Span<Real3 const> posColliding,
         Span<Real3 const> posCollidingStageStart,
@@ -1172,6 +1252,33 @@ MOCHI_FORCE_INLINE
           assemDForceNorm);
     }
 
+    // The previous-state gradient also differentiates the explicit stage-start normal, which
+    // needs the stage-start SDF Hessian (ContactDetectionParams::computeSdfHessian).
+    BatchReal3x3<kBatchSize> hessStageStart MOCHI_NO_INIT;
+    BatchReal3x3<kBatchSize> const* hessStageStartPtr = nullptr;
+    if constexpr (kGradTarget == GradTarget::Previous) {
+      if (assemForce || assemDForce) {
+        MOCHI_ASSERT(
+            config.explicitNormals && isize(distanceHessStageStart) == kBatchSize,
+            "GradTarget::Previous with dissipative contact requires the stage-start SDF Hessians "
+            "(ContactDetectionParams::computeSdfHessian) for every contact of the batch.");
+        alignas(V) real hessTmp[3][3][V::kSize] = {};
+        for (int i = 0; i < kBatchSize; ++i) {
+          for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+              hessTmp[r][c][i] = distanceHessStageStart[i][r][c];
+            }
+          }
+        }
+        for (int r = 0; r < 3; ++r) {
+          for (int c = 0; c < 3; ++c) {
+            hessStageStart[r][c] = Load<V>(&hessTmp[r][c][0]);
+          }
+        }
+        hessStageStartPtr = &hessStageStart;
+      }
+    }
+
     ComputeBatchContactDissipationForceDForce<kBatchSize, kGradTarget>(
         energy,
         force,
@@ -1187,7 +1294,8 @@ MOCHI_FORCE_INLINE
         assemEnergy,
         assemForce,
         assemDForce,
-        isSdfGradUnitary);
+        isSdfGradUnitary,
+        hessStageStartPtr);
   }
 
   // Store outputs to Spans

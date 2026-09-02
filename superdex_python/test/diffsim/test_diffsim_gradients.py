@@ -225,39 +225,35 @@ class DiffsimGradientTest(unittest.TestCase):
         rel_errors = self._chain_control_gradient_check(scene, chain, cube)
         self.assertLessEqual(max(rel_errors.values()), 1e-4, rel_errors)
 
-    def test_link_as_collider_of_frictional_sync_contact_is_pinned_wrong(self):
-        """PINNED DEFECT (2026-09-01): with friction between an articulated link
-        and a dynamic rigid body in one island, the previous-state coupling of
-        the adjoint is wrong for the contacts whose *collider* (SDF owner) is the
-        link, i.e. the rigid body's samples against the link's surface, while
-        the link's samples against the rigid body's surface are exact. Each step
-        is off by 1e-3 (configuration dependent; zero for a prismatic link, so
-        it needs the link to rotate) and the errors compound over a rollout.
-        Measured on this scene, viscous friction, 30 steps: 1e-2..2e-1 with the
-        link as collider (1.1e-2 and 2.7e-2 at the two entries after the onset,
-        where the loss is smooth to 3e-5), 3e-7 with the link as colliding body.
-        The test asserts both so that a fix flips the first assertion."""
+    def test_frictional_contact_through_sdf_edge_regions_is_exact(self):
+        """With explicit normals the dissipative contact terms use the collider's
+        stage-start SDF gradient as the contact normal. Until 2026-09-01 the
+        GradTarget::Previous assembly treated that normal as a constant, which
+        is exact inside a face region of a box SDF and wrong where contact
+        samples slide through an edge or corner region (gradient varying with
+        position): about 1e-3 relative per step, compounding over a rollout
+        (measured here: 1e-2..2e-1 with the cube's face samples on the tilted
+        link's edge region, 3e-7 with the link's edge samples on the cube's
+        face). The previous-state assembly now differentiates the normal with
+        the stage-start SDF Hessian (contact_utils.h,
+        ComputeBatchContactDissipationForceDForce; Hessians from grid SDFs and
+        the plane/sphere/box primitives), and both directions are exact:
+        measured 1e-6..4e-5 (the largest at an entry whose FD self-consistency
+        is 1e-4) and 3e-7."""
         viscous = physics.ContactParams(
             penalty_coefficient=1e8,
             coulomb_friction_coefficient=0.0,
             viscous_friction_coefficient=0.1,
         )
-        with self.subTest("link samples vs cube SDF (link is the colliding body)"):
-            scene, chain, cube = scenes.chain_pushing_cube_with_params(
-                viscous, link_collider=False
-            )
-            rel_errors = self._chain_control_gradient_check(scene, chain, cube)
-            self.assertLessEqual(max(rel_errors.values()), 1e-5, rel_errors)
-        with self.subTest("cube samples vs link SDF (link is the collider)"):
-            scene, chain, cube = scenes.chain_pushing_cube_with_params(
-                viscous, cube_collider=False
-            )
-            rel_errors = self._chain_control_gradient_check(scene, chain, cube)
-            self.assertGreater(
-                max(rel_errors.values()),
-                5e-3,
-                f"the pinned link-as-collider defect no longer shows: {rel_errors}",
-            )
+        for label, kwargs in (
+            ("link edge samples on the cube's face region", {"link_collider": False}),
+            ("cube face samples on the tilted link's edge region", {"cube_collider": False}),
+            ("both bodies collide", {}),
+        ):
+            with self.subTest(label):
+                scene, chain, cube = scenes.chain_pushing_cube_with_params(viscous, **kwargs)
+                rel_errors = self._chain_control_gradient_check(scene, chain, cube)
+                self.assertLessEqual(max(rel_errors.values()), 1e-4, rel_errors)
 
     # -- rigid ---------------------------------------------------------------
 

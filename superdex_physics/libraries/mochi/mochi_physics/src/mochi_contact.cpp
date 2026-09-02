@@ -27,6 +27,7 @@
 #include "mochi_point_cloud_contact.h"
 #include "mochi_rigid.h"
 #include "mochi_rod.h"
+#include "mochi_differentiable.h"
 #include "mochi_scene_recorder.h"
 #include "mochi_shell.h"
 #include "mochi_simulation.h"
@@ -362,7 +363,7 @@ static void QueryPointCloud(
     TransformRT const& worldFromCollider,
     Span<Real3 const> positionsInColliding,
     Span<int const> indicesToQuery,
-    ContactDetectionParams const& /* params */,
+    ContactDetectionParams const& detectionParams,
     Span<int const> colliderFeatureIndices,
     DynamicArray<int>& outIndices,
     DynamicArray<int>* outColliderFeatureIndices,
@@ -376,6 +377,10 @@ static void QueryPointCloud(
   MOCHI_ASSERT(
       kTimeStep == TimeStep::Current || kTimeStep == TimeStep::StageStart,
       "QueryPointCloud assumes TimeStep::Current or TimeStep::StageStart");
+  MOCHI_ASSERT(
+      !detectionParams.computeSdfHessian,
+      "SDF Hessians (needed by the adjoint of a differentiable scene) are not implemented for "
+      "point-cloud colliders.");
   MOCHI_ASSERT_VERBOSE(
       colliderFeatureIndices.empty() == (outColliderFeatureIndices != nullptr),
       "Provide or request collider features, but not both or neither.");
@@ -686,6 +691,9 @@ static void DistributeContactDetectionResultToPartitions(
         sourceResult.posColliding[firstPartitionCount] = sourceResult.posColliding[i];
         sourceResult.sdfInfo.grad[firstPartitionCount] = sourceResult.sdfInfo.grad[i];
         sourceResult.sdfInfo.val[firstPartitionCount] = sourceResult.sdfInfo.val[i];
+        if (sourceResult.sdfInfo.hasHessian) {
+          sourceResult.sdfInfo.hess[firstPartitionCount] = sourceResult.sdfInfo.hess[i];
+        }
         if constexpr (kTimeStep == TimeStep::Current) {
           sourceResult.posCollidingStageStart[firstPartitionCount] =
               sourceResult.posCollidingStageStart[i];
@@ -694,6 +702,10 @@ static void DistributeContactDetectionResultToPartitions(
                 sourceResult.sdfInfoStageStart.grad[i];
             sourceResult.sdfInfoStageStart.val[firstPartitionCount] =
                 sourceResult.sdfInfoStageStart.val[i];
+            if (sourceResult.sdfInfoStageStart.hasHessian) {
+              sourceResult.sdfInfoStageStart.hess[firstPartitionCount] =
+                  sourceResult.sdfInfoStageStart.hess[i];
+            }
           }
         }
       }
@@ -706,11 +718,23 @@ static void DistributeContactDetectionResultToPartitions(
       targetPartition.posColliding.push_back(sourceResult.posColliding[i]);
       targetPartition.sdfInfo.grad.push_back(sourceResult.sdfInfo.grad[i]);
       targetPartition.sdfInfo.val.push_back(sourceResult.sdfInfo.val[i]);
+      targetPartition.sdfInfo.hasHessian = sourceResult.sdfInfo.hasHessian;
+      if (sourceResult.sdfInfo.hasHessian) {
+        targetPartition.sdfInfo.hess.push_back(sourceResult.sdfInfo.hess[i]);
+      }
       if constexpr (kTimeStep == TimeStep::Current) {
         targetPartition.posCollidingStageStart.push_back(sourceResult.posCollidingStageStart[i]);
         if (explicitNormals) {
-          targetPartition.sdfInfoStageStart.push_back(
-              sourceResult.sdfInfoStageStart.val[i], sourceResult.sdfInfoStageStart.grad[i]);
+          targetPartition.sdfInfoStageStart.hasHessian = sourceResult.sdfInfoStageStart.hasHessian;
+          if (sourceResult.sdfInfoStageStart.hasHessian) {
+            targetPartition.sdfInfoStageStart.push_back(
+                sourceResult.sdfInfoStageStart.val[i],
+                sourceResult.sdfInfoStageStart.grad[i],
+                sourceResult.sdfInfoStageStart.hess[i]);
+          } else {
+            targetPartition.sdfInfoStageStart.push_back(
+                sourceResult.sdfInfoStageStart.val[i], sourceResult.sdfInfoStageStart.grad[i]);
+          }
         }
       }
     }
@@ -945,6 +969,10 @@ static void DetectCollisionsWithSingleCollider(
   real const farSdfDistance = GetFarSdfEvaluationDistance<kAllowFarSdfQuery>(reg, colliding);
   detectionParams.tolerance =
       colliderContactParams.GetPenaltyThresholdDist(addPadding) + farSdfDistance;
+  // The adjoint of a differentiable scene differentiates the explicit (stage-start) contact
+  // normal w.r.t. the stage-start position, which needs the stage-start SDF Hessians.
+  detectionParams.computeSdfHessian =
+      (kTimeStep == TimeStep::StageStart) && (reg.try_ctx<TagDifferentiableScene>() != nullptr);
 
   // Initialize outResult.jacColliderFromWorld assuming a rigid collider. This will be overwritten
   // for deformable colliders.
@@ -1028,6 +1056,9 @@ static void EvalStageStartContactWithSingleCollider(
     // Set infinite tolerance and collider bounds.
     ContactDetectionParams detectionParams;
     detectionParams.tolerance = kInf;
+    // See DetectCollisionsWithSingleCollider: differentiable scenes need the stage-start SDF
+    // Hessians for the previous-state adjoint.
+    detectionParams.computeSdfHessian = reg.try_ctx<TagDifferentiableScene>() != nullptr;
     Sphere colliderBounds(Real3{}, kInf);
     bool isSdfGradUnitary{};
     auto queryFunc = GetQueryFuncForPointsAndSdf<TimeStep::StageStart>(reg, collider);
@@ -1070,6 +1101,11 @@ static void EvalStageStartContactWithSingleCollider(
   // If needed, fill any missing results.
   if (outIndices.size() != outResult.sampleIndices.size()) {
     MOCHI_ASSERT_VERBOSE(outResult.ndofs > 0, "Only mapped colliders may miss results");
+    // Mapped colliders do not provide SDF Hessians (their query asserts when they are requested),
+    // so the stage-start data merged here never carries them.
+    MOCHI_ASSERT(
+        !outResult.sdfInfoStageStart.hasHessian,
+        "Missing stage-start results cannot be filled for contact data with SDF Hessians.");
     MOCHI_ASSERT_VERBOSE(
         outResult.posCollidingStageStart.size() == outIndices.size(),
         "Positions and indices size mismatch");

@@ -339,6 +339,7 @@ void GridSdf::FindPointContactsImpl(
   MOCHI_ASSERT_VERBOSE(outIndices.empty(), "Expected empty contact detection result.");
   MOCHI_ASSERT_VERBOSE(outContacts.empty(), "Expected empty contact detection result.");
   MOCHI_ASSERT_VERBOSE(outSdf.empty(), "Expected empty contact detection result.");
+  outSdf.hasHessian = params.computeSdfHessian;
   int const numPoints = isize(points);
   real const toleranceInGridSpace = params.tolerance / _actorFromGridScale;
   bool hasReserved = false;
@@ -388,6 +389,16 @@ void GridSdf::FindPointContactsImpl(
     Real3 gradients[kMaxBatchSize + 1] MOCHI_NO_INIT; // +1 for SIMD padding
     sampler.Gradient(
         *_distanceGrid, Span{&gradPoints[0], gradBatchSize}, Span{&gradients[0], gradBatchSize});
+    Matrix3x3r hessians[kMaxBatchSize + 1] MOCHI_NO_INIT; // +1 for SIMD padding
+    if (params.computeSdfHessian) {
+      sampler.Hessian(
+          *_distanceGrid, Span{&gradPoints[0], gradBatchSize}, Span{&hessians[0], gradBatchSize});
+    }
+    // With actor = s * R * grid + t, the actor-space distance is f_actor(x) = s * f_grid(g(x)),
+    // g(x) = R^T (x - t) / s: the gradient is R * grad_grid (the scale cancels) and the Hessian is
+    // R * H_grid * R^T / s.
+    VMatrix3x3r const actorFromGridRot = Transpose3x3(actorFromGridRotT);
+    real const hessianScale = 1_r / _actorFromGridScale;
     for (int i = 0; i < gradBatchSize; ++i) {
       int pointIndex = gradIndices[i];
       // The caller expects results in actor-space.
@@ -400,7 +411,21 @@ void GridSdf::FindPointContactsImpl(
       // Output the result
       outIndices.push_back(pointIndex);
       outContacts.push_back(ToReal3(point));
-      outSdf.push_back(sd, ToReal3(grad));
+      if (params.computeSdfHessian) {
+        VMatrix3x3r const hessGrid{
+            Load<3, Vec4r>(hessians[i][0].data()),
+            Load<3, Vec4r>(hessians[i][1].data()),
+            Load<3, Vec4r>(hessians[i][2].data())};
+        VMatrix3x3r const hessActor =
+            Dot3x3(actorFromGridRot, Dot3x3(hessGrid, actorFromGridRotT));
+        Matrix3x3r hessOut MOCHI_NO_INIT;
+        hessOut[0] = ToReal3(hessianScale * hessActor[0]);
+        hessOut[1] = ToReal3(hessianScale * hessActor[1]);
+        hessOut[2] = ToReal3(hessianScale * hessActor[2]);
+        outSdf.push_back(sd, ToReal3(grad), hessOut);
+      } else {
+        outSdf.push_back(sd, ToReal3(grad));
+      }
     }
     gradBatchSize = 0;
   };

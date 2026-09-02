@@ -26,20 +26,20 @@ rendered offscreen with the built-in viewer and written to MP4:
 2. ``robot_push.mp4`` - starting with the end effector already resting against
    a cube on the ground (pre-push pose from the engine's IK solver), sweep the
    cube to a goal that is off the initial push line, so the optimizer has to
-   steer it through contact between the arm's collision meshes and the cube
-   (articulated-vs-rigid contact in one island; the cube slides on the ground
-   with friction, the arm-cube pair is frictionless - see ARM_CONTACT).
+   steer it through frictional contact between the arm's collision meshes and
+   the cube (articulated-vs-rigid contact in one island; the cube slides on the
+   ground with friction).
 
 Rigor. Before optimizing, ``--check`` compares the adjoint gradient of the
 largest-gradient target entries against central finite differences of the
 full rollout at two step sizes (1e-5, 1e-6) and prints both the relative
 error and the FD self-consistency; every forward step is required to reach
 ``ConvergenceStatus.CONVERGED`` (the script aborts otherwise). What this
-shows for the push task (2026-09-01 measurements, frictionless arm-cube
-pair, friction fading off): the checked entries agree to 1e-6..1e-3. With a
-frictional arm-cube pair the entries at contact onset were off by
-5e-2..1.3e-1 although the rollout FD was self-consistent to 1e-5 - the pinned
-engine defect mentioned above, not a smoothness problem.
+shows for the push task (2026-09-01 measurements, frictional arm-cube pair):
+the checked entries agree to the FD noise level. Before the two engine fixes
+mentioned above the entries at contact onset were off by 5e-2..1.3e-1
+although the rollout FD was self-consistent to 1e-5 - friction fading and
+the constant stage-start normal, not a smoothness problem.
 Design choices that keep the interaction smooth: contact stiffness 1e6, the
 end effector starts in contact (no impact), the sweep is slow, and the forward
 Newton tolerance is 1e-9 (tighter settings sit at the round-off floor of this
@@ -81,16 +81,15 @@ EE_LINK = "fr3_link8"
 JOINT_GAINS = list(zip([400, 400, 300, 300, 150, 100, 60], [40, 40, 30, 30, 15, 10, 6]))
 CUBE_HALF = 0.05
 CONTACT = physics.ContactParams(penalty_coefficient=1e6, coulomb_friction_coefficient=0.4)
-# The arm's links carry a frictionless material: a contact pair combines both
-# owners' friction coefficients by geometric mean, so arm-cube contact is
-# frictionless (a smooth pusher) while cube-ground contact keeps its friction.
-# Reason: with friction between an articulated link and a dynamic rigid body,
-# the adjoint's previous-state coupling is wrong for the contacts whose SDF
-# owner is the link - a pinned engine defect (see test_diffsim_gradients:
-# test_link_as_collider_of_frictional_sync_contact_is_pinned_wrong); the penalty
-# term - all the pushing needs - is exact. (Differentiable scenes also switch
-# friction fading by normal alignment off; see ExperimentalEvalParams.fade_friction.)
-ARM_CONTACT = physics.ContactParams(penalty_coefficient=1e6, coulomb_friction_coefficient=0.0)
+# The arm's links carry the same frictional material as the cube: the contact
+# pair combines both owners' coefficients by geometric mean, so the arm pushes
+# the cube through frictional contact (and the cube slides on the ground with
+# friction). Both are differentiated exactly since 2026-09-01: differentiable
+# scenes switch friction fading by normal alignment off (see
+# ExperimentalEvalParams.fade_friction) and the previous-state adjoint
+# differentiates the explicit stage-start contact normal with the SDF Hessian
+# (test_diffsim_gradients: test_frictional_contact_through_sdf_edge_regions_is_exact).
+ARM_CONTACT = CONTACT
 CUBE_CONN = np.array(
     [0, 1, 2, 4, 6, 7, 4, 2, 5, 4, 7, 1, 3, 2, 1, 7, 1, 2, 4, 7], dtype=np.int32
 )

@@ -187,7 +187,29 @@ class DenseGrid3D {
       Span<Scalar3> outGradients,
       TrilinearSamplerOptions<kExtrapolationType>) const;
 
+  /**
+   * @brief Sample the Hessian (Jacobian of the gradient) of the trilinear interpolant with the
+   * given options.
+   * @note Within a cell the pure second derivatives of a trilinear interpolant vanish and the
+   * mixed ones are linear in the remaining coordinate; the Hessian is discontinuous across cells,
+   * exactly like the gradient's kinks. Outside the grid region it follows the extrapolation of
+   * @ref TrilinearSampleGradient: entries involving a coordinate evaluated by clamping vanish, and
+   * for GridExtrapolation::UpperBound the exterior coordinates carry the curvature of the unit
+   * direction to the grid boundary.
+   */
+  template <GridExtrapolation kExtrapolationType>
+  void TrilinearSampleHessian(
+      Span<Real3 const> points,
+      Span<NdArray<T, 3, 3>> outHessians,
+      TrilinearSamplerOptions<kExtrapolationType>) const;
+
  private:
+  /** @brief Batch version of @ref TrilinearSampleHessian (points in transposed format). */
+  template <int kBatchSize, GridExtrapolation kExtrapolationType>
+  MOCHI_FORCE_INLINE void TrilinearSampleHessianBatch(
+      NdArray<Simd<real, kBatchSize>, 3> const& points,
+      NdArray<Simd<T, kBatchSize>, 3, 3>& outHessians) const;
+
   /** @brief Computes the parametric coordinates within the grid volume of 'kBatchSize' points. */
   template <int kBatchSize, GridExtrapolation kExtrapolationType>
   MOCHI_FORCE_INLINE void GetClampedParametricCoordsAt(
@@ -226,6 +248,12 @@ struct TrilinearSdfGridUpperBoundSampler {
   Gradient(DenseGrid3D<T> const& grid, Span<Real3 const> points, Span<Scalar3> outGradients) const {
     grid.TrilinearSampleGradient(points, outGradients, Options{});
   }
+  MOCHI_FORCE_INLINE void Hessian(
+      DenseGrid3D<T> const& grid,
+      Span<Real3 const> points,
+      Span<NdArray<T, 3, 3>> outHessians) const {
+    grid.TrilinearSampleHessian(points, outHessians, Options{});
+  }
 };
 
 /** @brief Samples an SDF from a grid without support for extrapolation outside of the grid. */
@@ -240,6 +268,12 @@ struct TrilinearSdfGridInteriorSampler {
   MOCHI_FORCE_INLINE void
   Gradient(DenseGrid3D<T> const& grid, Span<Real3 const> points, Span<Scalar3> outGradients) const {
     grid.TrilinearSampleGradient(points, outGradients, Options{});
+  }
+  MOCHI_FORCE_INLINE void Hessian(
+      DenseGrid3D<T> const& grid,
+      Span<Real3 const> points,
+      Span<NdArray<T, 3, 3>> outHessians) const {
+    grid.TrilinearSampleHessian(points, outHessians, Options{});
   }
 };
 

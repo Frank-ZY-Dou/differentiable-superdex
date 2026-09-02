@@ -104,6 +104,9 @@ void mochi::ComputeCollisionResponseRange(
                              : Span<real const>{},                                             \
       config.explicitNormals ? MakeConstSpan(sdfInfoExplicit.grad).subspan(s, N)               \
                              : Span<Real3 const>{},                                            \
+      (config.explicitNormals && sdfInfoExplicit.hasHessian)                                   \
+          ? MakeConstSpan(sdfInfoExplicit.hess).subspan(s, N)                                  \
+          : Span<Matrix3x3r const>{},                                                          \
       config.validCollidingNormals ? MakeConstSpan(contactQuery.normalColliding).subspan(s, N) \
                                    : Span<Real3 const>{},                                      \
       MakeConstSpan(contactQuery.posColliding).subspan(s, N),                                  \
@@ -312,6 +315,7 @@ void mochi::FindPointContactsT<Plane>(
     bool& outIsSdfGradUnitary) {
   MOCHI_PROFILE_SCOPE();
   outIsSdfGradUnitary = true;
+  outSdf.hasHessian = params.computeSdfHessian;
 
   // Transform collider shape to colliding space.
   auto const colliderTransformed = TransformShape(pointsFromCollider, *collider);
@@ -413,6 +417,10 @@ void mochi::FindPointContactsT<Plane>(
 
   // sdfGrad is the same for every point.
   Fill(MakeSpan(outSdf.grad), collider->GetNormal());
+  if (params.computeSdfHessian) {
+    // The distance to a plane is linear.
+    Fill(MakeSpan(outSdf.hess), Matrix3x3r{});
+  }
 }
 
 // Implementation of FindPointContactsT for a sphere collider. Transform the collider to the space
@@ -429,6 +437,7 @@ void mochi::FindPointContactsT<Sphere>(
     bool& outIsSdfGradUnitary) {
   MOCHI_PROFILE_SCOPE();
   outIsSdfGradUnitary = true;
+  outSdf.hasHessian = params.computeSdfHessian;
 
   // Transform collider shape to colliding space.
   auto const colliderTransformed = TransformShape(pointsFromCollider, *collider);
@@ -539,6 +548,26 @@ void mochi::FindPointContactsT<Sphere>(
   outIndices.resize(iDst);
   outContacts.resize(iDst);
   outSdf.resize(iDst);
+
+  if (params.computeSdfHessian) {
+    // d = |p - c| - R: H = (I - n n^T) / |p - c|, zero at the degenerate center.
+    real const radiusCollider = collider->GetRadius();
+    for (size_t k = 0; k < iDst; ++k) {
+      Real3 const& n = outSdf.grad[k];
+      real const distFromCenter = outSdf.val[k] + radiusCollider;
+      Matrix3x3r& h = outSdf.hess[k];
+      if (distFromCenter < kDistanceEpsilon) {
+        h = Matrix3x3r{};
+        continue;
+      }
+      real const inv = 1_r / distFromCenter;
+      for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+          h[r][c] = ((r == c ? 1_r : 0_r) - n[r] * n[c]) * inv;
+        }
+      }
+    }
+  }
 }
 
 // Implementation of FindPointContactsT for an OBB collider. Transform the collider to the space
@@ -555,6 +584,7 @@ void mochi::FindPointContactsT<Obb>(
     bool& outIsSdfGradUnitary) {
   MOCHI_PROFILE_SCOPE();
   outIsSdfGradUnitary = true;
+  outSdf.hasHessian = params.computeSdfHessian;
 
   // Transform collider shape to colliding space.
   auto const colliderTransformed = TransformShape(pointsFromCollider, *collider);
@@ -724,6 +754,66 @@ void mochi::FindPointContactsT<Obb>(
   outIndices.resize(iDst);
   outContacts.resize(iDst);
   outSdf.resize(iDst);
+
+  if (params.computeSdfHessian) {
+    // Outside the box the distance is |delta| with delta_i = p_i - clamp(p_i, -h_i, h_i), so on the
+    // axes that are outside ("active") H = (diag(active) - n n^T) / |delta|; inside the box the
+    // distance is linear (H = 0). Computed in the box frame and rotated to the collider frame.
+    Real3 rot[3] MOCHI_NO_INIT; // colliderFromBox rotation, rows
+    Real3 trans MOCHI_NO_INIT; // colliderFromBox translation
+    for (int r = 0; r < 3; ++r) {
+      for (int c = 0; c < 3; ++c) {
+        rot[r][c] = Get(colliderFromBoxMat[r], c);
+      }
+      trans[r] = Get(colliderFromBoxMat[r], 3);
+    }
+    Real3 const halfExt = colliderTransformed.GetHalfExtents();
+    for (size_t k = 0; k < iDst; ++k) {
+      Matrix3x3r& h = outSdf.hess[k];
+      h = Matrix3x3r{};
+      if (outSdf.val[k] < kDistanceEpsilon) {
+        continue; // Inside (linear distance) or on the surface (degenerate).
+      }
+      // Box-frame position: localPos = R^T (p - t).
+      Real3 const& p = outContacts[k];
+      Real3 local MOCHI_NO_INIT;
+      for (int r = 0; r < 3; ++r) {
+        local[r] = rot[0][r] * (p[0] - trans[0]) + rot[1][r] * (p[1] - trans[1]) +
+            rot[2][r] * (p[2] - trans[2]);
+      }
+      Real3 delta MOCHI_NO_INIT;
+      Real3 active MOCHI_NO_INIT;
+      for (int r = 0; r < 3; ++r) {
+        real const clamped = Clamp(local[r], -halfExt[r], halfExt[r]);
+        delta[r] = local[r] - clamped;
+        active[r] = (delta[r] != 0_r) ? 1_r : 0_r;
+      }
+      real const dist = Norm(delta);
+      if (dist < kDistanceEpsilon) {
+        continue;
+      }
+      real const inv = 1_r / dist;
+      Real3 const n = delta * inv;
+      Matrix3x3r hBox MOCHI_NO_INIT;
+      for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+          hBox[r][c] = ((r == c ? active[r] : 0_r) - n[r] * n[c]) * inv;
+        }
+      }
+      // h = R hBox R^T
+      for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+          real acc = 0_r;
+          for (int a = 0; a < 3; ++a) {
+            for (int b = 0; b < 3; ++b) {
+              acc += rot[r][a] * hBox[a][b] * rot[c][b];
+            }
+          }
+          h[r][c] = acc;
+        }
+      }
+    }
+  }
 }
 
 // Implementation of FindPointContactsT for a mesh collider. Transform the points to the collider
@@ -742,6 +832,10 @@ void mochi::FindPointContactsT<MeshCollider>(
   MOCHI_ASSERT_VERBOSE(collider, "MeshCollider is null");
   MOCHI_ASSERT_VERBOSE(collider->IsInitialized(), "MeshCollider is not initialized");
   MOCHI_ASSERT_VERBOSE(outIndices.empty(), "Expected empty contact detection result.");
+  MOCHI_ASSERT(
+      !params.computeSdfHessian,
+      "SDF Hessians (needed by the adjoint of a differentiable scene) are not implemented for mesh "
+      "colliders.");
 
   auto const colliderFromPoints = Invert(pointsFromCollider);
 
@@ -789,6 +883,10 @@ void mochi::FindPointContactsMapped(
     int* outNDofs,
     DynamicArray<VMatrix3x3r>* outMapJac,
     DynamicArray<ColliderJacDofs>* outDofsJac) {
+  MOCHI_ASSERT(
+      !params.computeSdfHessian,
+      "SDF Hessians (needed by the adjoint of a differentiable scene) are not implemented for "
+      "mapped colliders.");
   // Cull points based on collider bounds. The culled points are in collider space.
   auto const colliderFromPoints = Invert(pointsFromCollider);
   DynamicArray<Real3> pointsCulled(points.size());

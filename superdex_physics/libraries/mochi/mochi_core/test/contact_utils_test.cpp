@@ -97,7 +97,15 @@ void TestPlaneContactAtPointN(
   SdfInfo sdf;
   sdf.resize(N);
   SdfInfo sdf0;
+  sdf0.hasHessian = true; // The previous-state target needs the stage-start Hessians (zero: plane).
   sdf0.resize(N);
+  for (int k = 0; k < N; ++k) {
+    for (int r = 0; r < 3; ++r) {
+      for (int c = 0; c < 3; ++c) {
+        sdf0.hess[k][r][c] = 0_r;
+      }
+    }
+  }
   DynamicArray<Real3> normalColliding(N);
   Real3 forceAn[N] = {};
   [[maybe_unused]] VMatrix3x3r dforceAn[N] = {};
@@ -120,6 +128,7 @@ void TestPlaneContactAtPointN(
       MakeConstSpan(sdf.grad),
       config.explicitNormals ? MakeConstSpan(sdf0.val) : Span<real const>{},
       config.explicitNormals ? MakeConstSpan(sdf0.grad) : Span<Real3 const>{},
+      config.explicitNormals ? MakeConstSpan(sdf0.hess) : Span<Matrix3x3r const>{},
       MakeConstSpan(normalColliding),
       MakeConstSpan(posColliding),
       MakeConstSpan(posColliding0),
@@ -153,6 +162,7 @@ void TestPlaneContactAtPointN(
           MakeConstSpan(sdf.grad),
           config.explicitNormals ? MakeConstSpan(sdf0.val) : Span<real const>{},
           config.explicitNormals ? MakeConstSpan(sdf0.grad) : Span<Real3 const>{},
+          config.explicitNormals ? MakeConstSpan(sdf0.hess) : Span<Matrix3x3r const>{},
           MakeConstSpan(normalColliding),
           MakeConstSpan(posColliding),
           MakeConstSpan(posColliding0),
@@ -171,6 +181,7 @@ void TestPlaneContactAtPointN(
           MakeConstSpan(sdf.grad),
           config.explicitNormals ? MakeConstSpan(sdf0.val) : Span<real const>{},
           config.explicitNormals ? MakeConstSpan(sdf0.grad) : Span<Real3 const>{},
+          config.explicitNormals ? MakeConstSpan(sdf0.hess) : Span<Matrix3x3r const>{},
           MakeConstSpan(normalColliding),
           MakeConstSpan(posColliding),
           MakeConstSpan(posColliding0),
@@ -437,6 +448,7 @@ TEST(ContactPenalties, FadeFriction_DegenerateAlignmentUsesUnfadedFactor) {
         MakeConstSpan(distanceGrad),
         {} /* distanceStageStart */,
         {} /* distanceGradStageStart */,
+        {} /* distanceHessStageStart */,
         MakeConstSpan(normalColliding),
         MakeConstSpan(posColliding),
         MakeConstSpan(posCollidingStageStart),
