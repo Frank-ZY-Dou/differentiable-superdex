@@ -34,7 +34,9 @@ low-level. :class:`DifferentiableRollout` wraps it into one object that
 
 Requirements are those of ``diffsim`` itself: rigid, articulated and
 standalone soft actors (soft contact against static colliders only),
-Backward Euler, double precision recommended, and the per-step protocol -
+Backward Euler, double precision recommended (the driver also runs on the
+single-precision build; gradients are then float32-accurate), and the
+per-step protocol -
 inputs are applied first, then the pre-step state is captured, then the scene
 steps (no input changes in between).
 
@@ -66,6 +68,12 @@ diffsim = physics.diffsim
 
 RIGID_POSE_SIZE = 7  # translation(3) + quaternion XYZW(4)
 RIGID_DOF_SIZE = 6  # Lie tangent: d-translation(3) + d-rotation(3)
+
+
+def _real_dtype():
+    """numpy dtype of the engine's ``real``: the backward functions write into
+    caller-provided buffers and reject a mismatching float width."""
+    return np.float64 if physics.uses_double_precision() else np.float32
 
 __all__ = [
     "ActorGradients",
@@ -222,42 +230,44 @@ class DifferentiableRollout:
         return pre, post
 
     def _read_step_input_grads(self, grads, step: int) -> None:
+        real = _real_dtype()
         for entry, out in zip(self.entries, grads.values()):
             if entry.has_controller:
-                g = np.zeros(entry.dofs_size)
+                g = np.zeros(entry.dofs_size, dtype=real)
                 diffsim.set_articulated_target_pose_backward(entry.actor, g)
                 out.control_targets[:, step] = g
             if entry.force_dofs:
-                g = np.zeros(len(entry.force_dofs))
+                g = np.zeros(len(entry.force_dofs), dtype=real)
                 diffsim.set_external_forces_on_dofs_backward(
                     entry.actor, np.asarray(entry.force_dofs, dtype=np.int32), g
                 )
                 out.external_forces[:, step] = g
 
     def _read_initial_grads(self, grads) -> None:
+        real = _real_dtype()
         for entry, out in zip(self.entries, grads.values()):
             if entry.soft:
-                gu = np.zeros(entry.dofs_size)
+                gu = np.zeros(entry.dofs_size, dtype=real)
                 diffsim.set_displacements_backward(entry.actor, gu)
-                gv = np.zeros(entry.dofs_size)
+                gv = np.zeros(entry.dofs_size, dtype=real)
                 diffsim.set_node_velocities_local_backward(entry.actor, gv)
-                out.initial_pose = gu
-                out.initial_velocity = gv
+                out.initial_pose = gu.astype(np.float64)
+                out.initial_velocity = gv.astype(np.float64)
             elif entry.articulated:
-                gp = np.zeros(entry.dofs_size)
+                gp = np.zeros(entry.dofs_size, dtype=real)
                 diffsim.set_articulated_pose_from_joints_backward(entry.actor, gp)
-                gv = np.zeros(entry.dofs_size)
+                gv = np.zeros(entry.dofs_size, dtype=real)
                 diffsim.set_articulated_joint_velocities_backward(entry.actor, gv)
-                out.initial_pose = gp
-                out.initial_velocity = gv
+                out.initial_pose = gp.astype(np.float64)
+                out.initial_velocity = gv.astype(np.float64)
             else:
-                gs = np.zeros(RIGID_POSE_SIZE)
+                gs = np.zeros(RIGID_POSE_SIZE, dtype=real)
                 diffsim.set_center_of_mass_transform_backward(entry.actor, gs)
-                gl = np.zeros(3)
-                ga = np.zeros(3)
+                gl = np.zeros(3, dtype=real)
+                ga = np.zeros(3, dtype=real)
                 diffsim.set_velocity_backward(entry.actor, gl, ga)
-                out.initial_pose = gs
-                out.initial_velocity = np.concatenate([gl, ga])
+                out.initial_pose = gs.astype(np.float64)
+                out.initial_velocity = np.concatenate([gl, ga]).astype(np.float64)
 
     # -- driver ------------------------------------------------------------
 
