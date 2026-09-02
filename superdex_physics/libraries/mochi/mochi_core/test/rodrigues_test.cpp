@@ -335,11 +335,20 @@ static bool IsApproximationMoreAccurate(
 template <typename ApproxFunc, typename FullFunc, typename GoldFunc>
 static void
 TestThreshold(ApproxFunc approxFunc, FullFunc fullFunc, GoldFunc goldFunc, real threshold) {
-  // Geometric bisection search for the turning point
-  double maxVal = 1e-3;
-  double minVal = 1e-5;
+  // The series is used below the threshold: up to there it must be at least as accurate as the
+  // closed form (both evaluated in float against the double closed form). The thresholds are kept
+  // small so that the series' truncation error is at double-precision roundoff, well below the
+  // crossover where the closed form takes over in float.
+  for (double val = 1e-5; val <= static_cast<double>(threshold); val *= 2.0) {
+    EXPECT_TRUE(IsApproximationMoreAccurate(val, approxFunc, fullFunc, goldFunc)) << val;
+  }
+  EXPECT_TRUE(IsApproximationMoreAccurate(threshold, approxFunc, fullFunc, goldFunc));
+
+  // Geometric bisection search for the crossover in [threshold, 1]; it must lie above the
+  // threshold (at |r|^2 = 1 the truncated series is worse than the closed form).
+  double maxVal = 1.0;
+  double minVal = static_cast<double>(threshold);
   EXPECT_FALSE(IsApproximationMoreAccurate(maxVal, approxFunc, fullFunc, goldFunc));
-  EXPECT_TRUE(IsApproximationMoreAccurate(minVal, approxFunc, fullFunc, goldFunc));
   double midVal = Sqrt(maxVal * minVal);
   for (int i = 0; i < 10; ++i) {
     if (IsApproximationMoreAccurate(midVal, approxFunc, fullFunc, goldFunc)) {
@@ -351,10 +360,7 @@ TestThreshold(ApproxFunc approxFunc, FullFunc fullFunc, GoldFunc goldFunc, real 
   }
   EXPECT_FALSE(IsApproximationMoreAccurate(maxVal, approxFunc, fullFunc, goldFunc));
   EXPECT_TRUE(IsApproximationMoreAccurate(minVal, approxFunc, fullFunc, goldFunc));
-
-  // Validate that the threshold is within the interval
-  EXPECT_LT(threshold, static_cast<real>(maxVal));
-  EXPECT_GT(threshold, static_cast<real>(minVal));
+  EXPECT_GT(static_cast<real>(minVal), threshold);
 }
 
 TEST(Rodrigues, DRotVectorThresholds) {

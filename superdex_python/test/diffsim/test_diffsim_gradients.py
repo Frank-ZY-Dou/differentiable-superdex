@@ -255,6 +255,85 @@ class DiffsimGradientTest(unittest.TestCase):
                 rel_errors = self._chain_control_gradient_check(scene, chain, cube)
                 self.assertLessEqual(max(rel_errors.values()), 1e-4, rel_errors)
 
+    # -- initial angular velocity of a free rigid body ------------------------
+
+    def test_initial_angular_velocity_gradient_is_exact(self) -> None:
+        """A rigid body's initial angular velocity omega stands for the rotation
+        increment DR = exp(asin(dt |omega|) omega/|omega|) of the previous step
+        (RigidBodyVel::UpdateVSymIfDirty gives an externally set velocity the
+        finite-difference meaning), and set_velocity_backward chains the
+        derived-state adjoint through that map with the left Jacobian of SO(3).
+        Until 2026-09-01 the chain was the first-order dt * lambda and the
+        merit's previous-delta variable was not a rotation, which left the
+        angular components off by O(dt |omega|): 3e-3..7.5e-3 relative at
+        1 rad/s and dt = 0.01, doubling with omega and with dt. Checked with a
+        rotation (quaternion) loss after one step and after four steps, against
+        central finite differences over set_velocity (no controller, so the
+        setter has no side effects); the linear components are included."""
+        for num_steps in (1, 4):
+            with self.subTest(num_steps=num_steps):
+                scene, cube = scenes.rigid_free()
+                self.addCleanup(physics.destroy_scene, scene)
+                configure_for_differentiability(scene)
+                dt = 0.01
+                q_ref = np.array([0.1, 0.2, -0.3, 0.9])
+                q_ref /= np.linalg.norm(q_ref)
+
+                def quat():
+                    return np.asarray(
+                        cube.get_center_of_mass_transform().rotation.tolist(),
+                        dtype=np.float64,
+                    )
+
+                def loss_value():
+                    d = quat() - q_ref
+                    return 0.5 * float(d @ d)
+
+                class RotationLoss:
+                    def value(self):
+                        return loss_value()
+
+                    def accumulate_output_grad(self):
+                        g = np.zeros(7)
+                        g[3:] = quat() - q_ref
+                        diffsim.get_center_of_mass_transform_backward(cube, g)
+
+                state0 = scene.capture_state()
+                result = DifferentiableRollout(scene, dt=dt, num_steps=num_steps).run(
+                    terminal_losses=[RotationLoss()]
+                )
+                adjoint = result.gradients["cube"].initial_velocity
+                lin0 = np.asarray(cube.get_linear_velocity(), dtype=np.float64)
+                ang0 = np.asarray(cube.get_angular_velocity(), dtype=np.float64)
+
+                def rollout_loss(lin, ang):
+                    scene.restore_state(state0, False)
+                    cube.set_velocity(lin, ang)
+                    for _ in range(num_steps):
+                        scene.step(dt)
+                    return loss_value()
+
+                worst = 0.0
+                for dof in range(6):
+                    fds = []
+                    for eps in (1e-6, 1e-7):
+                        vals = []
+                        for sign in (1.0, -1.0):
+                            lin, ang = lin0.copy(), ang0.copy()
+                            if dof < 3:
+                                lin[dof] += sign * eps
+                            else:
+                                ang[dof - 3] += sign * eps
+                            vals.append(rollout_loss(lin, ang))
+                        fds.append((vals[0] - vals[1]) / (2.0 * eps))
+                    scale = max(abs(fds[0]), 1e-12)
+                    self.assertLess(abs(fds[0] - fds[1]) / scale, 1e-5, f"dof {dof}: FD not smooth")
+                    if abs(fds[0]) > 1e-9:  # skip vacuous components
+                        worst = max(worst, abs(adjoint[dof] - fds[0]) / scale)
+                scene.release_state(state0)
+                self.assertGreater(worst, 0.0, "test is vacuous")
+                self.assertLessEqual(worst, 1e-5)
+
     # -- rigid ---------------------------------------------------------------
 
     def test_rigid_free_translation(self) -> None:

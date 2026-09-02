@@ -46,6 +46,9 @@
 #include <mochi_core/utils/mesh_embedding.h>
 #include <mochi_core/utils/nd_array_utils.h>
 #include <mochi_core/utils/rigid_body_utils.h>
+#include <mochi_core/utils/rodrigues_utils.h>
+
+#include <cmath>
 #include <mochi_physics/diffsim/mochi_diffsim.h>
 #include <mochi_physics/mochi_physics_experimental.h>
 
@@ -3102,7 +3105,15 @@ void diffsim::SetVelocityBackward(
   MOCHI_ERROR_RETURN(error);
 
   // SetVelocity sets the rigid body velocity v = (v_com, ω). The velocity determines the
-  // derived step Δx = v · dt. Therefore: dL/dv = dt · dL/dΔx.
+  // derived step of the previous stage: Δx_com = v_com · dt for the translation, and for the
+  // rotation the increment DR = exp(φ) with φ = asin(dt |ω|) ω/|ω| (RigidBodyVel::
+  // UpdateVSymIfDirty: ω is the finite-difference velocity of DR). The derived-state adjoint
+  // λ_δ is the gradient w.r.t. the left Lie increment δ of DR (DR ← exp(δ) DR), so
+  //   dL/dv_com = dt · λ_Δx,
+  //   dL/dω = (dφ/dω)ᵀ · J_l(φ)ᵀ · λ_δ,
+  // with J_l the left Jacobian of SO(3) (exp(φ + dφ) = exp(J_l(φ) dφ) exp(φ), i.e.
+  // DRotIncrementDRotVector) and dφ/dω = (θ/|ω|) (I - u uᵀ) + (dt / cos θ) u uᵀ, u = ω/|ω|,
+  // θ = asin(dt |ω|). For |ω| → 0 both factors tend to the identity and dL/dω → dt · λ_δ.
   auto const dt = static_cast<real>(reg.ctx<CSceneTime const>().DeltaTime());
   auto const& derivedStepGrad = reg.get<CDiffDerivedStepGrad const>(e);
 
@@ -3110,9 +3121,37 @@ void diffsim::SetVelocityBackward(
   for (int i = 0; i < RigidSize::kDTrans; ++i) {
     outGradLinearVel[i] = dt * derivedStepGrad.value[i];
   }
-  // Angular velocity gradient: next RigidSize::kDRot components.
+  // Angular velocity gradient: next RigidSize::kDRot components. The scene holds the restored
+  // initial state, so the current velocity is the one SetVelocity set.
+  Vec4r const omega = reg.get<CRigidVel<TimeStep::Current> const>(e).value.GetOmegaAndVSym().first;
+  real const omegaNorm = Norm<3>(omega);
+  real const sinTheta = dt * omegaNorm;
+  MOCHI_ERROR_IF_NOT(
+      sinTheta < 1_r,
+      error,
+      "The angular velocity is too large for the time step (|omega| * dt must be below 1): the "
+      "rotation increment it stands for is undefined.");
+  MOCHI_ERROR_RETURN(error);
+  Vec4r const lambdaDelta =
+      Load<RigidSize::kDRot, Vec4r>(derivedStepGrad.value.data() + RigidSize::kDTrans); // λ_δ
+  Vec4r gradOmega MOCHI_NO_INIT;
+  real constexpr kOmegaNormThreshold = 100_r * kDefaultNearEqualEpsilon<real>;
+  if (omegaNorm < kOmegaNormThreshold) {
+    gradOmega = dt * lambdaDelta;
+  } else {
+    Vec4r const u = omega / omegaNorm;
+    real const theta = std::asin(sinTheta);
+    real const cosTheta = std::sqrt(1_r - sinTheta * sinTheta);
+    Vec4r const phi = theta * u;
+    // J_l(φ)ᵀ λ_δ
+    VMatrix3x3r const jacLeft = DRotIncrementDRotVector(phi);
+    Vec4r const jacT = DotVecMat3x3(lambdaDelta, jacLeft);
+    // (dφ/dω)ᵀ · (J_l(φ)ᵀ λ_δ), with dφ/dω symmetric
+    real const uDotJacT = Dot<3>(u, jacT);
+    gradOmega = (theta / omegaNorm) * (jacT - uDotJacT * u) + (dt / cosTheta) * uDotJacT * u;
+  }
   for (int i = 0; i < RigidSize::kDRot; ++i) {
-    outGradAngularVel[i] = dt * derivedStepGrad.value[RigidSize::kDTrans + i];
+    outGradAngularVel[i] = Get(gradOmega, i);
   }
 }
 

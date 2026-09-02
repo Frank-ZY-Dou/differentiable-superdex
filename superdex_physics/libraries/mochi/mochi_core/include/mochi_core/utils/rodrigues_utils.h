@@ -79,21 +79,35 @@ template <typename T>
   return Dot3x3(Invert3x3(R - VEye<3, T>() + outer), skew + outer);
 }
 
-// Approximate methods for small r, using R(r) approx eye + sk(r) + 0.5 sk2(r).
-// dtheta/dr approx eye + 0.5 sk(r)
+// Series methods for small r (the closed forms above divide by quantities that vanish with r).
+// With t = |r|^2, the left Jacobian of SO(3) and its inverse are
+//   dtheta/dr = eye + a sk(r) + b sk2(r),  a = (1 - cos|r|) / |r|^2 = 1/2 - t/24 + t^2/720 - ...
+//                                          b = (|r| - sin|r|) / |r|^3 = 1/6 - t/120 + t^2/5040 - ...
+//   dr/dtheta = eye - 1/2 sk(r) + c sk2(r), c = 1/12 + t/720 + t^2/30240 + ...
+// Truncated after t^2, the series are accurate to about t^3 / 1e5 (1e-15 at the switching
+// thresholds below), i.e. to double-precision roundoff; the former first-order forms
+// (eye +- 0.5 sk(r)) had an O(t) error of up to 5e-5 there, which was visible in double-precision
+// gradient checks (diffsim::SetVelocityBackward).
 template <typename T>
 [[nodiscard]] MOCHI_FORCE_INLINE NdArray<Simd<T, 4>, 3> DThetaDSmallR(Simd<T, 4> r) {
-  return VEye<3, T>() + T(0.5) * Skew3(r);
+  T const t = NormSqr<3>(r);
+  T const a = T(0.5) - t * (T(1) / T(24)) + t * t * (T(1) / T(720));
+  T const b = T(1) / T(6) - t * (T(1) / T(120)) + t * t * (T(1) / T(5040));
+  NdArray<Simd<T, 4>, 3> const skew = Skew3(r);
+  return VEye<3, T>() + a * skew + b * Dot3x3(skew, skew);
 }
-// dr/dtheta approx inv(eye + 0.5 sk(r)) approx eye - 0.5 sk(r)
 template <typename T>
 [[nodiscard]] MOCHI_FORCE_INLINE NdArray<Simd<T, 4>, 3> DSmallRDTheta(Simd<T, 4> r) {
-  return VEye<3, T>() - T(0.5) * Skew3(r);
+  T const t = NormSqr<3>(r);
+  T const c = T(1) / T(12) + t * (T(1) / T(720)) + t * t * (T(1) / T(30240));
+  NdArray<Simd<T, 4>, 3> const skew = Skew3(r);
+  return VEye<3, T>() - T(0.5) * skew + c * Dot3x3(skew, skew);
 }
 
-// Default thresholds for choosing the full methods or the approximate methods, based on their
-// accuracy with single precision. The thresholds are validated in the test
-// Rodrigues.DRotVectorThresholds.
+// Default thresholds (on |r|^2) for choosing the closed forms or the series. The series' truncation
+// error at the thresholds is at double-precision roundoff, and in single precision the series is at
+// least as accurate as the closed forms up to there (validated in Rodrigues.DRotVectorThresholds;
+// the float crossover where the closed forms take over lies far above, around |r|^2 = 0.2).
 template <typename T>
 static constexpr T kThresholdDRotIncrementDRotVector = T(0.0003227);
 template <typename T>

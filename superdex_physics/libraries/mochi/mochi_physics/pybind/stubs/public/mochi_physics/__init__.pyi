@@ -9286,6 +9286,14 @@ class Actor:
             For standalone soft actors, the angular velocity must be zero.
 
         Note:
+            For rigid actors the angular velocity has the finite-difference meaning
+            the integrator uses on every step: the body is taken to have rotated over
+            the previous step of size dt by the increment DR whose finite-difference
+            velocity is ``angular_vel`` (DR = exp(asin(dt * |omega|) * omega / |omega|)),
+            so ``|angular_vel| * dt`` must stay below 1. The first step after this call
+            then has the same structure as every subsequent step.
+
+        Note:
             Resets multi-step time integrators, e.g. BDF2 falls back to backward Euler
             in the first time step after this method is called.
         """

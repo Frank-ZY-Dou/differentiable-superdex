@@ -231,35 +231,51 @@ TEST(RigidBodyUtils, EvalTimeSteppedRotation) {
   VMatrix3x3r R = Rodrigues(Vec4r{0.8_r, -1.2_r, 0.5_r});
   RigidBodyVel vel;
 
-  auto test = [&](real dt,
-                  std::function<VMatrix3x3r(VMatrix3x3r const&, RigidBodyVel const&, real)> func) {
-    // Evaluate the time-stepped rotation
-    VMatrix3x3r Rnew = func(R, vel, dt);
-
-    // Check the determinant
+  // The accurate function integrates omega in the Lie algebra: a rotation.
+  auto testAccurate = [&](real dt) {
+    VMatrix3x3r Rnew = EvalTimeSteppedRotationAccurate(R, vel, dt);
     real det = Determinant3x3(AsMatrixView(Rnew));
     EXPECT_TRUE(NearEqual(det, 1_r, 1e-3_r));
+  };
+
+  // The engine's function returns the linear extrapolation 2 R - Rold = (2 eye - DR^T) R, where
+  // DR is the rotation increment whose finite-difference velocity is omega (the same meaning
+  // SetFromFiniteDifferencePose gives omega and vsym). Check that Rold = 2 R - Rnew is a rotation
+  // and that finite-differencing (Rold, R) reproduces omega and vsym exactly.
+  auto testExtrapolation = [&](real dt) {
+    VMatrix3x3r Rnew = EvalTimeSteppedRotation(R, vel, dt);
+    VMatrix3x3r Rold = 2_r * R - Rnew;
+    real det = Determinant3x3(AsMatrixView(Rold));
+    EXPECT_TRUE(NearEqual(det, 1_r, 1e-5_r));
+    EXPECT_TRUE(NearEqual(
+        ToNdArray3x3(Dot3x3(Rold, Transpose3x3(Rold))), ToNdArray3x3(VEye<3>()), 1e-5_r));
+
+    RigidBodyVel velTest;
+    velTest.SetFromFiniteDifferencePose(
+        TransformRT{QuaternionFromMatrix(Rold)}, TransformRT{QuaternionFromMatrix(R)}, dt);
+    EXPECT_TRUE(NearEqual(
+        ToReal3(vel.GetOmegaAndVSym().first), ToReal3(velTest.GetOmegaAndVSym().first), 1e-5_r));
+    EXPECT_TRUE(NearEqual(
+        ToNdArray3x3(SimdSymToFull(vel.GetOmegaAndVSym().second)),
+        ToNdArray3x3(SimdSymToFull(velTest.GetOmegaAndVSym().second)),
+        1e-5_r));
   };
 
   real dt = 1e-3_r;
   vel.SetOmega({1.1_r, -0.7_r, 0.8_r});
   vel.UpdateVSymIfDirty(dt);
 
-  // Small time-step approximate function
-  test(dt, EvalTimeSteppedRotation);
-
-  // Small time-step accurate function
-  test(dt, EvalTimeSteppedRotationAccurate);
+  // Small time-step
+  testExtrapolation(dt);
+  testAccurate(dt);
 
   dt = 3e-1_r;
   vel.SetOmega({1.1_r, -0.7_r, 0.8_r});
   vel.UpdateVSymIfDirty(dt);
 
-  // Large time-step approximate function
-  test(dt, EvalTimeSteppedRotation);
-
-  // Large time-step accurate function
-  test(dt, EvalTimeSteppedRotationAccurate);
+  // Large time-step
+  testExtrapolation(dt);
+  testAccurate(dt);
 }
 
 TEST(RigidBodyUtils, EvalFiniteDifferenceRotationVelocity) {
@@ -272,12 +288,21 @@ TEST(RigidBodyUtils, EvalFiniteDifferenceRotationVelocity) {
       [&](std::function<VMatrix3x3r(VMatrix3x3r const&, RigidBodyVel const&, real)> evalRotation,
           std::function<void(Quaternion const&, Quaternion const&, real, RigidBodyVel&)>
               evalVelocity,
+          bool extrapolation,
           real dt,
           real tol) {
         // Perform round-trip conversion, first time-step rotation, then finite-difference velocity.
+        // The engine's function returns the extrapolation 2 R - Rold, so the pair to
+        // finite-difference is (Rold, R); the accurate function returns the rotation Rnew, so the
+        // pair is (R, Rnew). Both must reproduce omega.
         auto Rnew = evalRotation(R, vel, dt);
         RigidBodyVel velTest;
-        evalVelocity(QuaternionFromMatrix(R), QuaternionFromMatrix(Rnew), dt, velTest);
+        if (extrapolation) {
+          VMatrix3x3r Rold = 2_r * R - Rnew;
+          evalVelocity(QuaternionFromMatrix(Rold), QuaternionFromMatrix(R), dt, velTest);
+        } else {
+          evalVelocity(QuaternionFromMatrix(R), QuaternionFromMatrix(Rnew), dt, velTest);
+        }
 
         // Validate
         EXPECT_TRUE(NearEqual(
@@ -301,20 +326,30 @@ TEST(RigidBodyUtils, EvalFiniteDifferenceRotationVelocity) {
   vel.UpdateVSymIfDirty(dt);
 
   // Small time-step approximate functions
-  test(EvalTimeSteppedRotation, EvalFiniteDifferenceRotationVelocity, dt, 3e-2_r);
+  test(EvalTimeSteppedRotation, EvalFiniteDifferenceRotationVelocity, true, dt, 3e-2_r);
 
   // Small time-step accurate functions
-  test(EvalTimeSteppedRotationAccurate, EvalFiniteDifferenceRotationVelocityAccurate, dt, 1e-5_r);
+  test(
+      EvalTimeSteppedRotationAccurate,
+      EvalFiniteDifferenceRotationVelocityAccurate,
+      false,
+      dt,
+      1e-5_r);
 
   dt = 3e-1_r;
   vel.SetOmega({1.1_r, -0.7_r, 0.8_r});
   vel.UpdateVSymIfDirty(dt);
 
   // Large time-step approximate functions. The test fails.
-  test(EvalTimeSteppedRotation, EvalFiniteDifferenceRotationVelocity, dt, 3e-2_r);
+  test(EvalTimeSteppedRotation, EvalFiniteDifferenceRotationVelocity, true, dt, 3e-2_r);
 
   // Large time-step accurate functions
-  test(EvalTimeSteppedRotationAccurate, EvalFiniteDifferenceRotationVelocityAccurate, dt, 1e-5_r);
+  test(
+      EvalTimeSteppedRotationAccurate,
+      EvalFiniteDifferenceRotationVelocityAccurate,
+      false,
+      dt,
+      1e-5_r);
 }
 
 TEST(RigidBodyUtils, RotateInertia) {

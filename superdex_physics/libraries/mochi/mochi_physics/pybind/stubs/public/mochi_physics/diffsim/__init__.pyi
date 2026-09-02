@@ -815,10 +815,15 @@ def set_velocity_backward(
     """Backward pass for :meth:`~superdex.physics.Actor.set_velocity`.
 
     :meth:`~superdex.physics.Actor.set_velocity` sets the rigid-body velocity v =
-    (v_com, omega). The velocity determines the derived step dx = v * dt. Therefore:
-    dL/dv = dt * dL/d(dx), where dL/d(dx) is the derived-state adjoint. Only
-    standalone rigid actors are supported (not articulated links, not soft actors).
-    Must be called after :func:`~superdex.physics.diffsim.back_propagate`.
+    (v_com, omega). The velocity determines the derived step of the previous
+    stage: dx_com = v_com * dt for the translation, so dL/dv_com = dt * dL/d(dx),
+    and for the rotation the increment DR = exp(phi) with
+    phi = asin(dt * |omega|) * omega / |omega| (omega is the finite-difference
+    velocity of DR), so dL/domega = (dphi/domega)^T J_l(phi)^T dL/d(delta) with
+    J_l the left Jacobian of SO(3) and dL/d(delta) the derived-state adjoint
+    (gradient w.r.t. the left Lie increment of DR). Only standalone rigid actors
+    are supported (not articulated links, not soft actors). Must be called after
+    :func:`~superdex.physics.diffsim.back_propagate`.
 
     Args:
         actor (Actor): The rigid actor.

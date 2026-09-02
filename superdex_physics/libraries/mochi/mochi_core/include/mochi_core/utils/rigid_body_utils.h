@@ -214,8 +214,14 @@ class RigidBodyInertia {
 // internally updates both omega and vsym.
 //
 // If omega is set externally, then vsym must be updated by calling the function
-// UpdateVSymIfDirty() as soon as the time-step size is known. This ensures that omega and vsym
-// together exactly reproduce a rotation when calling EvalTimeSteppedRotation().
+// UpdateVSymIfDirty() as soon as the time-step size is known. It gives omega and vsym the same
+// meaning they have after SetFromFiniteDifferencePose(): the body is taken to have rotated over the
+// last step by the increment DR whose finite-difference velocity is omega, i.e.
+// (skew(omega) + sym(vsym)) = (eye - DR^T) / h, so that EvalTimeSteppedRotation() returns
+// (2 eye - DR^T) R = 2 R - Rold, the same linear extrapolation used on every subsequent step. This
+// keeps the time integrator uniform across steps and makes the previous-delta variable of the
+// rigid-body merit (DR^T) an exact rotation, which the adjoint's initial-velocity gradient relies
+// on (see diffsim::SetVelocityBackward).
 class RigidBodyVel {
  public:
   static constexpr int kRawSize = 4 /* _vcom */ + 4 /* _omega */ + 8 /* _vsym */;
@@ -237,35 +243,35 @@ class RigidBodyVel {
     _isVSymDirty = true;
   }
 
-  // Warning: omega and vsym can only reproduce a rotation if |omega| < 1/h. This should be checked
-  // by the caller.
+  // Warning: omega is the finite-difference velocity of a rotation increment only if |omega| < 1/h
+  // (sin(theta) = h |omega|). This should be checked by the caller.
   void UpdateVSymIfDirty(real h) {
     if (!_isVSymDirty) {
       return; // Nothing to do
     }
     _isVSymDirty = false;
 
-    // The symmetric part is set such that EvalTimeSteppedRotation(R, h), with R a rotation matrix,
-    // produces another rotation matrix Q.
-    // QT Q = eye, with Q = R + h * dR/dt and dR/dt = (sk(w) + sym) * R.
-    // Then:
-    // (eye + h sym + h sk(w))T (eye + h sym + h sk(w)) = eye
-    // (eye + h sym - h sk(w)) (eye + h sym + h sk(w)) = eye
-    // (eye + h sym)^2 - (h sk(w))^2 = eye
-    // h^2 sym^2 + 2h sym - h^2 sk^2(w) = 0
-    // h sym^2 + 2 sym - h sk^2(w) = 0
+    // The symmetric part is set such that omega and vsym together describe a rotation increment
+    // DR over the last step of size h, with the same meaning SetFromFiniteDifferencePose() gives
+    // them: sk(w) + sym = (eye - DR^T) / h. Then EvalTimeSteppedRotation(R, h) returns
+    // (2 eye - DR^T) R, the linear extrapolation 2 R - Rold used on every step.
+    // With DR = exp(theta sk(u)), u = w/|w|:
+    // eye - DR^T = sin(theta) sk(u) - (1 - cos(theta)) sk^2(u)
+    // The skew part must equal h sk(w): sin(theta) = h |w|
+    // The symmetric part is h sym = -(1 - cos(theta)) sk^2(u) = (1 - cos(theta)) (eye - u uT)
     // Apply SVD to sk^2(w) = U S UT, and sym = U X UT:
-    // h X^2 + 2 X - h S = 0
-    // The singular values are s1 = 0, and s2 = s3 = - |w|^2
-    // The singular vectors are w/|w| and any two orthonormal vectors
-    // For each entry:
-    // x = (sqrt(h^2 s + 1) - 1) / h
-    // x1 = 0; x2 = x3 = (sqrt(1 - h^2 |w|^2) - 1) / h
+    // The singular vectors are u = w/|w| and any two orthonormal vectors
+    // x1 = 0; x2 = x3 = (1 - cos(theta)) / h = (1 - sqrt(1 - h^2 |w|^2)) / h
+    // (The former definition, x2 = x3 = (sqrt(1 - h^2 |w|^2) - 1) / h, made
+    // EvalTimeSteppedRotation() itself the rotation DR; that gave the first step after an
+    // externally set velocity a different structure from all later steps, and the previous-delta
+    // variable of the rigid-body merit was then not a rotation, so the adjoint's initial
+    // angular-velocity gradient was off by O(h |w|).)
     // WARNING: We clamp the discriminant to zero, but valid omega should be checked by the caller.
     // Omega is valid if |w| < 1/h
     real normSqrOmega = NormSqr<3>(_omega);
     real disc = Max(0_r, 1_r - h * h * normSqrOmega);
-    real x = (Sqrt(disc) - 1_r) / h;
+    real x = (1_r - Sqrt(disc)) / h;
     VMatrix3x3r X = VDiagonalMatrix<3>(Vec4r{0_r, x, x});
     Vec4r u1 =
         NearEqual<3>(_omega, Vec4r{0_r, 0_r, 0_r}) ? Vec4r{1_r, 0_r, 0_r} : Normalize<3>(_omega);
@@ -321,8 +327,9 @@ class RigidBodyVel {
     _isVSymDirty = false;
   }
 
-  // Evaluate rotation matrix by time-stepping the rotation velocity. The result is not really a
-  // rotation if dtStage is the same value used for estimating vsym.
+  // Evaluate rotation matrix by time-stepping the rotation velocity. The result is the linear
+  // extrapolation 2 R - Rold = (2 eye - DR^T) R of the last rotation increment DR, not a rotation
+  // (see the class comment); it is the explicit predictor of the rigid-body merit.
   VMatrix3x3r EvalTimeSteppedRotation(VMatrix3x3r const& R, real dtStage) const {
     MOCHI_ASSERT_VERBOSE(!_isVSymDirty, "vsym needs to be updated");
     // Convert the rotation velocity to rotation-matrix derivative, and then integrate
