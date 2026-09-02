@@ -1096,6 +1096,79 @@ void mochi::solver::AssembleIsland(
   }
 }
 
+// Friction continuation (NonLinearSolverParams::frictionContinuationLevels). A stage solve that ran
+// out of iterations with its residual still above kContinuationMinRelativeResidual of the initial
+// residual is restarted from the stage-start solution with the Coulomb friction falloff velocity
+// scaled by 4, 16, ... until it converges (the plain solve's final iterate is a poor warm start: on
+// the soft-push case a 4x solve from the stage start converged in 23 iterations while from that
+// iterate it needed 64x), then the scale is halved back to 1, each solve warm-started from the
+// previous one, so the last solve is the model as configured. The result is kept only if that last
+// solve improves on the plain solve's residual of the configured model; otherwise the plain solve's
+// iterate and status are restored. Solves that stopped early (tiny step, no improvement) or ran
+// out of iterations at the round-off floor (a tight tolerance: the residual has dropped by more
+// than 1e6) are effectively converged and are not candidates - re-solving them only perturbs the
+// state at round-off level, which the finite-difference checks of the test-suite detect.
+static NewtonSolverStatus<real> FrictionContinuationSolve(
+    int levels,
+    int maxIter,
+    NewtonSolver<real>& solver,
+    SnleProblem<real>& problem,
+    ColumnVectorView<real const> initialSolution,
+    NewtonSolverStatus<real> const& failed,
+    int& outNumSolves) {
+  real constexpr kContinuationMinRelativeResidual = 1e-6_r;
+  if (levels <= 0 || failed.numIterDone < maxIter ||
+      !(failed.resNorm > kContinuationMinRelativeResidual * failed.resNorm0)) {
+    return failed;
+  }
+  ColumnVector<real> const plainSolution = problem.GetSolution().Duplicate();
+  real constexpr kEscalation = 4_r;
+  real scale = 1_r;
+  NewtonSolverStatus<real> result = failed;
+  bool converged = false;
+  for (int level = 0; level < levels && !converged; ++level) {
+    scale *= kEscalation;
+    problem.SetSolution(initialSolution);
+    problem.SetFrictionFalloffScale(scale);
+    result = solver.Solve(problem);
+    ++outNumSolves;
+    converged = (result.convergence == ConvergenceStatus::Converged);
+    MOCHI_LOG_VERBOSE(
+        "Friction continuation: falloff scale %g -> %s, |res| %.3e after %d iterations.",
+        (double)scale,
+        converged ? "converged" : "not converged",
+        (double)result.resNorm,
+        result.numIterDone);
+  }
+  if (converged) {
+    // Tighten back to the configured model; an intermediate solve that stops short still leaves
+    // a better warm start than the plain solve's iterate.
+    while (scale > 1_r) {
+      scale = Max(1_r, scale / 2_r);
+      problem.SetFrictionFalloffScale(scale);
+      result = solver.Solve(problem);
+      ++outNumSolves;
+      MOCHI_LOG_VERBOSE(
+          "Friction continuation: falloff scale %g -> %s, |res| %.3e after %d iterations.",
+          (double)scale,
+          (result.convergence == ConvergenceStatus::Converged) ? "converged" : "not converged",
+          (double)result.resNorm,
+          result.numIterDone);
+    }
+  }
+  problem.SetFrictionFalloffScale(1_r);
+  if (!converged || !(result.resNorm < failed.resNorm)) {
+    MOCHI_LOG_VERBOSE(
+        "Friction continuation rejected (plain |res| %.3e, continuation |res| %.3e).",
+        (double)failed.resNorm,
+        (double)result.resNorm);
+    problem.SetSolution(plainSolution);
+    problem.UpdateResidual();
+    return failed;
+  }
+  return result;
+}
+
 bool mochi::solver::StepIslandNewtonAsync(
     entt::registry& reg,
     entt::entity island,
@@ -1148,9 +1221,24 @@ bool mochi::solver::StepIslandNewtonAsync(
 
     // Stage solve: the non-linear problem is solved. Islands have no knowledge on the physical
     // problem being solved here, they only serve as a brigde between solver and actors.
+    // The stage-start solution, the restart point of the friction continuation.
+    ColumnVector<real> const stageStartSolution = problem.GetSolution().Duplicate();
     NewtonSolverStatus<real> result = snleSolver.Solve(problem);
+    int numContinuationSolves = 0;
+    if (result.convergence != ConvergenceStatus::Converged) {
+      result = FrictionContinuationSolve(
+          simParams.nonLinearSolver.frictionContinuationLevels,
+          newtonParams.maxIter,
+          snleSolver,
+          problem,
+          AsConstView(stageStartSolution),
+          result,
+          numContinuationSolves);
+    }
     success &= (result.convergence == ConvergenceStatus::Converged);
-    islandSolverStats.stages.emplace_back(StageSolverStats::FromNewtonSolverStatus(result));
+    auto stageStats = StageSolverStats::FromNewtonSolverStatus(result);
+    stageStats.numContinuationSolves = numContinuationSolves;
+    islandSolverStats.stages.emplace_back(stageStats);
 
     // Distribute solution to actors. NOTE: This call might be redundant in some cases,
     // actors most probably already implement the CSnleProblemPostNewSolutionCallback,

@@ -122,10 +122,20 @@ void SnleProblem<T>::UpdateDResidual(
 }
 
 template <typename T>
+void SnleProblem<T>::SetFrictionFalloffScale(real scale) {
+  MOCHI_ASSERT(scale > 0_r, "Invalid friction falloff scale.");
+  if (scale != _frictionFalloffScale) {
+    _frictionFalloffScale = scale;
+    InvalidateCachedData();
+  }
+}
+
+template <typename T>
 void SnleProblem<T>::UpdateObjResDRes(AssemblyParams const& params) {
   MOCHI_PROFILE_SCOPE();
   // Params to avoid recomputing terms that are already up-to-date
   auto lazyParams(params);
+  lazyParams.frictionFalloffScale = _frictionFalloffScale;
   lazyParams.assemObj &= _dirtyObj;
   lazyParams.assemRes &= _dirtyRes;
 

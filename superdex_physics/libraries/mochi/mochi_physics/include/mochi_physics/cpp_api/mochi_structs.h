@@ -519,6 +519,10 @@ struct SolverStats {
 
   ConvergenceStatus convergenceStatus = ConvergenceStatus::None;
 
+  // Extra Newton solves spent by the friction continuation
+  // (NonLinearSolverParams::frictionContinuationLevels), summed over islands and stages.
+  int numFrictionContinuationSolves = 0;
+
 #if MOCHI_LANGUAGE_CPP20
   bool operator==(SolverStats const&) const = default;
 #endif

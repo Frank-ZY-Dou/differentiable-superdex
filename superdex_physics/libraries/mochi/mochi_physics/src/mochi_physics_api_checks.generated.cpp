@@ -1050,6 +1050,7 @@ static_assert(std::is_same_v<decltype(&mochi::PerformanceStats::recordingStepDur
 static_assert(std::is_same_v<decltype(&mochi::SolverStats::maxNonLinearIters), int mochi::SolverStats::*>, "\n  ERROR: Field mochi::SolverStats::maxNonLinearIters is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::SolverStats::residualNorm), double mochi::SolverStats::*>, "\n  ERROR: Field mochi::SolverStats::residualNorm is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::SolverStats::maxLineSearchIters), int mochi::SolverStats::*>, "\n  ERROR: Field mochi::SolverStats::maxLineSearchIters is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::SolverStats::numFrictionContinuationSolves), int mochi::SolverStats::*>, "\n  ERROR: Field mochi::SolverStats::numFrictionContinuationSolves is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::SolverStats::convergenceStatus), mochi::ConvergenceStatus mochi::SolverStats::*>, "\n  ERROR: Field mochi::SolverStats::convergenceStatus is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 
 // struct mochi::RecordingParams

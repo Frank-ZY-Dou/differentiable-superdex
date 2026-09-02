@@ -192,6 +192,13 @@ struct ContactParams {
    * @note The velocity threshold used in a collision is the geometric mean of the colliding and
    * collider's thresholds. The exception is if the collider is static, in which case the
    * colliding's threshold is used.
+      *
+   * @note Soft bodies: the regularized stick stiffness per contact sample, 2 mu N / (frictionFalloffVel
+   * dt), must stay below the body's nodal stiffness (about E h for a tet mesh of element size h),
+   * otherwise the per-node equilibrium becomes a switching system and the Newton solve can be
+   * trapped in a limit cycle (a 10 cm neo-Hookean cube, E 5e4, pushed by a robot wrist at the
+   * default 0.01 m/s: residual 5e-3 after 300 iterations; 0.05 m/s on the cube: every step
+   * converges, 2026-09-02). A contact pair combines both owners' values by geometric mean.
    */
   real frictionFalloffVel = 0.01_r;
 

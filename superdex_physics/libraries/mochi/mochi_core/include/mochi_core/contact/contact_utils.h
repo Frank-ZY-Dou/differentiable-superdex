@@ -487,6 +487,9 @@ struct ContactEvalConfig {
 
   // Selects which Coulomb friction smoothing model to use.
   CoulombFrictionModel frictionModel = ExperimentalEvalParams{}.frictionModel;
+
+  // Multiplies ContactParams::frictionFalloffVel (AssemblyParams::frictionFalloffScale).
+  real frictionFalloffScale = 1_r;
 };
 
 /*************************************************************************************************/
@@ -731,7 +734,7 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
     real const coulombCoefficient = params.coulombFrictionCoefficient;
 
     MOCHI_ASSERT_VERBOSE(params.frictionFalloffVel >= 0_r, "Invalid friction falloff velocity.");
-    V const falloffFriction = V{params.frictionFalloffVel * dtFactor};
+    V const falloffFriction = V{params.frictionFalloffVel * config.frictionFalloffScale * dtFactor};
 
     // Compute friction smoothing function.
     // Note: falloffFriction serves as the transition width `t` for IPC (compact support) and as the

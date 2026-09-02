@@ -29,6 +29,11 @@ struct AssemblyParams {
   SaturationHessianParams fittedSaturationHessian =
       ExperimentalEvalParams{}.fittedSaturationHessian;
   GradTarget gradTarget = GradTarget::Current;
+  // Multiplies ContactParams::frictionFalloffVel in the Coulomb friction law (1 = the model as
+  // configured). The island solve's friction continuation raises it temporarily when a Newton
+  // solve fails: the friction transition widens, the solve converges, and the scale is tightened
+  // back to 1 with warm starts (NonLinearSolverParams::frictionContinuationLevels).
+  real frictionFalloffScale = 1_r;
 };
 
 } // namespace mochi

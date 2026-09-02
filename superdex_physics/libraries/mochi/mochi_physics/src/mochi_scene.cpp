@@ -298,6 +298,7 @@ static void ComputeAggregateSolverSceneStats(
   outStats.residualNorm = 0.0;
   outStats.maxNonLinearIters = 0;
   outStats.maxLineSearchIters = 0;
+  outStats.numFrictionContinuationSolves = 0;
   outDebugStats.maxResidualNormRelativeError = 0_r;
   reg.view<CIslandSolverStats const>().each(
       [numStages, &outStats, &outDebugStats](auto const& islandSolverStats) {
@@ -308,6 +309,7 @@ static void ComputeAggregateSolverSceneStats(
           outStats.residualNorm += Sqr((double)stage.resNorm);
           outStats.maxNonLinearIters = Max(outStats.maxNonLinearIters, stage.numIterDone);
           outStats.maxLineSearchIters = Max(outStats.maxLineSearchIters, stage.numLSIterDone);
+          outStats.numFrictionContinuationSolves += stage.numContinuationSolves;
           outDebugStats.maxResidualNormRelativeError =
               Max(outDebugStats.maxResidualNormRelativeError, stage.resNormError);
         }
@@ -678,6 +680,7 @@ void SceneImpl::Step(double timeStepSec) {
     _lastSolverStats.residualNorm = 0.0;
     _lastSolverStats.maxLineSearchIters = 0;
     _lastSolverStats.convergenceStatus = ConvergenceStatus::None;
+    _lastSolverStats.numFrictionContinuationSolves = 0;
     _lastDebugStats.maxResidualNormRelativeError = 0.0;
   }
 
@@ -1139,6 +1142,13 @@ void SceneImpl::ApplyImprovedConvergenceSettings(bool logWarnings) {
   // residual non-conservative, which breaks the adjoint (see SceneImpl::SetSolverParams).
   // Do not log a warning; true is the default value (documented override).
   solverParams.experimentalEval.fadeFriction = false;
+
+  // Set SolverParams.nonLinearSolver.frictionContinuationLevels = 3: differentiable scenes solve
+  // every step to a tight tolerance, and a soft body in frictional contact can trap the Newton
+  // solve in a limit cycle (see FrictionContinuationSolve in mochi_solve.cpp). Off by default
+  // for ordinary scenes, which commonly accept a fixed small number of Newton iterations per step.
+  // Do not log a warning; 0 is the default value (documented override).
+  solverParams.nonLinearSolver.frictionContinuationLevels = 3;
 
   // Set SolverParams.nonlinearSolver.lineSearchType = LineSearchType::Armijo.
   // Do not log warning; this is a non-default value.

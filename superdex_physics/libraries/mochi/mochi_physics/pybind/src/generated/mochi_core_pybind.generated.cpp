@@ -1294,7 +1294,7 @@ void mochi::DefineMochiCore_MochiCore([[maybe_unused]] py::module_& m, [[maybe_u
   ;
 
   registry.GetClass<mochi::NonLinearSolverParams>()
-    .def(py::init([](py::object solver_type, py::object d_residual_assembly_period, py::object max_iter, py::object max_elapsed_time_seconds, py::object convergence_mode, py::object abs_tol, py::object rel_tol, py::object rel_step_tol, py::object stop_if_no_improvement, py::object psd_proj_mode, py::object gradient_descent_fallback, py::object explosion_control, py::object abs_div_tol, py::object rel_div_tol, py::object line_search_max_iter, py::object line_search_alpha, py::object line_search_wolfe1, py::object line_search_wolfe2, py::object line_search_max_rel_increase, py::object line_search_type, py::object linear_tolerance_strategy, py::object verbosity) {
+    .def(py::init([](py::object solver_type, py::object d_residual_assembly_period, py::object max_iter, py::object max_elapsed_time_seconds, py::object convergence_mode, py::object abs_tol, py::object rel_tol, py::object rel_step_tol, py::object stop_if_no_improvement, py::object friction_continuation_levels, py::object psd_proj_mode, py::object gradient_descent_fallback, py::object explosion_control, py::object abs_div_tol, py::object rel_div_tol, py::object line_search_max_iter, py::object line_search_alpha, py::object line_search_wolfe1, py::object line_search_wolfe2, py::object line_search_max_rel_increase, py::object line_search_type, py::object linear_tolerance_strategy, py::object verbosity) {
       mochi::NonLinearSolverParams result;
       result.solverType = py::cast<mochi::NonLinearSolverType>(solver_type);
       result.dResidualAssemblyPeriod = py::cast<int>(d_residual_assembly_period);
@@ -1305,6 +1305,7 @@ void mochi::DefineMochiCore_MochiCore([[maybe_unused]] py::module_& m, [[maybe_u
       result.relTol = py::cast<mochi::real>(rel_tol);
       result.relStepTol = py::cast<mochi::real>(rel_step_tol);
       result.stopIfNoImprovement = py::cast<bool>(stop_if_no_improvement);
+      result.frictionContinuationLevels = py::cast<int>(friction_continuation_levels);
       result.psdProjMode = py::cast<mochi::PsdProjectionMode>(psd_proj_mode);
       result.gradientDescentFallback = py::cast<bool>(gradient_descent_fallback);
       result.explosionControl = py::cast<bool>(explosion_control);
@@ -1330,6 +1331,7 @@ void mochi::DefineMochiCore_MochiCore([[maybe_unused]] py::module_& m, [[maybe_u
       , py::arg("rel_tol") = mochi::NonLinearSolverParams{}.relTol
       , py::arg("rel_step_tol") = mochi::NonLinearSolverParams{}.relStepTol
       , py::arg("stop_if_no_improvement") = mochi::NonLinearSolverParams{}.stopIfNoImprovement
+      , py::arg("friction_continuation_levels") = mochi::NonLinearSolverParams{}.frictionContinuationLevels
       , py::arg("psd_proj_mode") = mochi::NonLinearSolverParams{}.psdProjMode
       , py::arg("gradient_descent_fallback") = mochi::NonLinearSolverParams{}.gradientDescentFallback
       , py::arg("explosion_control") = mochi::NonLinearSolverParams{}.explosionControl
@@ -1356,6 +1358,7 @@ void mochi::DefineMochiCore_MochiCore([[maybe_unused]] py::module_& m, [[maybe_u
     .def_readwrite("rel_tol", &mochi::NonLinearSolverParams::relTol, "Relative residual norm tolerance for convergence, relative to the initial\nresidual.")
     .def_readwrite("rel_step_tol", &mochi::NonLinearSolverParams::relStepTol, "Relative tolerance on the L2 norm of the raw linear-solve increment before line\nsearch scaling.\n\nNote:\n    The solve terminates with :class:`STOPPED\n    <superdex.physics.ConvergenceStatus>` status if ``|dx|/|x|`` is below this\n    threshold (i.e., the step norm is below this fraction of the current\n    solution norm).\n\nNote:\n    0 disables this criterion.\n\nNote:\n    Default is :const:`~superdex.physics.DEFAULT_REL_STEP_TOL`.")
     .def_readwrite("stop_if_no_improvement", &mochi::NonLinearSolverParams::stopIfNoImprovement, "Stop the solve if the line search figure of merit does not improve from the\nprevious iteration.")
+    .def_readwrite("friction_continuation_levels", &mochi::NonLinearSolverParams::frictionContinuationLevels, "Friction continuation of the island solve (0 = off, the default;\n:func:`~superdex.physics.diffsim.make_scene_differentiable` sets 3). When a Newton solve runs out\nof iterations with its residual still above 1e-6 of the initial residual, the solve is restarted\nfrom the stage-start solution with the Coulomb friction falloff velocity\n(:attr:`~superdex.physics.ContactParams.friction_falloff_vel`) scaled by 4, 16, ... (up to this\nmany levels) until it converges, then the scale is halved back to 1 with warm starts, so the last\nsolve is the model as configured; its result is kept only if it improves on the plain solve's\nresidual. The extra solves are reported in\n:attr:`~superdex.physics.SolverStats.num_friction_continuation_solves`.")
     .def_readwrite("psd_proj_mode", &mochi::NonLinearSolverParams::psdProjMode, "Positive Semi-Definite (PSD) projection mode for the dresidual matrix.")
     .def_readwrite("gradient_descent_fallback", &mochi::NonLinearSolverParams::gradientDescentFallback, "Fall back to gradient descent direction if the solver search direction fails.")
     .def_readwrite("explosion_control", &mochi::NonLinearSolverParams::explosionControl, "Enable heuristic explosion prevention.")

@@ -372,7 +372,8 @@ void deformable::ComputeAsyncContactResponse(
         .fadeFriction = experimentalEval.fadeFriction,
         .implicitNormalForceForDissipation = experimentalEval.implicitNormalForceForDissipation,
         .useFittedHessian = params.fittedSaturationHessian.contactFriction,
-        .frictionModel = experimentalEval.frictionModel};
+        .frictionModel = experimentalEval.frictionModel,
+        .frictionFalloffScale = params.frictionFalloffScale};
 
     ComputeAsyncContactResponseImpl(
         reg,

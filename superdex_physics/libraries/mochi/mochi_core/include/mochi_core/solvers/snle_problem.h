@@ -145,6 +145,14 @@ class SnleProblem {
   // Set all dirty flags so that previously cached data will not be used.
   void InvalidateCachedData();
 
+  // Scale applied as AssemblyParams::frictionFalloffScale to every assembly of this problem (the
+  // island solve's friction continuation). Setting a different value invalidates the cached
+  // assembly.
+  void SetFrictionFalloffScale(real scale);
+  real GetFrictionFalloffScale() const {
+    return _frictionFalloffScale;
+  }
+
   // Modify the assembly function.
   void SetAssemblyFunction(
       std::function<void(SnleProblem<T>& problem, AssemblyParams const& params)> assemble);
@@ -198,6 +206,7 @@ class SnleProblem {
                               // and/or per-actor dresidual assembly
   bool _dirtyObj = true; // True if solution changed since last objective assembly
   bool _dirtyRes = true; // True if solution changed since last residual assembly
+  real _frictionFalloffScale = 1_r; // See SetFrictionFalloffScale
   // NOTE: No dirty flag for per-actor dresidual assembly (at least for now). It's currently
   // unnecessary (dresidual assembly in never performed twice) and error-prone given the dresidual
   // can be computed with different configuration settings, e.g. PSD projection.

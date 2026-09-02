@@ -1148,12 +1148,13 @@ void mochi::DefineMochiPhysics_MochiPhysicsStructs([[maybe_unused]] py::module_&
   ;
 
   registry.GetClass<mochi::SolverStats>()
-    .def(py::init([](py::object max_non_linear_iters, py::object residual_norm, py::object max_line_search_iters, py::object convergence_status) {
+    .def(py::init([](py::object max_non_linear_iters, py::object residual_norm, py::object max_line_search_iters, py::object convergence_status, py::object num_friction_continuation_solves) {
       mochi::SolverStats result;
       result.maxNonLinearIters = py::cast<int>(max_non_linear_iters);
       result.residualNorm = py::cast<double>(residual_norm);
       result.maxLineSearchIters = py::cast<int>(max_line_search_iters);
       result.convergenceStatus = py::cast<mochi::ConvergenceStatus>(convergence_status);
+      result.numFrictionContinuationSolves = py::cast<int>(num_friction_continuation_solves);
       return result;
     })
       , py::kw_only()
@@ -1161,6 +1162,7 @@ void mochi::DefineMochiPhysics_MochiPhysicsStructs([[maybe_unused]] py::module_&
       , py::arg("residual_norm") = mochi::SolverStats{}.residualNorm
       , py::arg("max_line_search_iters") = mochi::SolverStats{}.maxLineSearchIters
       , py::arg("convergence_status") = mochi::SolverStats{}.convergenceStatus
+      , py::arg("num_friction_continuation_solves") = mochi::SolverStats{}.numFrictionContinuationSolves
     )
     .def(py::init<>())
     .def(py::self == py::self)
@@ -1171,6 +1173,7 @@ void mochi::DefineMochiPhysics_MochiPhysicsStructs([[maybe_unused]] py::module_&
     .def_readwrite("residual_norm", &mochi::SolverStats::residualNorm, "Aggregate residual norm across all islands and integration stages in the last\ncall to :meth:`~superdex.physics.Scene.step`. Computed as the root mean square\nacross integration stages of the L2 norm of per-island residual norms.")
     .def_readwrite("max_line_search_iters", &mochi::SolverStats::maxLineSearchIters, "Maximum number of line-search iterations per Newton solve across all islands and\nintegration stages in the last call to :meth:`~superdex.physics.Scene.step`.")
     .def_readwrite("convergence_status", &mochi::SolverStats::convergenceStatus, "Aggregate convergence status of the scene in the last call to\n:meth:`~superdex.physics.Scene.step`.\n\nReturns the worst convergence status across all dynamic actors: :class:`DIVERGED\n<superdex.physics.ConvergenceStatus>` if any actor diverged, :class:`STOPPED\n<superdex.physics.ConvergenceStatus>` if any actor's solver was stopped,\n:class:`CONVERGED <superdex.physics.ConvergenceStatus>` if all dynamic actors\nconverged, :class:`NONE <superdex.physics.ConvergenceStatus>` if no dynamic\nactors exist, :meth:`~superdex.physics.Scene.step` has not been called yet or\nthe last call to :meth:`~superdex.physics.Scene.step` was with zero time step.\n\nSee Also:\n    :class:`~superdex.physics.ConvergenceStatus`,\n    :meth:`~superdex.physics.Actor.get_convergence_status`")
+    .def_readwrite("num_friction_continuation_solves", &mochi::SolverStats::numFrictionContinuationSolves, "Extra Newton solves spent by the friction continuation\n(:attr:`~superdex.physics.NonLinearSolverParams.friction_continuation_levels`) in the last\ncall to :meth:`~superdex.physics.Scene.step`, summed over islands and integration stages.")
   ;
 
   registry.GetClass<mochi::RecordingParams>()

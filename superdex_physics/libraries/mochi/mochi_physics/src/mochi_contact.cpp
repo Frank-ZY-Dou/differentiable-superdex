@@ -3228,7 +3228,8 @@ static void AssembleAllSyncContactPairs(
     ColumnVectorView<real> outRes,
     AnyMatrixView<real> outDRes,
     bool psdDRes,
-    bool useFittedHessian) {
+    bool useFittedHessian,
+    real frictionFalloffScale) {
   MOCHI_PROFILE_SCOPE();
   bool const assemObj = (outObj != nullptr);
   bool const assemRes = !outRes.empty();
@@ -3435,7 +3436,8 @@ static void AssembleAllSyncContactPairs(
         .fadeFriction = configScene.fadeFriction,
         .implicitNormalForceForDissipation = configScene.implicitNormalForceForDissipation,
         .useFittedHessian = useFittedHessian,
-        .frictionModel = configScene.frictionModel};
+        .frictionModel = configScene.frictionModel,
+        .frictionFalloffScale = frictionFalloffScale};
 
     // Loop over all pairs.
     for (auto& pairWork : taskWork[iTask].pairWork) {
@@ -3637,7 +3639,8 @@ void mochi::AssembleIslandSyncContact(
       params.assemRes ? AsView(outContactResidual) : ColumnVectorView<real>{},
       params.assemDRes ? AsView(outContactDResidual) : AnyMatrixView<real>{},
       params.psdDRes,
-      params.fittedSaturationHessian.contactFriction);
+      params.fittedSaturationHessian.contactFriction,
+      params.frictionFalloffScale);
 }
 
 void mochi::AssembleAsyncSkinnedContact(
@@ -3723,7 +3726,8 @@ void mochi::AssembleAsyncSkinnedContact(
       .implicitNormalForceForDissipation =
           simParams->experimentalEval.implicitNormalForceForDissipation,
       .useFittedHessian = params.fittedSaturationHessian.contactFriction,
-      .frictionModel = simParams->experimentalEval.frictionModel};
+      .frictionModel = simParams->experimentalEval.frictionModel,
+      .frictionFalloffScale = params.frictionFalloffScale};
 
   // Traverse colliding entities and assemble to outContactSnle
   for (auto& coll : activeCollisions) {

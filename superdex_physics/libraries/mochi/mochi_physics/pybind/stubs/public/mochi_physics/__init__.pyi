@@ -3399,6 +3399,15 @@ class ContactParams:
         The velocity threshold used in a collision is the geometric mean of the
         colliding and collider's thresholds. The exception is if the collider is
         static, in which case the colliding's threshold is used.
+
+    Note:
+        Soft bodies: the regularized stick stiffness per contact sample, ``2 mu N /
+        (friction_falloff_vel dt)``, must stay below the body's nodal stiffness (about
+        ``E h`` for a tet mesh of element size ``h``), otherwise the Newton solve can be
+        trapped in a limit cycle (a 10 cm neo-Hookean cube, E 5e4, pushed by a robot wrist
+        at the default 0.01 m/s: residual 5e-3 after 300 iterations; 0.05 m/s on the cube:
+        every step converges, 2026-09-02). A pair combines both owners' values by
+        geometric mean.
     """
     normal_viscous_damping_coefficient: float
     """Normal viscous damping coefficient [s/m].
@@ -3872,6 +3881,17 @@ class NonLinearSolverParams:
     """Stop the solve if the line search figure of merit does not improve from the
     previous iteration.
     """
+    friction_continuation_levels: int
+    """Friction continuation of the island solve (0 = off, the default;
+    :func:`~superdex.physics.diffsim.make_scene_differentiable` sets 3). When a Newton solve
+    runs out of iterations with its residual still above 1e-6 of the initial residual, the
+    solve is restarted from the stage-start solution with the Coulomb friction falloff
+    velocity (:attr:`~superdex.physics.ContactParams.friction_falloff_vel`) scaled by 4, 16,
+    ... (up to this many levels) until it converges, then the scale is halved back to 1 with
+    warm starts, so the last solve is the model as configured; its result is kept only if it
+    improves on the plain solve's residual. The extra solves are reported in
+    :attr:`~superdex.physics.SolverStats.num_friction_continuation_solves`.
+    """
     psd_proj_mode: PsdProjectionMode
     """Positive Semi-Definite (PSD) projection mode for the dresidual matrix."""
     gradient_descent_fallback: bool
@@ -3961,6 +3981,7 @@ class NonLinearSolverParams:
         rel_tol: float = ...,
         rel_step_tol: float = ...,
         stop_if_no_improvement: bool = ...,
+        friction_continuation_levels: int = ...,
         psd_proj_mode: PsdProjectionMode | int = ...,
         gradient_descent_fallback: bool = ...,
         explosion_control: bool = ...,
@@ -7358,6 +7379,11 @@ class SolverStats:
     """Maximum number of line-search iterations per Newton solve across all islands and
     integration stages in the last call to :meth:`~superdex.physics.Scene.step`.
     """
+    num_friction_continuation_solves: int
+    """Extra Newton solves spent by the friction continuation
+    (:attr:`~superdex.physics.NonLinearSolverParams.friction_continuation_levels`) in the last
+    call to :meth:`~superdex.physics.Scene.step`, summed over islands and integration stages.
+    """
     convergence_status: ConvergenceStatus
     """Aggregate convergence status of the scene in the last call to
     :meth:`~superdex.physics.Scene.step`.
@@ -7383,6 +7409,7 @@ class SolverStats:
         residual_norm: float = ...,
         max_line_search_iters: int = ...,
         convergence_status: ConvergenceStatus | int = ...,
+        num_friction_continuation_solves: int = ...,
     ) -> None: ...
     def __eq__(self, other: object) -> bool: ...
     def __ne__(self, other: object) -> bool: ...

@@ -378,6 +378,20 @@ struct NonLinearSolverParams {
    * iteration. */
   bool stopIfNoImprovement = false;
 
+  /** @brief Friction continuation of the island solve (0 = off, the default; differentiable
+   * scenes set 3). When a Newton solve runs out of iterations with its residual still above 1e-6
+   * of the initial residual, the solve is restarted from the stage-start solution with the
+   * Coulomb friction falloff velocity (ContactParams::frictionFalloffVel) scaled by 4, 16, ...
+   * (up to this many levels) until it converges, then the scale is halved back to 1 with warm
+   * starts, so the last solve is the model as configured; its result is kept only if it improves
+   * on the plain solve's residual. Motivation: a soft body pushed over a frictional ground trapped
+   * the Newton solve in a period-4 limit cycle (residual 5e-3 .. 4e-2, steps of 1e-6) at the
+   * default falloff velocity - the regularized stick stiffness per contact sample, 2 mu N /
+   * (falloff dt), exceeded the body's nodal stiffness - while a 4x wider falloff converged from
+   * the same stage-start state in 23 iterations (2026-09-02). The extra solves are reported in
+   * SolverStats::numFrictionContinuationSolves. */
+  int frictionContinuationLevels = 0;
+
   // Retries and fallbacks
 
   /** @brief Positive Semi-Definite (PSD) projection mode for the dresidual matrix. */
@@ -475,6 +489,7 @@ struct NonLinearSolverParams {
   MOCHI_FIELD(relTol)
   MOCHI_FIELD(relStepTol)
   MOCHI_FIELD(stopIfNoImprovement)
+  MOCHI_FIELD(frictionContinuationLevels)
   MOCHI_FIELD(psdProjMode)
   MOCHI_FIELD(gradientDescentFallback)
   MOCHI_FIELD(explosionControl)

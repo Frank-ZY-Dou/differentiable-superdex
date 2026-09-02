@@ -697,7 +697,8 @@ void mochi::rigid::EntityAssemble(
         .implicitNormalForceForDissipation =
             simParams->experimentalEval.implicitNormalForceForDissipation,
         .useFittedHessian = params.fittedSaturationHessian.contactFriction,
-        .frictionModel = simParams->experimentalEval.frictionModel};
+        .frictionModel = simParams->experimentalEval.frictionModel,
+        .frictionFalloffScale = params.frictionFalloffScale};
     auto const& pose = gradTarget == GradTarget::Current ? currPose.value : stageStartPose.value;
     // Dispatch to the appropriate templatized implementation
     auto assembleRigidBodyAsyncContactResponseFn = gradTarget == GradTarget::Previous
