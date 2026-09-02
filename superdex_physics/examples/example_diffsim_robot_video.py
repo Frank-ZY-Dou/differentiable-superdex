@@ -29,6 +29,15 @@ rendered offscreen with the built-in viewer and written to MP4:
    steer it through frictional contact between the arm's collision meshes and
    the cube (articulated-vs-rigid contact in one island; the cube slides on the
    ground with friction).
+3. ``robot_grasp.mp4`` - FR3 with the Robotiq 2F-85 gripper descends onto a
+   cube, closes the fingers and lifts it straight up; the goal for the cube
+   lies 15 cm beside the lift line, so the optimizer has to carry the held
+   cube sideways. The variables are knots of the arm's carry-phase targets
+   (the fingers keep their closure), updated by normalized gradient descent;
+   the loss is the cube's final position, and its gradient reaches the arm
+   targets only through the two frictional finger-cube contacts (articulated
+   links against a rigid body in one island): the cube moves because the
+   fingers hold it.
 
 Rigor. Before optimizing, ``--check`` compares the adjoint gradient of the
 largest-gradient target entries against central finite differences of the
@@ -77,6 +86,23 @@ diffsim = physics.diffsim
 
 ARM_BOT = "bots/arms/fr3/fr3.superdex_bot"
 EE_LINK = "fr3_link8"
+GRIPPER_BOT = "bots/arm_hand_combos/fr3_v2_2f_85/fr3_v2_2f_85.superdex_bot"
+GRIPPER_EE_LINK = "2f_85_base_link"
+GRIPPER_GAINS = (8.0, 0.8)
+# The grasp task drives the arm six times stiffer than the reach/push tasks so that the
+# gripper (which adds 1 kg at the wrist) settles within a few millimetres of the IK pose
+# under gravity before the fingers close, and grasps with a higher friction material.
+GRASP_ARM_GAIN_SCALE = 6.0
+GRASP_CONTACT = physics.ContactParams(penalty_coefficient=1e6, coulomb_friction_coefficient=0.8)
+GRASP_CUBE_HALF = 0.025
+GRASP_CLOSE0 = 0.3  # initial finger closure [rad]: holds the cube through a gentle lift
+GRASP_CUBE_DENSITY = 2000.0  # [kg/m^3]: a 5 cm cube of 0.25 kg
+GRASP_LIFT_STEPS = 45  # initial lift: 25 cm in 0.9 s
+GRASP_GOAL_OFFSET = np.array([0.0, 0.15, 0.0])  # the goal lies 15 cm beside the lift line
+GRASP_CARRY_START = 65  # first optimized step: the fingers are closed and the cube is 5 cm up
+GRASP_NUM_KNOTS = 4  # carry-phase targets = linear interpolation of knots; the first is fixed
+NGD_DECAY = 0.95  # per-iteration decay of the normalized-gradient step length
+GRASP_TIP_AHEAD = 0.012  # the pose controller lags 1 cm behind the IK pose during the descent
 # Per-joint PD gains of the pose controller (stiffness [N m/rad], damping [N m s/rad]).
 JOINT_GAINS = list(zip([400, 400, 300, 300, 150, 100, 60], [40, 40, 30, 30, 15, 10, 6]))
 CUBE_HALF = 0.05
@@ -107,14 +133,25 @@ def cube_coords(half: float) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def spawn_arm(scene, with_controller: bool = True, with_contact: bool = True):
-    """FR3 arm with the given contact material and (optionally) a pose controller.
-    Returns (bot, arm actor, end-effector link actor, robotics context); the
-    context must outlive the bot."""
-    prefab = robotics.load_bot_prefab_from_file(str(resolve_asset(ARM_BOT)))
+def spawn_bot(
+    scene,
+    bot_path: str,
+    ee_link: str,
+    gains_of,
+    with_controller: bool = True,
+    with_contact: bool = True,
+    contact=None,
+):
+    """A bot prefab with the given contact material and (optionally) a pose
+    controller whose gains come from ``gains_of(joint_name) -> (k, d)`` for each
+    revolute joint (welded and closed-loop joints get no tracking term). Returns
+    (bot, articulated actor, ``ee_link`` actor, robotics context); the context
+    must outlive the bot."""
+    prefab = robotics.load_bot_prefab_from_file(str(resolve_asset(bot_path)))
+    contact = ARM_CONTACT if contact is None else contact
     for i in range(len(prefab.links)):
         link = prefab.links[i]
-        link.contact = ARM_CONTACT
+        link.contact = contact
         if not with_contact:
             link.collider_type = physics.ColliderType.NONE
         prefab.links[i] = link
@@ -122,11 +159,11 @@ def spawn_arm(scene, with_controller: bool = True, with_contact: bool = True):
     bot = robotics.create_bot(scene, prefab, context)
     arm = bot.get_articulated_actor()
     if with_controller:
-        gains = iter(JOINT_GAINS)
         tracking = []
         for i in range(len(prefab.joints)):
-            if prefab.joints[i].type == physics.ArticulatedJointType.REVOLUTE:
-                k, d = next(gains)
+            joint = prefab.joints[i]
+            if joint.type == physics.ArticulatedJointType.REVOLUTE:
+                k, d = gains_of(joint.name)
                 tracking.append(
                     physics.PoseTrackingParams(stiffness=float(k), damping=float(d), saturation=-1.0)
                 )
@@ -146,8 +183,36 @@ def spawn_arm(scene, with_controller: bool = True, with_contact: bool = True):
             )
     actors = []
     scene.for_each_actor(lambda a: actors.append(a) if a.is_nested_link_actor() else None)
-    ee = [a for a in actors if a.get_name().endswith(EE_LINK)][0]
+    ee = [a for a in actors if a.get_name().endswith(ee_link)][0]
     return bot, arm, ee, context
+
+
+def _arm_gains():
+    gains = iter(JOINT_GAINS)
+    return lambda name: next(gains)
+
+
+def spawn_arm(scene, with_controller: bool = True, with_contact: bool = True):
+    """FR3 arm; see :func:`spawn_bot`."""
+    return spawn_bot(scene, ARM_BOT, EE_LINK, _arm_gains(), with_controller, with_contact)
+
+
+def spawn_gripper_arm(scene, with_controller: bool = True, with_contact: bool = True):
+    """FR3 arm with the Robotiq 2F-85 gripper (a closed-loop linkage: two of its
+    joints are welded cycle closures, six are revolute); the gripper's revolute
+    joints get soft gains, the arm's the reach/push gains times
+    GRASP_ARM_GAIN_SCALE. The returned end-effector actor is the gripper base."""
+    arm_gains = _arm_gains()
+
+    def gains_of(name):
+        if name.startswith("fr3"):
+            k, d = arm_gains(name)
+            return GRASP_ARM_GAIN_SCALE * k, GRASP_ARM_GAIN_SCALE * d
+        return GRIPPER_GAINS
+
+    return spawn_bot(
+        scene, GRIPPER_BOT, GRIPPER_EE_LINK, gains_of, with_controller, with_contact, GRASP_CONTACT
+    )
 
 
 def configure(scene) -> None:
@@ -169,12 +234,14 @@ def configure(scene) -> None:
     diffsim.set_back_propagation_solver_params(scene, params)
 
 
-def ik_joint_poses(waypoints):
+def ik_joint_poses(waypoints, spawner=None):
     """Joint poses reaching the end-effector waypoints, from a dedicated
-    zero-gravity IK scene (the engine solves IK as a quasi-static simulation)."""
+    zero-gravity IK scene (the engine solves IK as a quasi-static simulation).
+    ``spawner`` builds the bot (default: the FR3 arm)."""
+    spawner = spawn_arm if spawner is None else spawner
     scene = physics.create_scene("ik")
     scene.set_gravity([0.0, 0.0, 0.0])
-    bot, arm, ee, context = spawn_arm(scene, with_controller=False, with_contact=False)
+    bot, arm, ee, context = spawner(scene, with_controller=False, with_contact=False)
     solver = physics.experimental.create_ik_solver(scene)
     params = solver.get_solver_params()
     # The IK defaults (abs_tol 1e-2, 1 cm position threshold) treat targets a few
@@ -194,9 +261,11 @@ def ik_joint_poses(waypoints):
         reached = np.asarray(ee.get_center_of_mass_transform().translation)
         print(f"  IK waypoint {np.round(point, 3)} -> ee {reached.round(3)}")
         poses.append(q)
-    physics.experimental.destroy_ik_solver(solver)
+    # Tear down in the documented order: targets, the bot, then the solver, which
+    # destroys the IK scene it owns (the scene must not be destroyed separately).
+    solver.clear_position_target(ee.get_handle())
     robotics.destroy_bot(scene, bot)
-    physics.destroy_scene(scene)
+    physics.experimental.destroy_ik_solver(solver)
     return poses
 
 
@@ -216,13 +285,45 @@ def interpolate_targets(keys, num_steps: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def check_gradient(bridge, controls: np.ndarray, grad: np.ndarray, num_entries: int = 4) -> None:
+def check_gradient(
+    bridge, controls: np.ndarray, grad: np.ndarray, num_entries: int = 8, max_per_step: int = 2
+) -> None:
     """Central finite differences of the full rollout loss on the entries with
-    the largest adjoint gradient, at two step sizes."""
+    the largest adjoint gradient (at most ``max_per_step`` per step, so the
+    check also covers the adjoint solves of earlier steps), at two step sizes
+    (1e-5, 1e-6), plus the directional derivative along the gradient itself.
+    An entry validates the adjoint only where the two FD estimates agree with
+    each other (the "fd self-consistency" column). Single-entry quotients of
+    stiff targets (the arm at 6x gains) are dominated by the forward solve's
+    convergence noise (about 1e-9 relative in the loss), and larger steps do
+    not help - the loss is nonlinear at the 1e-4 rad scale through the finger
+    contacts; the directional derivative spreads the perturbation over every
+    entry, so its quotient is an order of magnitude cleaner and validates the
+    whole gradient at once."""
     loss_of = lambda c: float(bridge(controls=torch.tensor(c, dtype=torch.float64)).detach())
-    print("  gradient check (adjoint vs rollout FD at eps 1e-5 / 1e-6):")
-    for flat in np.argsort(-np.abs(grad).ravel())[:num_entries]:
+    print("  gradient check (adjoint vs rollout central FD at eps 1e-5 / 1e-6):")
+    direction = grad / np.linalg.norm(grad)
+    fds = [
+        (loss_of(controls + eps * direction) - loss_of(controls - eps * direction)) / (2.0 * eps)
+        for eps in (1e-5, 1e-6)
+    ]
+    print(
+        f"    along the gradient: |adjoint| {np.linalg.norm(grad):.5e}  fd {fds[0]:+.5e}  "
+        f"rel err {abs(np.linalg.norm(grad) - fds[0]) / abs(fds[0]):.1e}  "
+        f"fd self-consistency {abs(fds[0] - fds[1]) / abs(fds[0]):.0e}"
+    )
+    entries = []
+    per_step = {}
+    for flat in np.argsort(-np.abs(grad).ravel()):
         s, d = divmod(int(flat), controls.shape[1])
+        if grad[s, d] == 0.0 or per_step.get(s, 0) >= max_per_step:
+            continue
+        per_step[s] = per_step.get(s, 0) + 1
+        entries.append((s, d))
+        if len(entries) == num_entries:
+            break
+    rows = []
+    for s, d in entries:
         fds = []
         for eps in (1e-5, 1e-6):
             plus, minus = controls.copy(), controls.copy()
@@ -230,10 +331,12 @@ def check_gradient(bridge, controls: np.ndarray, grad: np.ndarray, num_entries: 
             minus[s, d] -= eps
             fds.append((loss_of(plus) - loss_of(minus)) / (2.0 * eps))
         denom = max(abs(fds[0]), 1e-30)
+        rows.append((abs(fds[0] - fds[1]) / denom, s, d, fds[0], abs(grad[s, d] - fds[0]) / denom))
+    for fd_self, s, d, fd, rel in sorted(rows):
+        smooth = "smooth" if fd_self < 1e-4 else "rough "
         print(
-            f"    step {s:3d} joint {d}: adjoint {grad[s, d]:+.5e}  fd {fds[0]:+.5e}  "
-            f"rel err {abs(grad[s, d] - fds[0]) / denom:.1e}  "
-            f"fd self-consistency {abs(fds[0] - fds[1]) / denom:.0e}"
+            f"    step {s:3d} joint {d:2d}: adjoint {grad[s, d]:+.5e}  fd {fd:+.5e}  "
+            f"rel err {rel:.1e}  fd self-consistency {fd_self:.0e}  [{smooth}]"
         )
 
 
@@ -296,15 +399,40 @@ def run_task(
     dt: float,
     check: bool,
     grad_clip: float = 1.0,
+    trainable: np.ndarray | None = None,
+    parametrize=None,
+    params0: np.ndarray | None = None,
+    optimizer_kind: str = "adam",
 ) -> None:
+    """Optimizes the rollout loss over the pose-controller targets.
+
+    By default the variables are the per-step targets themselves (``controls0``),
+    updated by Adam with the gradient clipped to ``grad_clip``; ``trainable`` (a
+    boolean mask of ``controls0``'s shape) restricts that to a subset of the
+    targets. With ``parametrize`` (a torch function mapping a parameter tensor
+    to the full targets) and ``params0`` the variables are those parameters
+    instead, and ``trainable`` only selects the entries of the target gradient
+    that the check validates. ``optimizer_kind`` is ``"adam"`` or ``"ngd"``
+    (normalized gradient descent: a step of length ``learning_rate`` along the
+    gradient, decaying by NGD_DECAY per iteration - the update then follows the
+    gradient's direction instead of moving every variable by the learning rate
+    at once, which matters when a jerk can break a contact)."""
     num_steps = controls0.shape[0]
     guard = ConvergenceGuard(scene)
     bridge = TorchRollout(
         scene, dt=dt, num_steps=num_steps, control_actors=[arm], terminal_losses=[loss]
     )
     recorder = Recorder(scene, target, look_from=look_from, look_at=look_at, title=title)
-    controls = torch.tensor(controls0, dtype=torch.float64, requires_grad=True)
-    optimizer = torch.optim.Adam([controls], lr=learning_rate)
+    identity = parametrize is None
+    if identity:
+        parametrize = lambda p: p
+        params0 = controls0
+    params = torch.tensor(params0, dtype=torch.float64, requires_grad=True)
+    if optimizer_kind == "adam":
+        optimizer = torch.optim.Adam([params], lr=learning_rate)
+    elif optimizer_kind != "ngd":
+        raise ValueError(f"unknown optimizer_kind {optimizer_kind!r}")
+    mask = None if trainable is None else torch.tensor(trainable, dtype=torch.float64)
     losses = []
     record = {0, 1, 2, 4, 7, 12, 20, 30, num_iterations - 1}
 
@@ -324,36 +452,52 @@ def run_task(
                 )
 
     for iteration in range(num_iterations):
-        optimizer.zero_grad()
+        if params.grad is not None:
+            params.grad.zero_()
+        controls = parametrize(params)
+        controls.retain_grad()
         value = bridge(controls=controls)
         value.backward()
-        # The gradient check must see the adjoint itself, so read it before the
-        # clipping below rescales it.
+        # The gradient check must see the adjoint itself (the gradient w.r.t. the
+        # targets), so read it before the clipping below rescales it.
         raw_grad = controls.grad.detach().clone()
-        losses.append(float(value))
+        if mask is not None:
+            raw_grad *= mask
+            if identity:
+                params.grad *= mask
+        losses.append(float(value.detach()))
         result = bridge.last_result
         if not result.fd_valid:
-            print("  warning: the adjoint's finite-difference self-check flagged a step")
+            print(
+                "  warning: the adjoint's finite-difference self-check flagged steps "
+                f"{result.flagged_steps}"
+            )
         if iteration == 0 and check:
             check_gradient(bridge, controls0, raw_grad.numpy())
-        # Contact tasks have occasional nonsmooth steps: cap the update so one
-        # spiky gradient cannot throw the arm into an impact (DiffMJX-style clipping).
-        torch.nn.utils.clip_grad_norm_([controls], max_norm=grad_clip)
-        print(
-            f"[{name}] iter {iteration:3d}  loss {losses[-1]:.6f}  "
-            f"|grad| {float(raw_grad.norm()):.3e} (clipped to {float(controls.grad.norm()):.3e})  "
-            f"adjoint residual {result.max_adjoint_residual:.1e}"
-        )
         if iteration in record:
-            current = controls.detach().numpy().copy()
             replay(
-                current,
+                controls.detach().numpy().copy(),
                 capture=True,
                 caption_fn=lambda step, it=iteration: (
                     f"iteration {it}   t = {(step + 1) * dt:.2f} s   loss = {losses[-1]:.5f}"
                 ),
             )
-        optimizer.step()
+        before = params.detach().clone()
+        if optimizer_kind == "adam":
+            # Contact tasks have occasional nonsmooth steps: cap the update so one
+            # spiky gradient cannot throw the arm into an impact (DiffMJX-style clipping).
+            torch.nn.utils.clip_grad_norm_([params], max_norm=grad_clip)
+            optimizer.step()
+        else:
+            with torch.no_grad():
+                g = params.grad
+                params -= (learning_rate * NGD_DECAY**iteration / (g.norm() + 1e-30)) * g
+        print(
+            f"[{name}] iter {iteration:3d}  loss {losses[-1]:.6f}  "
+            f"|grad| {float(raw_grad.norm()):.3e}  update {float((params.detach() - before).norm()):.3e}  "
+            f"adjoint residual {result.max_adjoint_residual:.1e}  "
+            f"asymmetry {result.max_hessian_asymmetry:.1e}"
+        )
 
     guard.report(name)
     bridge.close()
@@ -388,25 +532,27 @@ def task_reach(output_dir: pathlib.Path, num_iterations: int, check: bool) -> No
             g[:3] = d
             diffsim.get_center_of_mass_transform_backward(ee, g)
 
-    run_task(
-        "robot_reach",
-        scene,
-        arm,
-        controls0=np.tile(q0, (50, 1)),
-        loss=Loss(),
-        tracked_point=lambda: np.asarray(ee.get_center_of_mass_transform().translation),
-        target=target,
-        look_from=[1.7, -1.9, 1.2],
-        look_at=[0.4, 0.05, 0.45],
-        title="FR3 reach: Adam on the joint-target trajectory (articulated adjoint, torch bridge)",
-        output_dir=output_dir,
-        num_iterations=num_iterations,
-        learning_rate=0.02,
-        dt=0.02,
-        check=check,
-    )
-    robotics.destroy_bot(scene, bot)
-    physics.destroy_scene(scene)
+    try:
+        run_task(
+            "robot_reach",
+            scene,
+            arm,
+            controls0=np.tile(q0, (50, 1)),
+            loss=Loss(),
+            tracked_point=lambda: np.asarray(ee.get_center_of_mass_transform().translation),
+            target=target,
+            look_from=[1.7, -1.9, 1.2],
+            look_at=[0.4, 0.05, 0.45],
+            title="FR3 reach: Adam on the joint-target trajectory (articulated adjoint, torch bridge)",
+            output_dir=output_dir,
+            num_iterations=num_iterations,
+            learning_rate=0.02,
+            dt=0.02,
+            check=check,
+        )
+    finally:
+        robotics.destroy_bot(scene, bot)
+        physics.destroy_scene(scene)
 
 
 def task_push(output_dir: pathlib.Path, num_iterations: int, check: bool) -> None:
@@ -452,42 +598,222 @@ def task_push(output_dir: pathlib.Path, num_iterations: int, check: bool) -> Non
             g[:3] = d
             diffsim.get_center_of_mass_transform_backward(cube, g)
 
-    run_task(
-        "robot_push",
-        scene,
-        arm,
-        controls0=controls0,
-        loss=CubeLoss(),
-        tracked_point=lambda: np.asarray(cube.get_center_of_mass_transform().translation),
-        target=goal,
-        look_from=[1.9, -1.6, 0.9],
-        look_at=[0.6, 0.05, 0.1],
-        title="FR3 push: Adam on the joint-target trajectory through frictional contact",
-        output_dir=output_dir,
-        num_iterations=num_iterations,
-        learning_rate=0.002,
-        dt=0.02,
-        check=check,
-        grad_clip=0.02,
-    )
+    try:
+        run_task(
+            "robot_push",
+            scene,
+            arm,
+            controls0=controls0,
+            loss=CubeLoss(),
+            tracked_point=lambda: np.asarray(cube.get_center_of_mass_transform().translation),
+            target=goal,
+            look_from=[1.9, -1.6, 0.9],
+            look_at=[0.6, 0.05, 0.1],
+            title="FR3 push: Adam on the joint-target trajectory through frictional contact",
+            output_dir=output_dir,
+            num_iterations=num_iterations,
+            learning_rate=0.002,
+            dt=0.02,
+            check=check,
+            grad_clip=0.02,
+        )
+    finally:
+        robotics.destroy_bot(scene, bot)
+        physics.destroy_scene(scene)
+
+
+def grasp_ik_poses(points):
+    """Joint poses of the FR3 + 2F-85 that place the fingertip midpoint (a fixed
+    point of the gripper base's local frame while the fingers are open) at each
+    point, with the gripper base held at its default, downward orientation."""
+    scene = physics.create_scene("ik")
+    scene.set_gravity([0.0, 0.0, 0.0])
+    bot, arm, base, context = spawn_gripper_arm(scene, with_controller=False, with_contact=False)
+    links = []
+    scene.for_each_actor(lambda a: links.append(a) if a.is_nested_link_actor() else None)
+    tips = [a for a in links if "finger_tip_link" in a.get_name()]
+    base_tfm = base.get_root_transform()  # IK local positions are in the link's root frame
+    tip_mid = np.mean([np.asarray(t.get_center_of_mass_transform().translation) for t in tips], axis=0)
+    local_mid = np.asarray((base_tfm.inverse() * physics.TransformRT(tip_mid.tolist())).translation)
+    base_rotation = np.asarray(base_tfm.rotation.to_rotation_vector())
+    solver = physics.experimental.create_ik_solver(scene)
+    params = solver.get_solver_params()
+    params.max_iter = 500
+    params.abs_tol = 1e-8
+    params.rel_tol = 1e-10
+    params.position_error_thres = 1e-4
+    solver.set_solver_params(params)
+    solver.create_rotation_target(base.get_handle(), [0.0, 0.0, 0.0], base_rotation.tolist(), 1.0)
+    poses = []
+    for point in points:
+        solver.clear_position_target(base.get_handle())
+        solver.create_position_target(base.get_handle(), local_mid.tolist(), list(point), 100.0)
+        solver.solve_ik()
+        q = np.zeros(arm.get_num_dofs())
+        arm.get_articulated_pose(q)
+        reached = np.mean([np.asarray(t.get_center_of_mass_transform().translation) for t in tips], axis=0)
+        print(f"  IK fingertip midpoint {np.round(point, 3)} -> {reached.round(3)}")
+        poses.append(q)
+    # Tear down in the documented order: targets, the bot, then the solver, which
+    # destroys the IK scene it owns (the scene must not be destroyed separately).
+    solver.clear_position_target(base.get_handle())
+    solver.clear_rotation_target(base.get_handle())
     robotics.destroy_bot(scene, bot)
-    physics.destroy_scene(scene)
+    physics.experimental.destroy_ik_solver(solver)
+    return poses
+
+
+def build_grasp_task():
+    """Scene, actors and initial controls of the grasp task (see :func:`task_grasp`).
+    Returns (scene, bot, arm, cube, context, controls0, goal, dt)."""
+    cube_pos = np.array([0.50, 0.0, GRASP_CUBE_HALF - 0.001])
+    print("[robot_grasp] IK for the descend / grasp / lift poses")
+    grasp_mid = cube_pos + np.array([GRASP_TIP_AHEAD, 0.0, 0.015])
+    pre_mid = grasp_mid + np.array([0.0, 0.0, 0.12])
+    lift_mid = np.array([cube_pos[0], cube_pos[1], 0.30])
+    q_pre, q_grasp, q_lift = grasp_ik_poses([pre_mid, grasp_mid, lift_mid])
+
+    scene = physics.create_scene("robot_grasp")
+    scene.set_gravity([0.0, 0.0, -9.81])
+    bot, arm, base, context = spawn_gripper_arm(scene)
+    scene.create_rigid_actor(
+        name="ground",
+        shape=physics.create_plane_shape(normal=[0.0, 0.0, 1.0], distance=0.0),
+        is_static=True,
+        contact=GRASP_CONTACT,
+    )
+    cube = scene.create_rigid_actor(
+        name="cube",
+        shape=physics.create_tet_mesh_shape(
+            coordinates=cube_coords(GRASP_CUBE_HALF), connectivity=CUBE_CONN
+        ),
+        density=GRASP_CUBE_DENSITY,
+        contact=GRASP_CONTACT,
+        world_from_local=physics.TransformRT(cube_pos.tolist()),
+    )
+    arm.set_articulated_pose_from_joints(q_pre)
+    configure(scene)
+
+    num_steps = 100
+    dt = 0.02
+    n = arm.get_num_dofs()
+    gripper = list(range(7, n))
+    close_dir = np.sign(q_pre[gripper])  # each finger joint closes away from zero
+    controls0 = interpolate_targets(
+        [(0, q_pre), (30, q_grasp), (55, q_grasp), (55 + GRASP_LIFT_STEPS, q_lift)], num_steps
+    )
+    for step in range(num_steps):
+        close = 0.0 if step < 30 else min(1.0, (step - 30) / 25.0)
+        controls0[step, gripper] = q_pre[gripper] + close_dir * GRASP_CLOSE0 * close
+    # Where the cube ends up when it stays in the grasp (under the lifted fingertips),
+    # displaced sideways: the optimizer has to carry it there.
+    goal = np.array([cube_pos[0] - 0.005, cube_pos[1], 0.27]) + GRASP_GOAL_OFFSET
+    return scene, bot, arm, cube, context, controls0, goal, dt
+
+
+def task_grasp(output_dir: pathlib.Path, num_iterations: int, check: bool) -> None:
+    """FR3 + 2F-85: descend onto a cube, close the fingers, lift it straight up.
+    The goal for the cube lies 15 cm beside the lift line, so the loss (the
+    cube's final position) can only be reduced by carrying the held cube
+    sideways: its gradient flows from the cube through the two frictional
+    finger contacts into the arm's carry-phase targets, the only optimized
+    controls. (A dropped cube is a threshold event - the slip of a Coulomb
+    contact - after which the final position no longer depends on the
+    controls. So the demo starts from a holding grasp, keeps the finger
+    closure fixed - with the fingers free, shoving the cube with one finger is
+    the steepest descent direction and drops it within a few iterations - and
+    parametrizes the carry by knots updated along the gradient's direction:
+    Adam's first step moves every per-step target by the learning rate at
+    once, and that jerk drops the cube too.)"""
+    scene, bot, arm, cube, context, controls0, goal, dt = build_grasp_task()
+    # Optimize the arm's targets of the carry phase; the fingers keep their closure
+    # (a finger shoving the cube sideways is the quickest way to move it, and to drop it).
+    trainable = np.zeros(controls0.shape, dtype=bool)
+    trainable[GRASP_CARRY_START:, :7] = True
+    # The carry-phase arm targets are the linear interpolation of GRASP_NUM_KNOTS knots.
+    # The first knot is pinned to the trajectory at the carry start, so an update is a
+    # ramp starting from rest rather than a jump (a jerk at the carry start drops the
+    # cube, as does moving every per-step target by the learning rate at once); the
+    # other knots are the optimization variables. The initial carry phase is linear, so
+    # the knots reproduce it exactly.
+    num_steps = controls0.shape[0]
+    knots = np.linspace(GRASP_CARRY_START, num_steps - 1, GRASP_NUM_KNOTS).round().astype(int)
+    steps = np.arange(GRASP_CARRY_START, num_steps)
+    weights = np.zeros((len(steps), len(knots)))
+    for i, step in enumerate(steps):
+        k = min(int(np.searchsorted(knots, step, side="right")) - 1, len(knots) - 2)
+        t = (step - knots[k]) / (knots[k + 1] - knots[k])
+        weights[i, k], weights[i, k + 1] = 1.0 - t, t
+    interp = torch.tensor(weights, dtype=torch.float64)
+    base = torch.tensor(controls0, dtype=torch.float64)
+    fixed_knot = base[knots[0], :7].reshape(1, 7)
+    params0 = controls0[knots[1:], :7]
+
+    def parametrize(params):
+        carry = interp @ torch.cat([fixed_knot, params], dim=0)
+        arm_targets = torch.cat([base[:GRASP_CARRY_START, :7], carry], dim=0)
+        return torch.cat([arm_targets, base[:, 7:]], dim=1)
+
+    reproduced = parametrize(torch.tensor(params0, dtype=torch.float64)).numpy()
+    assert np.allclose(reproduced, controls0, atol=1e-12), "knots must reproduce the initial carry"
+
+    class CubeLoss:
+        def value(self) -> float:
+            d = np.asarray(cube.get_center_of_mass_transform().translation) - goal
+            return 0.5 * float(d @ d)
+
+        def accumulate_output_grad(self) -> None:
+            d = np.asarray(cube.get_center_of_mass_transform().translation) - goal
+            g = np.zeros(7)
+            g[:3] = d
+            diffsim.get_center_of_mass_transform_backward(cube, g)
+
+    try:
+        run_task(
+            "robot_grasp",
+            scene,
+            arm,
+            controls0=controls0,
+            loss=CubeLoss(),
+            tracked_point=lambda: np.asarray(cube.get_center_of_mass_transform().translation),
+            target=goal,
+            look_from=[1.4, -1.2, 0.7],
+            look_at=[0.5, 0.0, 0.15],
+            title="FR3 + 2F-85 grasp: normalized gradient descent on the carry knots through frictional contact",
+            output_dir=output_dir,
+            num_iterations=num_iterations,
+            learning_rate=0.02,
+            dt=dt,
+            check=check,
+            trainable=trainable,
+            parametrize=parametrize,
+            params0=params0,
+            optimizer_kind="ngd",
+        )
+    finally:
+        robotics.destroy_bot(scene, bot)
+        physics.destroy_scene(scene)
+        del context
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--output-dir", type=pathlib.Path, default=pathlib.Path("diffsim_videos"))
     parser.add_argument("--iterations", type=int, default=40)
-    parser.add_argument("--task", choices=["reach", "push", "both"], default="both")
+    parser.add_argument(
+        "--task", choices=["reach", "push", "grasp", "both", "all"], default="all"
+    )
     parser.add_argument("--check", action="store_true", help="finite-difference gradient check first")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     physics.initialize(num_worker_threads=0)
     start = time.time()
-    if args.task in ("reach", "both"):
+    if args.task in ("reach", "both", "all"):
         task_reach(args.output_dir, args.iterations, args.check)
-    if args.task in ("push", "both"):
+    if args.task in ("push", "both", "all"):
         task_push(args.output_dir, args.iterations, args.check)
+    if args.task in ("grasp", "all"):
+        task_grasp(args.output_dir, args.iterations, args.check)
     print(f"done in {time.time() - start:.1f} s")
     physics.shutdown()
 
