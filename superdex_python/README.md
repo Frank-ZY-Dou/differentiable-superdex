@@ -45,7 +45,8 @@ contact included. Three layers build on each other:
 - `superdex.physics.diffsim_torch.TorchRollout` - a `torch.autograd.Function` around the
   driver: controls, external forces, gravity, contact materials, densities, soft initial states
   and soft material parameters as differentiable tensors; `PolicyRollout` closes the loop: a
-  torch policy maps the observed joint poses, rigid positions and soft-body centroids to the
+  torch policy maps the observed joint poses, rigid positions and orientations and soft-body
+  centroids to the
   controller targets and/or the external forces (joint torques) at every step and its
   parameters receive the loss gradient through the simulator, feedback included (analytic
   policy gradients).
@@ -75,9 +76,9 @@ SUPERDEX_PRECISION=double python superdex_physics/examples/example_diffsim_robot
 
 The tasks are `reach`, `push`, `push_soft`, `push_multi`, `push_policy`, `grasp`, `grasp_soft`,
 `hand`, `tendon` and `haul` (an FR3 arm reaching, pushing a rigid, a soft or two cubes, the push
-solved by a feedback policy trained through the simulator on three cube starts at once against
-an open-loop baseline of the same architecture, a 2F-85 gripper carrying a rigid or a
-soft cube, a five-finger DG-5F hand carrying a cube, a tendon-driven finger with a rod as the
+solved by a feedback policy trained through the simulator on top of an optimized open-loop
+plan, on three cube starts at once and against an open-loop baseline of the same architecture,
+a 2F-85 gripper carrying a rigid or a soft cube, a five-finger DG-5F hand carrying a cube, a tendon-driven finger with a rod as the
 cable, and the arm hauling a box with a cable); `example_diffsim_video.py` holds the actor-level demos, and
 `example_diffsim_sysid.py` identifies parameters from observed trajectories (a sliding cube's
 friction coefficient and density, or with `--mode soft` a dropped soft cube's Young's modulus and
@@ -104,9 +105,11 @@ a parameter perturbation of a few 1e-8 can land it on another local solution, a 
 1e-7 in the loss (5e-6 m in a cube position). The adjoint is the exact derivative of the branch
 taken (finite differences agree to 1e-3 at eps 1e-8, and to 1e-5 where the loss is smooth); a
 finite-difference check of such a loss needs eps at or below 1e-7 and a self-consistency test
-across epsilons, as the examples' `--check` reports, and an optimizer a line search on the loss
-itself rather than a fixed step (the feedback-policy demo: a step that loses the contact lands
-on the zero-gradient plateau of the untouched cube, from which no gradient recovers).
+across epsilons, as the examples' `--check` reports. For optimization the jumps are noise
+(an Armijo line search stalls on them; fixed or decaying steps step over them), but a step
+that loses the contact lands on the zero-gradient plateau of the untouched cube, from which
+no gradient recovers: the feedback-policy demo halves any step that raises the loss by more
+than half, the open-loop demos clip the gradient.
 
 ## License
 

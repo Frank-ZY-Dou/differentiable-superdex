@@ -717,6 +717,97 @@ class PolicyRolloutTest(unittest.TestCase):
                 self.assertLessEqual(rel, self.TOL, f"controller={with_controller} {name}: rel {rel}")
             scene.release_all_states()
 
+    def test_orientation_observation_policy_vs_fd(self) -> None:
+        """A policy fed the pushed cube's orientation quaternion (and the chain pose and time)
+        drives the controlled chain pushing a rigid cube: the off-center push spins the cube,
+        so the observed orientation depends on the earlier controls and the loss (the cube's
+        final position) sees the policy through it. No external torques, so the rigid torque
+        approximation is not involved. Directional FD along the gradient at eps 1e-5 / 1e-6,
+        plus the largest weight entries where FD is smooth."""
+        diffsim_torch = _make_bridge_module()
+        scene, chain, cube = scenes.chain_pushing_cube()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        n = chain.get_num_dofs()
+        observations = [
+            diffsim_torch.OrientationObservation(cube),
+            diffsim_torch.ArticulatedPoseObservation(chain),
+        ]
+        obs_size = sum(o.size for o in observations)
+        num_steps = 30
+        start = np.asarray(cube.get_center_of_mass_transform().translation, dtype=np.float64)
+        terminal = TranslationErrorLoss(cube, ref=start + np.array([0.08, 0.0, 0.0]))
+        policy = torch.nn.Linear(obs_size + 1, n).double()
+        with torch.no_grad():
+            policy.weight.copy_(
+                torch.tensor(0.3 * np.cos(np.arange(n * (obs_size + 1), dtype=np.float64)).reshape(n, obs_size + 1))
+            )
+            policy.weight[0, -1] = -1.2  # the time feature ramps joint 0 into the cube
+            policy.weight[1, -1] = 0.0
+            policy.bias.zero_()
+        rollout = diffsim_torch.PolicyRollout(
+            scene, dt=DT, num_steps=num_steps, policy=policy, observations=observations,
+            control_actors=[chain], time_feature=True, terminal_losses=[terminal],
+        )
+        self.addCleanup(rollout.close)
+        loss = rollout()
+        loss.backward()
+        self.assertTrue(rollout.last_result.fd_valid)
+        params = list(policy.parameters())
+        analytic = [p.grad.detach().numpy().copy() for p in params]
+        state_init = scene.capture_state()
+        values = [p.detach().numpy().copy() for p in params]
+
+        def objective() -> float:
+            scene.restore_state(state_init, False)
+            for step in range(num_steps):
+                obs = np.concatenate([o.value() for o in observations] + [[step / num_steps]])
+                chain.set_articulated_target_pose(np.ascontiguousarray(values[0] @ obs + values[1]))
+                scene.step(DT)
+            return terminal.value()
+
+        self.assertAlmostEqual(objective(), float(loss.detach()), delta=1e-12)
+        quat = observations[0].value()
+        self.assertGreater(float(np.abs(quat[:3]).max()), 1e-3, "the cube must have turned")
+        grad_norm = float(np.sqrt(sum(float((g * g).sum()) for g in analytic)))
+        direction = [g / grad_norm for g in analytic]
+
+        def directional_fd(eps: float) -> float:
+            pair = []
+            for sign in (+1.0, -1.0):
+                for v, d in zip(values, direction):
+                    v += sign * eps * d
+                pair.append(objective())
+                for v, d in zip(values, direction):
+                    v -= sign * eps * d
+            return (pair[0] - pair[1]) / (2.0 * eps)
+
+        fds = [directional_fd(eps) for eps in (1e-5, 1e-6)]
+        self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), 1e-4, f"rough directional FD {fds}")
+        self.assertLessEqual(abs(grad_norm - fds[0]) / abs(fds[0]), 1e-4, (grad_norm, fds))
+        rel_errors, skipped = {}, {}
+        weight = values[0]
+        for flat in np.argsort(-np.abs(analytic[0]).ravel())[:4]:
+            index = np.unravel_index(int(flat), weight.shape)
+            entry_fds = []
+            for eps in (1e-5, 1e-6):
+                pair = []
+                for sign in (+1.0, -1.0):
+                    saved = weight[index]
+                    weight[index] = saved + sign * eps
+                    pair.append(objective())
+                    weight[index] = saved
+                entry_fds.append((pair[0] - pair[1]) / (2.0 * eps))
+            denom = max(abs(entry_fds[0]), 1e-30)
+            fd_self = abs(entry_fds[0] - entry_fds[1]) / denom
+            if fd_self > 1e-3:
+                skipped[index] = fd_self
+                continue
+            rel_errors[index] = abs(analytic[0][index] - entry_fds[0]) / denom
+        self.assertGreaterEqual(len(rel_errors), 2, f"too few smooth entries: {skipped}")
+        self.assertLessEqual(max(rel_errors.values()), 1e-4, (rel_errors, skipped))
+        scene.release_all_states()
+
     def test_soft_observation_policy_vs_fd(self) -> None:
         """A policy fed the soft cube's centroid displacement, the chain pose and the time
         drives the chain pushing the cube (the time weight ramps joint 0 as the open-loop

@@ -158,6 +158,7 @@ SOFT_MATERIAL_FIELDS = (
 
 __all__ = [
     "ArticulatedPoseObservation",
+    "OrientationObservation",
     "SoftCentroidObservation",
     "CONTACT_PARAM_FIELDS",
     "PolicyRollout",
@@ -626,6 +627,26 @@ class ArticulatedPoseObservation:
         diffsim.get_articulated_pose_backward(
             self.actor, np.ascontiguousarray(grad, dtype=_real_dtype())
         )
+
+
+class OrientationObservation:
+    """The world orientation of a rigid actor's center of mass as an observation: the unit
+    quaternion in the engine's (x, y, z, w) order."""
+
+    size = 4
+
+    def __init__(self, actor):
+        if actor.get_type() != physics.ActorType.RIGID:
+            raise ValueError(f"{actor.get_name()!r} is not a rigid actor")
+        self.actor = actor
+
+    def value(self) -> np.ndarray:
+        return np.asarray(self.actor.get_center_of_mass_transform().rotation.tolist(), dtype=np.float64)
+
+    def accumulate_output_grad(self, grad: np.ndarray) -> None:
+        full = np.zeros(RIGID_POSE_SIZE, dtype=_real_dtype())
+        full[3:] = grad
+        diffsim.get_center_of_mass_transform_backward(self.actor, full)
 
 
 class SoftCentroidObservation:
