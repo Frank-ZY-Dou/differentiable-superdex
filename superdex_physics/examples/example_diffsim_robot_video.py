@@ -74,6 +74,12 @@ solved with failure-adaptive substepping (``PUSH_SUBSTEP_LEVELS`` halvings of
 the step, each substep its own adjoint step, see
 ``superdex.physics.diffsim_rollout``); the guard reports which steps were
 split, and the replay used for the video takes the same substeps.
+``robot_hand_grasp.mp4`` (``--task hand``) is the grasp with a five-finger hand
+(FR3 + Tesollo DG-5F): the hand comes down over a cube with the fingers
+horizontal, wraps fingers 2-3 over its far side and the thumb over the near side,
+lifts it, and the carry knots are optimized like the gripper grasp (27 controlled
+DoFs, some 20 finger links in frictional contact).
+
 ``robot_push_multi.mp4`` (``--task push_multi``) is the push with two cubes in a
 row: the end effector pushes the first cube, which pushes the second; the loss
 is the second cube's final position, so the gradient crosses two frictional
@@ -167,6 +173,25 @@ HAUL_STALL_TOLERANCE = 1e-6
 # iterations at ~2e-6 residual (a slack, buckling cable); such steps are substepped.
 HAUL_SUBSTEP_LEVELS = 2
 HAUL_LEARNING_RATE = 0.004  # Adam; 0.002 halves the loss in 40 iterations, 0.004 reaches 0.00096 in 120
+# Five-finger hand grasp (FR3 + Tesollo DG-5F, right hand). Palm frame: local x is the palm
+# normal, local z the finger direction, local y across the fingers. The hand is placed with the
+# fingers horizontal along +y and the palm facing down (local x -> -z, local z -> +y), the palm
+# HAND_BACK behind and HAND_UP above the cube center; fingers 2-5 flex to HAND_FLEX on their two
+# proximal flexion joints (0.6 of it on the distal one) and the thumb goes to HAND_THUMB.
+HAND_BOT = "bots/arm_hand_combos/fr3_dg5f_short/right/fr3_dg5f_short_right.superdex_bot"
+HAND_PALM_LINK = "dg5f_link_palm"
+HAND_CUBE_HALF = 0.035
+HAND_CUBE_DENSITY = 300.0  # [kg/m^3]: a 7 cm cube of 0.1 kg
+HAND_CUBE_POS = np.array([0.45, 0.0, HAND_CUBE_HALF - 0.001])
+HAND_BACK, HAND_UP = 0.08, 0.09  # [m] the IK reaches the palm 4 cm closer in y (orientation wins)
+HAND_FLEX = 1.1  # [rad]
+HAND_THUMB = (0.3, -1.2, 0.8, 0.5)  # [rad] joints 1_1 (abduction), 1_2 (opposition), 1_3, 1_4
+HAND_IK_WEIGHT = 3.0  # position target weight against the two orientation points
+HAND_CLOSE_START, HAND_CLOSE_STEPS, HAND_LIFT_END = 30, 25, 100
+HAND_CARRY_START = 65
+# The hand-cube island (27 DoFs, some 20 finger links in contact) occasionally runs out of Newton
+# iterations at ~5e-7 residual: stalls below this are accepted, worse steps are substepped.
+HAND_STALL_TOLERANCE = 1e-5
 TENDON_SCENE = "samples/tendon_comparison_articulation.mochi_scene"
 TENDON_SLIDER_GAINS = (200.0, 5.0)  # pose-controller gains of the tendon slider (prismatic joint)
 TENDON_HINGE_DAMPING = 0.02  # the finger hinges are passive: no stiffness, light damping
@@ -1018,8 +1043,131 @@ def build_grasp_task(soft: bool = False, fingertip_box_dir: pathlib.Path | None 
     return scene, bot, arm, cube, cube_position, context, controls0, goal, dt
 
 
+def spawn_hand_arm(scene, with_controller: bool = True, with_contact: bool = True):
+    """FR3 arm with the Tesollo DG-5F hand (20 revolute finger joints); the finger joints
+    get the gripper gains, the arm the reach/push gains times GRASP_ARM_GAIN_SCALE. The
+    returned end-effector actor is the palm link."""
+    arm_gains = _arm_gains()
+
+    def gains_of(name):
+        if name.startswith("fr3"):
+            k, d = arm_gains(name)
+            return GRASP_ARM_GAIN_SCALE * k, GRASP_ARM_GAIN_SCALE * d
+        return GRIPPER_GAINS
+
+    return spawn_bot(
+        scene, HAND_BOT, HAND_PALM_LINK, gains_of, with_controller, with_contact, GRASP_CONTACT
+    )
+
+
+def hand_ik_poses(points):
+    """Joint poses placing the palm center at each point with the fingers along +y and the
+    palm facing down (three position targets on the palm link: its center and two points 5 cm
+    along its local x and z axes), from a dedicated zero-gravity IK scene."""
+    scene = physics.create_scene("ik")
+    scene.set_gravity([0.0, 0.0, 0.0])
+    bot, arm, palm, context = spawn_hand_arm(scene, with_controller=False, with_contact=False)
+    solver = physics.experimental.create_ik_solver(scene)
+    params = solver.get_solver_params()
+    params.max_iter = 800
+    params.abs_tol = 1e-8
+    params.rel_tol = 1e-10
+    params.position_error_thres = 1e-4
+    solver.set_solver_params(params)
+    offset = 0.05
+    poses = []
+    for point in points:
+        point = np.asarray(point, dtype=np.float64)
+        solver.clear_position_target(palm.get_handle())
+        solver.create_position_target(palm.get_handle(), [0.0, 0.0, 0.0], list(point), HAND_IK_WEIGHT)
+        solver.create_position_target(
+            palm.get_handle(), [offset, 0.0, 0.0], list(point + np.array([0.0, 0.0, -offset])), 1.0
+        )
+        solver.create_position_target(
+            palm.get_handle(), [0.0, 0.0, offset], list(point + np.array([0.0, offset, 0.0])), 1.0
+        )
+        solver.solve_ik()
+        q = np.zeros(arm.get_num_dofs())
+        arm.get_articulated_pose(q)
+        reached = np.asarray(palm.get_center_of_mass_transform().translation)
+        print(f"  IK palm {np.round(point, 3)} -> {reached.round(3)}")
+        poses.append(q)
+    solver.clear_position_target(palm.get_handle())
+    robotics.destroy_bot(scene, bot)
+    physics.experimental.destroy_ik_solver(solver)
+    return poses
+
+
+def build_hand_grasp_task():
+    """Scene, actors and initial controls of the five-finger grasp (see the module docstring);
+    the same return value as :func:`build_grasp_task`."""
+    print("[robot_hand_grasp] IK for the descend / grasp / lift palm poses")
+    grasp = HAND_CUBE_POS + np.array([0.0, -HAND_BACK, HAND_UP])
+    q_pre, q_grasp, q_lift = hand_ik_poses(
+        [grasp + np.array([0.0, 0.0, 0.15]), grasp, grasp + np.array([0.0, 0.0, 0.25])]
+    )
+    scene = physics.create_scene("robot_hand_grasp")
+    scene.set_gravity([0.0, 0.0, -9.81])
+    bot, arm, palm, context = spawn_hand_arm(scene)
+    scene.create_rigid_actor(
+        name="ground",
+        shape=physics.create_plane_shape(normal=[0.0, 0.0, 1.0], distance=0.0),
+        is_static=True,
+        contact=GRASP_CONTACT,
+    )
+    cube = scene.create_rigid_actor(
+        name="cube",
+        shape=physics.create_tet_mesh_shape(coordinates=cube_coords(HAND_CUBE_HALF), connectivity=CUBE_CONN),
+        density=HAND_CUBE_DENSITY,
+        contact=GRASP_CONTACT,
+        world_from_local=physics.TransformRT(HAND_CUBE_POS.tolist()),
+    )
+    n = arm.get_num_dofs()
+    q0 = np.zeros(n)
+    arm.get_articulated_pose(q0)
+    hand_open = q0[7:].copy()
+    for q in (q_pre, q_grasp, q_lift):
+        q[7:] = hand_open  # the IK moves the fingers too; keep the hand open
+    arm.set_articulated_pose_from_joints(q_pre)
+    configure(scene)
+
+    def hand_closed(fraction: float) -> np.ndarray:
+        h = hand_open.copy()
+        for finger in range(2, 6):
+            b = 4 * (finger - 1)
+            for j, amount in ((1, HAND_FLEX), (2, HAND_FLEX), (3, 0.6 * HAND_FLEX)):
+                h[b + j] = hand_open[b + j] + fraction * (amount - hand_open[b + j])
+        for j in range(4):
+            h[j] = hand_open[j] + fraction * (HAND_THUMB[j] - hand_open[j])
+        return h
+
+    num_steps = HAND_LIFT_END
+    dt = 0.02
+    controls0 = interpolate_targets(
+        [(0, q_pre), (HAND_CLOSE_START, q_grasp), (HAND_CLOSE_START + HAND_CLOSE_STEPS, q_grasp), (num_steps, q_lift)],
+        num_steps,
+    )
+    for step in range(num_steps):
+        close = 0.0 if step < HAND_CLOSE_START else min(1.0, (step - HAND_CLOSE_START) / HAND_CLOSE_STEPS)
+        controls0[step, 7:] = hand_closed(close)
+
+    def cube_position() -> np.ndarray:
+        return np.asarray(cube.get_center_of_mass_transform().translation)
+
+    # Where the cube ends up in the grasp after the lift (measured on the initial trajectory),
+    # displaced sideways: the optimizer has to carry it there.
+    goal = np.array([0.49, 0.02, 0.30]) + GRASP_GOAL_OFFSET
+    return scene, bot, arm, cube, cube_position, context, controls0, goal, dt
+
+
 def task_grasp(output_dir: pathlib.Path, num_iterations: int, check: bool) -> None:
     _task_grasp_impl(output_dir, num_iterations, check, soft=False)
+
+
+def task_hand_grasp(output_dir: pathlib.Path, num_iterations: int, check: bool) -> None:
+    """The five-finger hand grasp (see :func:`build_hand_grasp_task`), optimized like
+    :func:`task_grasp`."""
+    _task_grasp_impl(output_dir, num_iterations, check, soft=False, hand=True)
 
 
 def task_grasp_soft(output_dir: pathlib.Path, num_iterations: int, check: bool) -> None:
@@ -1028,7 +1176,9 @@ def task_grasp_soft(output_dir: pathlib.Path, num_iterations: int, check: bool) 
     _task_grasp_impl(output_dir, num_iterations, check, soft=True)
 
 
-def _task_grasp_impl(output_dir: pathlib.Path, num_iterations: int, check: bool, soft: bool) -> None:
+def _task_grasp_impl(
+    output_dir: pathlib.Path, num_iterations: int, check: bool, soft: bool, hand: bool = False
+) -> None:
     """FR3 + 2F-85: descend onto a cube, close the fingers, lift it straight up.
     The goal for the cube lies 15 cm beside the lift line, so the loss (the
     cube's final position) can only be reduced by carrying the held cube
@@ -1042,14 +1192,20 @@ def _task_grasp_impl(output_dir: pathlib.Path, num_iterations: int, check: bool,
     parametrizes the carry by knots updated along the gradient's direction:
     Adam's first step moves every per-step target by the learning rate at
     once, and that jerk drops the cube too.)"""
-    name = "robot_grasp_soft" if soft else "robot_grasp"
-    scene, bot, arm, cube, cube_position, context, controls0, goal, dt = build_grasp_task(
-        soft, fingertip_box_dir=output_dir / "fingertip_boxes" if soft else None
-    )
+    if soft and hand:
+        raise ValueError("soft and hand are exclusive")
+    name = "robot_hand_grasp" if hand else ("robot_grasp_soft" if soft else "robot_grasp")
+    carry_start = HAND_CARRY_START if hand else GRASP_CARRY_START
+    if hand:
+        scene, bot, arm, cube, cube_position, context, controls0, goal, dt = build_hand_grasp_task()
+    else:
+        scene, bot, arm, cube, cube_position, context, controls0, goal, dt = build_grasp_task(
+            soft, fingertip_box_dir=output_dir / "fingertip_boxes" if soft else None
+        )
     # Optimize the arm's targets of the carry phase; the fingers keep their closure
     # (a finger shoving the cube sideways is the quickest way to move it, and to drop it).
     trainable = np.zeros(controls0.shape, dtype=bool)
-    trainable[GRASP_CARRY_START:, :7] = True
+    trainable[carry_start:, :7] = True
     # The carry-phase arm targets are the linear interpolation of GRASP_NUM_KNOTS knots.
     # The first knot is pinned to the trajectory at the carry start, so an update is a
     # ramp starting from rest rather than a jump (a jerk at the carry start drops the
@@ -1057,8 +1213,8 @@ def _task_grasp_impl(output_dir: pathlib.Path, num_iterations: int, check: bool,
     # other knots are the optimization variables. The initial carry phase is linear, so
     # the knots reproduce it exactly.
     num_steps = controls0.shape[0]
-    knots = np.linspace(GRASP_CARRY_START, num_steps - 1, GRASP_NUM_KNOTS).round().astype(int)
-    steps = np.arange(GRASP_CARRY_START, num_steps)
+    knots = np.linspace(carry_start, num_steps - 1, GRASP_NUM_KNOTS).round().astype(int)
+    steps = np.arange(carry_start, num_steps)
     weights = np.zeros((len(steps), len(knots)))
     for i, step in enumerate(steps):
         k = min(int(np.searchsorted(knots, step, side="right")) - 1, len(knots) - 2)
@@ -1071,7 +1227,7 @@ def _task_grasp_impl(output_dir: pathlib.Path, num_iterations: int, check: bool,
 
     def parametrize(params):
         carry = interp @ torch.cat([fixed_knot, params], dim=0)
-        arm_targets = torch.cat([base[:GRASP_CARRY_START, :7], carry], dim=0)
+        arm_targets = torch.cat([base[:carry_start, :7], carry], dim=0)
         return torch.cat([arm_targets, base[:, 7:]], dim=1)
 
     reproduced = parametrize(torch.tensor(params0, dtype=torch.float64)).numpy()
@@ -1090,7 +1246,7 @@ def _task_grasp_impl(output_dir: pathlib.Path, num_iterations: int, check: bool,
             else:
                 g = np.zeros(7)
                 g[:3] = d
-                diffsim.get_center_of_mass_transform_backward(target_cube, g)
+                diffsim.get_center_of_mass_transform_backward(cube, g)
 
     try:
         run_task(
@@ -1104,9 +1260,13 @@ def _task_grasp_impl(output_dir: pathlib.Path, num_iterations: int, check: bool,
             look_from=[1.4, -1.2, 0.7],
             look_at=[0.5, 0.0, 0.15],
             title=(
-                "FR3 + 2F-85 grasp of a soft cube: normalized gradient descent on the carry knots"
-                if soft
-                else "FR3 + 2F-85 grasp: normalized gradient descent on the carry knots through frictional contact"
+                "FR3 + DG-5F five-finger grasp: normalized gradient descent on the carry knots"
+                if hand
+                else (
+                    "FR3 + 2F-85 grasp of a soft cube: normalized gradient descent on the carry knots"
+                    if soft
+                    else "FR3 + 2F-85 grasp: normalized gradient descent on the carry knots through frictional contact"
+                )
             ),
             output_dir=output_dir,
             num_iterations=num_iterations,
@@ -1117,8 +1277,10 @@ def _task_grasp_impl(output_dir: pathlib.Path, num_iterations: int, check: bool,
             parametrize=parametrize,
             params0=params0,
             optimizer_kind="ngd",
-            substep_levels=PUSH_SUBSTEP_LEVELS if soft else 0,
-            stall_tolerance=PUSH_SOFT_STALL_TOLERANCE if soft else None,
+            substep_levels=PUSH_SUBSTEP_LEVELS if (soft or hand) else 0,
+            stall_tolerance=(
+                PUSH_SOFT_STALL_TOLERANCE if soft else (HAND_STALL_TOLERANCE if hand else None)
+            ),
         )
     finally:
         robotics.destroy_bot(scene, bot)
@@ -1487,7 +1649,7 @@ def main() -> None:
     parser.add_argument(
         "--task",
         choices=[
-            "reach", "push", "push_soft", "push_multi", "grasp", "grasp_soft", "tendon", "haul", "both", "all"
+            "reach", "push", "push_soft", "push_multi", "grasp", "grasp_soft", "hand", "tendon", "haul", "both", "all"
         ],
         default="all",
     )
@@ -1508,6 +1670,8 @@ def main() -> None:
         task_grasp(args.output_dir, args.iterations, args.check)
     if args.task in ("grasp_soft", "all"):
         task_grasp_soft(args.output_dir, args.iterations, args.check)
+    if args.task in ("hand", "all"):
+        task_hand_grasp(args.output_dir, args.iterations, args.check)
     if args.task in ("tendon", "all"):
         task_tendon(args.output_dir, args.iterations, args.check)
     if args.task in ("haul", "all"):

@@ -69,10 +69,10 @@ finite-difference check of the adjoint at the first iteration, `--check`):
 SUPERDEX_PRECISION=double python superdex_physics/examples/example_diffsim_robot_video.py --task all --check
 ```
 
-The tasks are `reach`, `push`, `push_soft`, `push_multi`, `grasp`, `grasp_soft`, `tendon`
-and `haul` (an FR3 arm reaching, pushing a rigid, a soft or two cubes, a 2F-85 gripper
-carrying a rigid or a soft cube, a tendon-driven finger with a rod as the cable, and the arm
-hauling a box with a cable); `example_diffsim_video.py` holds the actor-level demos, and
+The tasks are `reach`, `push`, `push_soft`, `push_multi`, `grasp`, `grasp_soft`, `hand`,
+`tendon` and `haul` (an FR3 arm reaching, pushing a rigid, a soft or two cubes, a 2F-85
+gripper carrying a rigid or a soft cube, a five-finger DG-5F hand carrying a cube, a
+tendon-driven finger with a rod as the cable, and the arm hauling a box with a cable); `example_diffsim_video.py` holds the actor-level demos, and
 `example_diffsim_sysid.py` identifies parameters from observed trajectories (a sliding cube's
 friction coefficient and density, or with `--mode soft` a dropped soft cube's Young's modulus and
 Poisson's ratio, recovered to 0.01%).
