@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -334,30 +335,35 @@ class LoaderTest(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            package_dir = Path(temp_dir) / "superdex" / "physics"
-            (package_dir / "_native").mkdir(parents=True)
-            error = ModuleNotFoundError(name="mochi_physics_double")
+            # Earlier tests may have imported the native module; the loader returns a cached
+            # module from sys.modules, so isolate this test from that state.
+            with patch.dict(sys.modules):
+                for cached in ("mochi_physics_double", "mochi_physics"):
+                    sys.modules.pop(cached, None)
+                package_dir = Path(temp_dir) / "superdex" / "physics"
+                (package_dir / "_native").mkdir(parents=True)
+                error = ModuleNotFoundError(name="mochi_physics_double")
 
-            with (
-                patch.object(loader, "__file__", str(package_dir / "loader.py")),
-                patch.object(loader, "PRECISION_NAME", "double"),
-                patch.object(loader, "USE_DOUBLE_PRECISION", True),
-                patch.object(
-                    loader,
-                    "site_packages_root",
-                    return_value=Path(temp_dir) / "site-packages",
-                ),
-                patch.object(loader.importlib.util, "find_spec", _find_spec_for({})),
-                patch.object(loader.importlib, "import_module", side_effect=error),
-                self.assertRaisesRegex(
-                    loader.NativeModuleNotFoundError,
-                    r"pip install 'superdex-physics\[double\]'",
-                ) as context,
-            ):
-                loader.import_module("mochi_physics", payload=_PHYSICS_PAYLOAD)
+                with (
+                    patch.object(loader, "__file__", str(package_dir / "loader.py")),
+                    patch.object(loader, "PRECISION_NAME", "double"),
+                    patch.object(loader, "USE_DOUBLE_PRECISION", True),
+                    patch.object(
+                        loader,
+                        "site_packages_root",
+                        return_value=Path(temp_dir) / "site-packages",
+                    ),
+                    patch.object(loader.importlib.util, "find_spec", _find_spec_for({})),
+                    patch.object(loader.importlib, "import_module", side_effect=error),
+                    self.assertRaisesRegex(
+                        loader.NativeModuleNotFoundError,
+                        r"pip install 'superdex-physics\[double\]'",
+                    ) as context,
+                ):
+                    loader.import_module("mochi_physics", payload=_PHYSICS_PAYLOAD)
 
-            self.assertIn("installed: single", str(context.exception))
-            self.assertIs(context.exception.__cause__, error)
+                self.assertIn("installed: single", str(context.exception))
+                self.assertIs(context.exception.__cause__, error)
 
     def test_import_module_names_the_robotics_double_extra(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -390,21 +396,26 @@ class LoaderTest(unittest.TestCase):
         # A source checkout packages neither precision, so naming a pip extra would be
         # misleading advice.
         with tempfile.TemporaryDirectory() as temp_dir:
-            package_dir = Path(temp_dir) / "superdex" / "physics"
-            package_dir.mkdir(parents=True)
-            error = ModuleNotFoundError(name="mochi_physics_double")
+            # Earlier tests may have imported the native module; the loader returns a cached
+            # module from sys.modules, so isolate this test from that state.
+            with patch.dict(sys.modules):
+                for cached in ("mochi_physics_double", "mochi_physics"):
+                    sys.modules.pop(cached, None)
+                package_dir = Path(temp_dir) / "superdex" / "physics"
+                package_dir.mkdir(parents=True)
+                error = ModuleNotFoundError(name="mochi_physics_double")
 
-            with (
-                patch.object(loader, "__file__", str(package_dir / "loader.py")),
-                patch.object(loader, "PRECISION_NAME", "double"),
-                patch.object(loader, "USE_DOUBLE_PRECISION", True),
-                patch.object(loader.importlib.util, "find_spec", _find_spec_for({})),
-                patch.object(loader.importlib, "import_module", side_effect=error),
-                self.assertRaises(loader.NativeModuleNotFoundError) as context,
-            ):
-                loader.import_module("mochi_physics", payload=_PHYSICS_PAYLOAD)
+                with (
+                    patch.object(loader, "__file__", str(package_dir / "loader.py")),
+                    patch.object(loader, "PRECISION_NAME", "double"),
+                    patch.object(loader, "USE_DOUBLE_PRECISION", True),
+                    patch.object(loader.importlib.util, "find_spec", _find_spec_for({})),
+                    patch.object(loader.importlib, "import_module", side_effect=error),
+                    self.assertRaises(loader.NativeModuleNotFoundError) as context,
+                ):
+                    loader.import_module("mochi_physics", payload=_PHYSICS_PAYLOAD)
 
-            self.assertNotIn("pip install", str(context.exception))
+                self.assertNotIn("pip install", str(context.exception))
 
     def test_import_module_ignores_disabled_source_build_helper(self) -> None:
         runtime_module = ModuleType("runtime_module")
