@@ -74,6 +74,12 @@ solved with failure-adaptive substepping (``PUSH_SUBSTEP_LEVELS`` halvings of
 the step, each substep its own adjoint step, see
 ``superdex.physics.diffsim_rollout``); the guard reports which steps were
 split, and the replay used for the video takes the same substeps.
+``robot_push_multi.mp4`` (``--task push_multi``) is the push with two cubes in a
+row: the end effector pushes the first cube, which pushes the second; the loss
+is the second cube's final position, so the gradient crosses two frictional
+contacts (arm-cube and cube-cube, both sync contacts of the validated rigid
+paths) and the ground friction of both cubes.
+
 ``robot_haul.mp4`` (``--task haul``) hauls a box with a cable: a rod actor tied by
 node-to-rigid constraints to the FR3's end-effector link and to the top of a box
 on the ground; the arm's joint targets are optimized so that the dragged box
@@ -736,10 +742,22 @@ def task_push_soft(output_dir: pathlib.Path, num_iterations: int, check: bool) -
     _task_push_impl(output_dir, num_iterations, check, soft=True)
 
 
-def _task_push_impl(output_dir: pathlib.Path, num_iterations: int, check: bool, soft: bool) -> None:
-    name = "robot_push_soft" if soft else "robot_push"
+def task_push_multi(output_dir: pathlib.Path, num_iterations: int, check: bool) -> None:
+    _task_push_impl(output_dir, num_iterations, check, soft=False, multi=True)
+
+
+PUSH_MULTI_GAP = 0.01  # [m] between the two cubes at the start
+PUSH_MULTI_GOAL = np.array([0.93, 0.06, CUBE_HALF])  # for the second cube
+
+
+def _task_push_impl(
+    output_dir: pathlib.Path, num_iterations: int, check: bool, soft: bool, multi: bool = False
+) -> None:
+    if soft and multi:
+        raise ValueError("soft and multi are exclusive")
+    name = "robot_push_multi" if multi else ("robot_push_soft" if soft else "robot_push")
     cube_start = np.array([0.55, 0.0, CUBE_HALF - 0.001])
-    goal = np.array([0.80, 0.10, CUBE_HALF])
+    goal = PUSH_MULTI_GOAL if multi else np.array([0.80, 0.10, CUBE_HALF])
     # Pre-push pose and a straight slow sweep, from IK on the end effector.
     print(f"[{name}] IK for the initial joint-target trajectory")
     # The engine's IK is a quasi-static simulation towards the target, solved
@@ -798,6 +816,25 @@ def _task_push_impl(output_dir: pathlib.Path, num_iterations: int, check: bool, 
         def cube_position() -> np.ndarray:
             return np.asarray(cube.get_center_of_mass_transform().translation)
 
+    if multi:
+        # The second cube, in the push line right behind the first; the loss is on it.
+        cube2 = scene.create_rigid_actor(
+            name="cube2",
+            shape=physics.create_tet_mesh_shape(coordinates=cube_coords(CUBE_HALF), connectivity=CUBE_CONN),
+            density=300.0,
+            contact=CONTACT,
+            world_from_local=physics.TransformRT(
+                (cube_start + np.array([2.0 * CUBE_HALF + PUSH_MULTI_GAP, 0.0, 0.0])).tolist()
+            ),
+        )
+        target_cube = cube2
+
+        def cube_position() -> np.ndarray:  # noqa: F811 - the tracked object is the second cube
+            return np.asarray(cube2.get_center_of_mass_transform().translation)
+
+    else:
+        target_cube = cube
+
     arm.set_articulated_pose_from_joints(poses[0])
     configure(scene)
 
@@ -814,7 +851,7 @@ def _task_push_impl(output_dir: pathlib.Path, num_iterations: int, check: bool, 
             else:
                 g = np.zeros(7)
                 g[:3] = d
-                diffsim.get_center_of_mass_transform_backward(cube, g)
+                diffsim.get_center_of_mass_transform_backward(target_cube, g)
 
     try:
         run_task(
@@ -830,7 +867,11 @@ def _task_push_impl(output_dir: pathlib.Path, num_iterations: int, check: bool, 
             title=(
                 "FR3 push of a soft cube: Adam on the joint targets, failure-adaptive substeps"
                 if soft
-                else "FR3 push: Adam on the joint-target trajectory through frictional contact"
+                else (
+                    "FR3 push of two cubes: Adam on the joint targets through two frictional contacts"
+                    if multi
+                    else "FR3 push: Adam on the joint-target trajectory through frictional contact"
+                )
             ),
             output_dir=output_dir,
             num_iterations=num_iterations,
@@ -1045,7 +1086,7 @@ def _task_grasp_impl(output_dir: pathlib.Path, num_iterations: int, check: bool,
             else:
                 g = np.zeros(7)
                 g[:3] = d
-                diffsim.get_center_of_mass_transform_backward(cube, g)
+                diffsim.get_center_of_mass_transform_backward(target_cube, g)
 
     try:
         run_task(
@@ -1439,7 +1480,9 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=40)
     parser.add_argument(
         "--task",
-        choices=["reach", "push", "push_soft", "grasp", "grasp_soft", "tendon", "haul", "both", "all"],
+        choices=[
+            "reach", "push", "push_soft", "push_multi", "grasp", "grasp_soft", "tendon", "haul", "both", "all"
+        ],
         default="all",
     )
     parser.add_argument("--check", action="store_true", help="finite-difference gradient check first")
@@ -1453,6 +1496,8 @@ def main() -> None:
         task_push(args.output_dir, args.iterations, args.check)
     if args.task in ("push_soft", "all"):
         task_push_soft(args.output_dir, args.iterations, args.check)
+    if args.task in ("push_multi", "all"):
+        task_push_multi(args.output_dir, args.iterations, args.check)
     if args.task in ("grasp", "all"):
         task_grasp(args.output_dir, args.iterations, args.check)
     if args.task in ("grasp_soft", "all"):
