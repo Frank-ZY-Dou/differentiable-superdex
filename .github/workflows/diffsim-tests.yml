@@ -62,10 +62,12 @@ jobs:
       - name: Install the wheels and the torch bridge's dependency
         shell: bash
         run: |
-          python -m pip install --find-links wheelhouse superdex-physics superdex-physics-fp64
+          # The wheel files themselves: with `--find-links` alone pip may prefer the PyPI
+          # release of the same version, which carries the upstream engine.
+          python -m pip install wheelhouse/superdex_physics-*.whl wheelhouse/superdex_physics_fp64-*.whl
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-          python -c "import superdex.physics as p; print('single precision import ok')"
-          SUPERDEX_PRECISION=double python -c "import superdex.physics as p; assert p.uses_double_precision(); print('double precision import ok')"
+          python -c "import superdex.physics as p; assert hasattr(p.diffsim, 'set_gravity_backward'), 'not this checkout''s engine'; print('single precision import ok', p.__file__)"
+          SUPERDEX_PRECISION=double python -c "import superdex.physics as p; assert p.uses_double_precision(); assert hasattr(p.diffsim, 'set_gravity_backward'), 'not this checkout''s engine'; print('double precision import ok')"
       - name: Test in double precision (diffsim gradient checks, torch bridge)
         shell: bash
         working-directory: superdex_python
