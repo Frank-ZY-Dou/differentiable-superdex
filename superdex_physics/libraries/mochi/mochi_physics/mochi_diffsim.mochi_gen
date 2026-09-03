@@ -54,7 +54,7 @@ struct diffsim::BackPropagationSceneStats [no_reflection] {
   // back-propagation step.
   int maxOuterIters;
 
-  // @brief Final residual norm of the adjoint solve in the last back-propagation step.
+  // @brief Final residual norm of the adjoint solve in the last back-propagation step: the true residual ||H z - rhs|| of the returned solution (one extra Hessian-vector product), not the solver's internal estimate.
   double residualNorm;
 
   // @brief True if every finite-difference Hvp validation check across every island and every Hvp

@@ -115,7 +115,7 @@ class BackPropagationSceneStats:
     back-propagation step.
     """
     residual_norm: float
-    """Final residual norm of the adjoint solve in the last back-propagation step.
+    """Final residual norm of the adjoint solve in the last back-propagation step: the true residual ||H z - rhs|| of the returned solution (one extra Hessian-vector product), not the solver's internal estimate.
 
     With :attr:`~superdex.physics.diffsim.BackPropagationSolverParams.validate_finite_diff`
     set, this is the true residual ``|H z - rhs|`` of the returned solution, recomputed
