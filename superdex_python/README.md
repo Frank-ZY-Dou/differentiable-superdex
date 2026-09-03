@@ -87,7 +87,9 @@ Poisson's ratio, recovered to 0.01%).
 The rigid tasks use the engine's default contact stiffness (1e9 Pa/m, `physics.ContactParams()`):
 a softer material lets a position-controlled arm sink visibly into what it pushes. The soft
 tasks use a stiffness commensurate with their material (1e6 on a 1e5 Pa cube), the level at
-which their Newton solve still converges to the tolerance the adjoint needs.
+which their Newton solve still converges to the tolerance the adjoint needs. Known issue: the
+five-finger hand grasp (`--task hand`) still relies on a compliant 1e6 contact, and its fingers
+pass into the cube; at the default stiffness its closure pushes the cube away.
 
 Cost (one thread, double precision, a 2026 desktop CPU): the FR3 arm pushing a cube
 (75 steps of 20 ms) runs at about 6 ms per forward step and 4 ms per adjoint step, a

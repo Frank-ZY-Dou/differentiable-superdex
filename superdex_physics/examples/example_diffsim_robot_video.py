@@ -94,7 +94,9 @@ policies on every start.
 (FR3 + Tesollo DG-5F): the hand comes down over a cube with the fingers
 horizontal, wraps fingers 2-3 over its far side and the thumb over the near side,
 lifts it, and the carry knots are optimized like the gripper grasp (27 controlled
-DoFs, some 20 finger links in frictional contact).
+DoFs, some 20 finger links in frictional contact). Known issue: this grasp relies
+on a compliant contact (``HAND_CONTACT``, 1e6 Pa/m) and the fingers pass into the
+cube; see the constant's comment.
 
 ``robot_push_multi.mp4`` (``--task push_multi``) is the push with two cubes in a
 row: the end effector pushes the first cube, which pushes the second; the loss
@@ -164,7 +166,10 @@ GRIPPER_GAINS = (8.0, 0.8)
 # gripper (which adds 1 kg at the wrist) settles within a few millimetres of the IK pose
 # under gravity before the fingers close, and grasps with a higher friction material.
 GRASP_ARM_GAIN_SCALE = 6.0
-GRASP_CONTACT = physics.ContactParams(penalty_coefficient=1e6, coulomb_friction_coefficient=0.8)
+# The engine's default stiffness with a higher friction (see CONTACT): at 1e6 the fingertip pads
+# sank 15 mm into the 5 cm cube, at 1e9 3.4 mm; the gradient checks are alike (along the
+# gradient 1.4e-4, the stiff closed-loop island makes single entries rough either way).
+GRASP_CONTACT = physics.ContactParams(penalty_coefficient=1e9, coulomb_friction_coefficient=0.8)
 GRASP_CUBE_HALF = 0.025
 GRASP_CLOSE0 = 0.3  # initial finger closure [rad]: holds the cube through a gentle lift
 GRASP_CUBE_DENSITY = 2000.0  # [kg/m^3]: a 5 cm cube of 0.25 kg
@@ -214,6 +219,12 @@ HAND_CARRY_START = 65
 # The hand-cube island (27 DoFs, some 20 finger links in contact) occasionally runs out of Newton
 # iterations at ~5e-7 residual: stalls below this are accepted, worse steps are substepped.
 HAND_STALL_TOLERANCE = 1e-5
+# KNOWN ISSUE: the five-finger grasp only holds the cube with a compliant contact. At this
+# stiffness the fingers pass up to 3.5 cm into the 7 cm cube (they cage it from inside); at the
+# engine default (1e9, see GRASP_CONTACT) the closure pushes the cube away and the hand lifts
+# empty, in every palm height / offset / flexion / thumb / cube size tried. A closure that wraps
+# the cube physically (pre-shaped fingers, thumb opposition) is pending.
+HAND_CONTACT = physics.ContactParams(penalty_coefficient=1e6, coulomb_friction_coefficient=0.8)
 TENDON_SCENE = "samples/tendon_comparison_articulation.mochi_scene"
 TENDON_SLIDER_GAINS = (200.0, 5.0)  # pose-controller gains of the tendon slider (prismatic joint)
 TENDON_HINGE_DAMPING = 0.02  # the finger hinges are passive: no stiffness, light damping
@@ -392,7 +403,7 @@ def spawn_arm(scene, with_controller: bool = True, with_contact: bool = True, co
 
 
 def spawn_gripper_arm(
-    scene, with_controller: bool = True, with_contact: bool = True, link_shape_files=None
+    scene, with_controller: bool = True, with_contact: bool = True, link_shape_files=None, contact=None
 ):
     """FR3 arm with the Robotiq 2F-85 gripper (a closed-loop linkage: two of its
     joints are welded cycle closures, six are revolute); the gripper's revolute
@@ -414,7 +425,7 @@ def spawn_gripper_arm(
         gains_of,
         with_controller,
         with_contact,
-        GRASP_CONTACT,
+        GRASP_CONTACT if contact is None else contact,
         link_shape_files,
     )
 
@@ -1483,7 +1494,7 @@ def spawn_hand_arm(scene, with_controller: bool = True, with_contact: bool = Tru
         return GRIPPER_GAINS
 
     return spawn_bot(
-        scene, HAND_BOT, HAND_PALM_LINK, gains_of, with_controller, with_contact, GRASP_CONTACT
+        scene, HAND_BOT, HAND_PALM_LINK, gains_of, with_controller, with_contact, HAND_CONTACT
     )
 
 
@@ -1540,13 +1551,13 @@ def build_hand_grasp_task():
         name="ground",
         shape=physics.create_plane_shape(normal=[0.0, 0.0, 1.0], distance=0.0),
         is_static=True,
-        contact=GRASP_CONTACT,
+        contact=HAND_CONTACT,
     )
     cube = scene.create_rigid_actor(
         name="cube",
         shape=physics.create_tet_mesh_shape(coordinates=cube_coords(HAND_CUBE_HALF), connectivity=CUBE_CONN),
         density=HAND_CUBE_DENSITY,
-        contact=GRASP_CONTACT,
+        contact=HAND_CONTACT,
         world_from_local=physics.TransformRT(HAND_CUBE_POS.tolist()),
     )
     n = arm.get_num_dofs()

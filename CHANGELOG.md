@@ -31,8 +31,10 @@ All notable changes to this repository will be documented here.
   feedback policy trained on top of an optimized open-loop plan on three cube starts against an
   open-loop baseline, gripper grasp, soft grasp, five-finger hand grasp, tendon finger, cable haul).
   The rigid tasks use the engine's default contact stiffness (1e9 Pa/m): the 1e6 material of the
-  first version let the wrist sink about a centimetre into the pushed cube; the soft push keeps
-  a 1e6 contact commensurate with its 1e5 Pa material (at 1e9 its Newton solve fails).
+  first version let the wrist sink about a centimetre into the pushed cube and the gripper's
+  fingertips 15 mm into the grasped one; the soft push keeps a 1e6 contact commensurate with its
+  1e5 Pa material (at 1e9 its Newton solve fails), the soft grasp its 1e7 cube. Known issue: the
+  five-finger hand grasp still needs a compliant contact (the fingers pass into the cube).
   and
   `example_diffsim_sysid.py --mode soft` (Young's modulus and Poisson's ratio identification).
 - CI: `diffsim-tests` workflow builds both physics wheels and runs the suite in both precisions.
