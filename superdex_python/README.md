@@ -84,6 +84,11 @@ cable, and the arm hauling a box with a cable); `example_diffsim_video.py` holds
 friction coefficient and density, or with `--mode soft` a dropped soft cube's Young's modulus and
 Poisson's ratio, recovered to 0.01%).
 
+The rigid tasks use the engine's default contact stiffness (1e9 Pa/m, `physics.ContactParams()`):
+a softer material lets a position-controlled arm sink visibly into what it pushes. The soft
+tasks use a stiffness commensurate with their material (1e6 on a 1e5 Pa cube), the level at
+which their Newton solve still converges to the tolerance the adjoint needs.
+
 Cost (one thread, double precision, a 2026 desktop CPU): the FR3 arm pushing a cube
 (75 steps of 20 ms) runs at about 6 ms per forward step and 4 ms per adjoint step, a
 forward-plus-backward rollout in under a second; with a soft cube (64 nodes) the adjoint step

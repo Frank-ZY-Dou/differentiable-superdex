@@ -236,6 +236,7 @@ PUSH_SOFT_DENSITY = 300.0  # [kg/m^3]
 PUSH_SOFT_MASS_DAMPING = 1.0  # [1/s]
 PUSH_SOFT_CELLS = 3  # tet-mesh resolution per side
 PUSH_SOFT_FALLOFF = 0.1  # [m/s]
+PUSH_SOFT_PENALTY = 1e6  # [Pa/m] contact stiffness of the soft push (cube, arm, ground); see _task_push_impl
 PUSH_SUBSTEP_LEVELS = 2  # failure-adaptive substepping: at most dt/4
 # The soft cube's Newton solve stalls on round-off at ~1e-5 residual (1e6 penalty samples on a
 # 1e5 Pa body; the arm-only tasks stall at ~1e-9): stalls below this are accepted, the limit-cycle
@@ -249,7 +250,12 @@ GRASP_SOFT_FALLOFF = 0.1  # [m/s] friction falloff velocity of the cube (see PUS
 # fingertips sink through the layer instead of indenting the cube and the grasp slips during
 # the lift; at 1e7 the cube is carried (fingertip forces 6-7 N at closure, 1.2-1.7 N in the air).
 GRASP_SOFT_PENALTY = 1e7
-CONTACT = physics.ContactParams(penalty_coefficient=1e6, coulomb_friction_coefficient=0.4)
+# The engine's default contact stiffness (1e9 Pa/m). A 1e6 material, kept from the first
+# gradient checks, let the wrist links sink ~1 cm into the pushed cube and the cube 3.5 mm into
+# the ground (a penalty contact is compliant, and the joint controller pushes on); at 1e9 the
+# penetration is ~1 mm, the forward Newton solve needs fewer iterations (40 vs 65 on average)
+# and the adjoint's gradient check is as clean (entries agree with FD to 1e-6..2e-5).
+CONTACT = physics.ContactParams(penalty_coefficient=1e9, coulomb_friction_coefficient=0.4)
 # The arm's links carry the same frictional material as the cube: the contact
 # pair combines both owners' coefficients by geometric mean, so the arm pushes
 # the cube through frictional contact (and the cube slides on the ground with
@@ -380,9 +386,9 @@ def _arm_gains():
     return lambda name: next(gains)
 
 
-def spawn_arm(scene, with_controller: bool = True, with_contact: bool = True):
+def spawn_arm(scene, with_controller: bool = True, with_contact: bool = True, contact=None):
     """FR3 arm; see :func:`spawn_bot`."""
-    return spawn_bot(scene, ARM_BOT, EE_LINK, _arm_gains(), with_controller, with_contact)
+    return spawn_bot(scene, ARM_BOT, EE_LINK, _arm_gains(), with_controller, with_contact, contact)
 
 
 def spawn_gripper_arm(
@@ -1206,12 +1212,24 @@ def _task_push_impl(
 
     scene = physics.create_scene("Differentiable push" + (" (soft cube)" if soft else ""))
     scene.set_gravity(GRAVITY)
-    bot, arm, ee, context = spawn_arm(scene)
+    # A soft body's contact stiffness has to sit within a few decades of its material's: at
+    # the engine default (1e9 Pa/m on a 1e5 Pa cube) the forward Newton solve fails hard at
+    # isolated steps even substepped; the validated PUSH_SOFT_PENALTY is used by the cube,
+    # the arm and the ground of the soft push (a pair combines both penalties).
+    task_contact = (
+        physics.ContactParams(
+            penalty_coefficient=PUSH_SOFT_PENALTY,
+            coulomb_friction_coefficient=CONTACT.coulomb_friction_coefficient,
+        )
+        if soft
+        else CONTACT
+    )
+    bot, arm, ee, context = spawn_arm(scene, contact=task_contact)
     scene.create_rigid_actor(
         name="ground",
         shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
         is_static=True,
-        contact=CONTACT,
+        contact=task_contact,
     )
     if soft:
         coordinates, connectivity = box_tet_mesh(size=2.0 * CUBE_HALF, cells=PUSH_SOFT_CELLS)
@@ -1227,7 +1245,7 @@ def _task_push_impl(
             shape=physics.create_tet_mesh_shape(coordinates=coordinates, connectivity=connectivity),
             material=material,
             contact=physics.ContactParams(
-                penalty_coefficient=CONTACT.penalty_coefficient,
+                penalty_coefficient=PUSH_SOFT_PENALTY,
                 coulomb_friction_coefficient=CONTACT.coulomb_friction_coefficient,
                 friction_falloff_vel=PUSH_SOFT_FALLOFF,
             ),
@@ -1315,7 +1333,9 @@ def _task_push_impl(
             dt=0.02,
             check=check,
             grad_clip=0.02,
-            substep_levels=PUSH_SUBSTEP_LEVELS if soft else 0,
+            # The soft cube and the cube-cube impact of the two-cube push (stiff, engine-default
+            # contact) each trap the forward Newton solve at isolated steps: substep them.
+            substep_levels=PUSH_SUBSTEP_LEVELS if (soft or multi) else 0,
             stall_tolerance=PUSH_SOFT_STALL_TOLERANCE if soft else None,
         )
     finally:
