@@ -45,9 +45,10 @@ contact included. Three layers build on each other:
 - `superdex.physics.diffsim_torch.TorchRollout` - a `torch.autograd.Function` around the
   driver: controls, external forces, gravity, contact materials, densities, soft initial states
   and soft material parameters as differentiable tensors; `PolicyRollout` closes the loop: a
-  torch policy maps the observed joint poses / positions to the controller targets and/or the
-  external forces (joint torques) at every step and its parameters receive the loss gradient
-  through the simulator, feedback included (analytic policy gradients).
+  torch policy maps the observed joint poses, rigid positions and soft-body centroids to the
+  controller targets and/or the external forces (joint torques) at every step and its
+  parameters receive the loss gradient through the simulator, feedback included (analytic
+  policy gradients).
 
 Supported: rigid, articulated (with pose controllers), soft (tetrahedral FEM) and rod actors;
 contact between them and against static colliders (a soft or rod actor collides with rigid and
@@ -74,7 +75,8 @@ SUPERDEX_PRECISION=double python superdex_physics/examples/example_diffsim_robot
 
 The tasks are `reach`, `push`, `push_soft`, `push_multi`, `push_policy`, `grasp`, `grasp_soft`,
 `hand`, `tendon` and `haul` (an FR3 arm reaching, pushing a rigid, a soft or two cubes, the push
-solved by a feedback policy trained through the simulator, a 2F-85 gripper carrying a rigid or a
+solved by a feedback policy trained through the simulator on three cube starts at once against
+an open-loop baseline of the same architecture, a 2F-85 gripper carrying a rigid or a
 soft cube, a five-finger DG-5F hand carrying a cube, a tendon-driven finger with a rod as the
 cable, and the arm hauling a box with a cable); `example_diffsim_video.py` holds the actor-level demos, and
 `example_diffsim_sysid.py` identifies parameters from observed trajectories (a sliding cube's
@@ -95,7 +97,16 @@ small approximation proportional to the torque (2e-4 relative at 0.3 N m on a 0.
 without torques; pinned by a test); the stiffness damping of
 soft materials, a deformable actor acting as a collider, and mesh colliders are not
 differentiable; a soft body pressed and dragged by a link can trap the forward Newton solve at
-isolated steps, which the driver's substepping resolves (see the examples' docstrings).
+isolated steps, which the driver's substepping resolves (see the examples' docstrings). Losses
+through frictional contact are piecewise smooth: at steps where the forward Newton solve is
+nearly degenerate (100+ iterations to a 1e-9 residual, an arm pushing a cube over the ground)
+a parameter perturbation of a few 1e-8 can land it on another local solution, a jump of about
+1e-7 in the loss (5e-6 m in a cube position). The adjoint is the exact derivative of the branch
+taken (finite differences agree to 1e-3 at eps 1e-8, and to 1e-5 where the loss is smooth); a
+finite-difference check of such a loss needs eps at or below 1e-7 and a self-consistency test
+across epsilons, as the examples' `--check` reports, and an optimizer a line search on the loss
+itself rather than a fixed step (the feedback-policy demo: a step that loses the contact lands
+on the zero-gradient plateau of the untouched cube, from which no gradient recovers).
 
 ## License
 

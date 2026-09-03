@@ -158,6 +158,7 @@ SOFT_MATERIAL_FIELDS = (
 
 __all__ = [
     "ArticulatedPoseObservation",
+    "SoftCentroidObservation",
     "CONTACT_PARAM_FIELDS",
     "PolicyRollout",
     "PolicyRolloutResult",
@@ -625,6 +626,27 @@ class ArticulatedPoseObservation:
         diffsim.get_articulated_pose_backward(
             self.actor, np.ascontiguousarray(grad, dtype=_real_dtype())
         )
+
+
+class SoftCentroidObservation:
+    """The mean nodal displacement of a soft actor (the displacement of its node centroid, in
+    the world frame) as an observation."""
+
+    size = 3
+
+    def __init__(self, actor):
+        if actor.get_type() != physics.ActorType.SOFT:
+            raise ValueError(f"{actor.get_name()!r} is not a soft actor")
+        self.actor = actor
+        self.num_nodes = actor.get_num_dofs() // 3
+
+    def value(self) -> np.ndarray:
+        displacements = np.asarray(self.actor.get_displacements(), dtype=np.float64)
+        return displacements.reshape(self.num_nodes, 3).mean(axis=0)
+
+    def accumulate_output_grad(self, grad: np.ndarray) -> None:
+        nodal = np.tile(np.asarray(grad, dtype=_real_dtype()) / self.num_nodes, self.num_nodes)
+        diffsim.get_displacements_backward(self.actor, np.ascontiguousarray(nodal))
 
 
 class TranslationObservation:

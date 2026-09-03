@@ -22,11 +22,13 @@ All notable changes to this repository will be documented here.
   rollout driver (`DifferentiableRollout(max_substep_levels=...)`, each substep its own adjoint
   step).
 - `superdex.physics.diffsim_torch.PolicyRollout`: closed-loop rollouts with a torch policy in
-  the loop (pose-controller targets and/or external forces such as joint torques as the policy
+  the loop (joint poses, rigid positions and soft-body centroids as observations;
+  pose-controller targets and/or external forces such as joint torques as the policy
   output); the policy parameters receive the loss gradient through the simulator, feedback
   path included (analytic policy gradients).
 - Examples: `example_diffsim_robot_video.py` (reach, push, soft push, two-cube push, push with a
-  feedback policy, gripper grasp, soft grasp, five-finger hand grasp, tendon finger, cable haul)
+  feedback policy trained on three cube starts with a backtracking line search against an
+  open-loop baseline, gripper grasp, soft grasp, five-finger hand grasp, tendon finger, cable haul)
   and
   `example_diffsim_sysid.py --mode soft` (Young's modulus and Poisson's ratio identification).
 - CI: `diffsim-tests` workflow builds both physics wheels and runs the suite in both precisions.
