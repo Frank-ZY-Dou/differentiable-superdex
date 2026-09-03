@@ -1239,6 +1239,19 @@ static void StepJacobianSolveIslandAsync(
   };
   SnleProblem<real> problem(dofsSize, solutionSize, std::move(functions));
 
+  // The island pre-step operation and the time-integrator state of the restored step (as in
+  // PrepareBackPropagationIslandAsync): without them the assemblies would use the stage size of
+  // whichever step ran last, wrong as soon as consecutive steps differ in size.
+  PreStepIslandAsync(reg, descendants);
+  auto const& simParams = reg.ctx<CSimulationParams const>();
+  MOCHI_ASSERT(
+      simParams.integrationMethod == IntegrationMethod::BackwardEuler,
+      "Only Backward Euler is supported")
+  auto const integrationParams =
+      solver::CreateIslandTimeIntegrationParams(reg, descendants, simParams.integrationMethod);
+  MOCHI_ASSERT(integrationParams.numStages == 1);
+  solver::SetTimeIntegratorState(reg, descendants.actors, integrationParams, /*iStage*/ 0);
+
   // Set the stage-start state
   solver::PreFirstStageLocalPipeline(reg, descendants);
   solver::PreStageLocalPipeline(reg, descendants, problem);

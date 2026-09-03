@@ -103,8 +103,14 @@ class StepJacobianTest(unittest.TestCase):
         return grad_lie
 
     def test_rigid_step_jacobian_vs_adjoint(self) -> None:
-        # Both steps use the same dt: get_step_jacobian assumes that (see its docs).
-        dts = (DT, DT)
+        self._check_two_step_chain((DT, DT))
+
+    def test_rigid_step_jacobian_vs_adjoint_variable_dt(self) -> None:
+        # The second step is half as long: the delta block dq/dDx of the step Jacobian is
+        # rescaled by dt_2 / dt_1 (as the adjoint's previous-delta is) to chain.
+        self._check_two_step_chain((DT, DT / 2))
+
+    def _check_two_step_chain(self, dts) -> None:
         scene, cube = scenes.rigid_on_plane(
             "coulomb", initial_velocity=(0.0, 0.0, 0.0)
         )

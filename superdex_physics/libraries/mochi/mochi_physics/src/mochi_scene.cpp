@@ -1555,6 +1555,7 @@ void SceneImpl::GetStepJacobian(
   // Set the new state (with the current state as previous).
   RestoreStatePair(stateNew, stateCurr, error);
   MOCHI_ERROR_RETURN(error);
+  double const dtNew = _registry.ctx<CSceneTime const>().DeltaTime();
 
   // Compute dq_t/dq_t-1 and dq_t/dDx
   // Store dq_t/dq_t-1 in jacCurrView
@@ -1563,11 +1564,20 @@ void SceneImpl::GetStepJacobian(
   StepJacobianSolve(_registry, jacCurrView);
 
   // Set the current state (with the old state as previous).
-  // NOTE: dq_t/dDx_t-1 is assembled under v_t-1 = Dx_t-1 / dt_t; the chain below therefore
-  // assumes that the step stateOld -> stateCurr used the same step size as stateCurr -> stateNew
-  // (documented in the public API). The back-propagation path handles variable step sizes.
   RestoreStatePair(stateCurr, stateOld, error);
   MOCHI_ERROR_RETURN(error);
+
+  // dq_t/dDx_t-1 was assembled under v_t-1 = Dx_t-1 / dt_t, while the delta was produced by the
+  // previous step with v_t-1 = Dx_t-1 / dt_t-1: rescale by dt_t / dt_t-1 (1 for uniform steps;
+  // the same factor SceneImpl::BackPropagate applies to the previous-delta adjoint).
+  double const dtCurr = _registry.ctx<CSceneTime const>().DeltaTime();
+  real const deltaScale = static_cast<real>(dtNew / dtCurr);
+  if (deltaScale != 1_r) {
+    _registry.view<CForwardPropContainerDerivedStateJac>().each(
+        [&](CForwardPropContainerDerivedStateJac& derivedState) {
+          derivedState.data *= deltaScale;
+        });
+  }
 
   // Accumulate dq_t/dq_t-1 += dq_t/dδ * dδ/dx_t-1 in jacCurrView
   // Compute dq_t/dq_t-2 = dq_t/dδ dδ/dx_t-2 in jacOldView

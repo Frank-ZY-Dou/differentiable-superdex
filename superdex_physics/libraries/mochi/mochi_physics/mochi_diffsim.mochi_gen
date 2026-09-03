@@ -258,7 +258,7 @@ fn diffsim::BackPropagate(Scene* scene) -> void [release_gil, mochi_error];
 // outJacCurr = dq_t/dq_t-1 (|q| x |q|) and outJacOld = dq_t/dq_t-2 (|q| x |q|). The rows and
 // columns of the Jacobian matrices are sorted according to the order given in Scene.GetActors().
 // The input states are three consecutive states captured during a simulated trajectory:
-// stateNew = state_t, stateCurr = state_t-1, stateOld = state_t-2. The two steps must have used the same step size (the previous-delta block assumes dt_t-1 = dt_t; back-propagation handles variable step sizes).
+// stateNew = state_t, stateCurr = state_t-1, stateOld = state_t-2. The two steps may differ in size (the previous-delta block is rescaled by dt_t / dt_t-1, as in back-propagation).
 //
 // @param[in] scene The differentiable scene.
 // @param[in] stateNew State handle at step t.
