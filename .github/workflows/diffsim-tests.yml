@@ -30,6 +30,11 @@ on:
 # Read-only. Nothing here writes to the repository or needs a secret.
 permissions:
   contents: read
+# One run per branch: a newer push cancels the run of the older commit (each run is an hour of
+# native builds, and only the newest commit's result matters).
+concurrency:
+  group: diffsim-tests-${{ github.ref }}
+  cancel-in-progress: true
 env:
   CIBUILDWHEEL_VERSION: 4.1.1
   PYTHON_VERSION: '3.12'
