@@ -269,18 +269,21 @@ class GradcheckParametersTest(unittest.TestCase):
 
 
 class TorqueGradientApproximationTest(unittest.TestCase):
-    """Pins the engine's torque-input gradient approximation.
+    """Pins the engine's rotational-gradient approximation under external torques.
 
-    The external-torque residual uses a merit function valid near identity
-    rotation steps, so dL/dtorque carries a relative error of order the
-    per-step rotation angle (measured 2026-08-30: 2.1e-4 at 0.15 N*m
-    doubling to 1.7e-3 at 1.2 N*m on a free cube - exactly linear), and
-    contact coupling raises the relative error on near-zero torque gradients
-    to the percent level while the absolute error stays tiny (< 1e-9 in all
-    probes). These tests assert the deviation EXISTS (lower bound) and stays
-    SMALL (upper bound): an engine fix that makes torque gradients exact
-    flips the lower bound, prompting a documentation update and the
-    reinstatement of torque columns into gradcheck.
+    With an external torque the rigid rotational gradients (dL/dtorque and, equally,
+    dL/d(initial angular velocity)) carry a relative error proportional to the torque
+    and independent of the angular velocity; without a torque they are exact to 1e-9
+    at any per-step rotation. Half of it was the adjoint's Hessian-vector products
+    transporting the constant torque term between rotation charts (removed on
+    2026-09-03: external forces no longer enter those products); the remaining half
+    is a symmetric term (the operator's asymmetry probe stays at 1e-9): measured
+    2.2e-4 at 0.3 N*m and 8.6e-4 at 1.2 N*m on a free cube (before: 4.3e-4 and
+    1.7e-3), and on the contact scene 6.5e-4 relative / 3.4e-10 absolute (before:
+    2.4e-2 / 5.3e-10). These tests assert the deviation EXISTS (lower bound) and
+    stays SMALL (upper bound): an engine fix that makes torque gradients exact flips
+    the lower bound, prompting a documentation update and the reinstatement of
+    torque columns into gradcheck.
     """
 
     def _torque_adjoint_and_fd(self, scene_fn, loss_cls, amplitude):
@@ -321,19 +324,22 @@ class TorqueGradientApproximationTest(unittest.TestCase):
             scenes.rigid_free, QuaternionErrorLoss, amplitude=0.3
         )
         rel = np.abs(adjoint - fd) / np.maximum(np.abs(fd), 1e-14)
-        # Measured 4.3e-4 at this amplitude (per-step rotation ~5.7e-4 rad).
+        # Measured 2.15e-4 at this amplitude (4.3e-4 before external forces were taken
+        # out of the finite-difference Hessian-vector products).
         self.assertGreater(float(rel.max()), 1e-4, "approximation gone - update docs")
-        self.assertLess(float(rel.max()), 2e-3)
+        self.assertLess(float(rel.max()), 1e-3)
 
-    def test_contact_scene_error_is_percent_level_but_tiny_absolute(self) -> None:
+    def test_contact_scene_error_is_small_and_tiny_absolute(self) -> None:
         adjoint, fd = self._torque_adjoint_and_fd(
             lambda: scenes.rigid_on_plane("rich"),
             TranslationErrorLoss,
             amplitude=0.3,
         )
         rel = np.abs(adjoint - fd) / np.maximum(np.abs(fd), 1e-14)
-        # Measured 2.35e-2 relative, 5.3e-10 absolute.
-        self.assertGreater(float(rel.max()), 5e-3, "approximation gone - update docs")
+        # Measured 6.5e-4 relative, 3.4e-10 absolute (2.35e-2 / 5.3e-10 before external
+        # forces were taken out of the finite-difference Hessian-vector products).
+        self.assertGreater(float(rel.max()), 1e-4, "approximation gone - update docs")
+        self.assertLess(float(rel.max()), 5e-3)
         self.assertLess(float(np.abs(adjoint - fd).max()), 1e-8)
 
 

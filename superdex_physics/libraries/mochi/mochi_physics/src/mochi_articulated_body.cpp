@@ -2739,7 +2739,7 @@ void articulated::compound::EntityAssemble(
   }
 
   // Add external forces on joints.
-  if (!externalForces.Empty() &&
+  if (params.assemExternalForces && !externalForces.Empty() &&
       IsAssemblyNeeded(StateDependency::ZeroOrder, true /*inputDependency*/, gradTarget)) {
     AssembleExternalForces(
         params,

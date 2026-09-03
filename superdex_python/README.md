@@ -86,8 +86,9 @@ that record the videos) take between half a minute (cable haul) and three minute
 Known limitations: the adjoint is exact for steps of any size and for consecutive steps of
 different sizes (at a step-size change the engine re-expresses the previous finite-difference
 angular velocities for the new size, keeping the angular rate; `get_step_jacobian` handles it
-the same way); rotational gradients of rigid bodies under torques carry the
-engine's per-step-rotation merit approximation (pinned by a test); the stiffness damping of
+the same way); rotational gradients of rigid bodies under external torques carry a
+small approximation proportional to the torque (2e-4 relative at 0.3 N m on a 0.2 m cube, exact
+without torques; pinned by a test); the stiffness damping of
 soft materials, a deformable actor acting as a collider, and mesh colliders are not
 differentiable; a soft body pressed and dragged by a link can trap the forward Newton solve at
 isolated steps, which the driver's substepping resolves (see the examples' docstrings).

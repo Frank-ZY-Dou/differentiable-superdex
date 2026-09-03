@@ -763,7 +763,7 @@ void mochi::rigid::EntityAssemble(
   }
 
   // Compute contact terms
-  if (!externalForces.Empty() &&
+  if (params.assemExternalForces && !externalForces.Empty() &&
       IsAssemblyNeeded(StateDependency::ZeroOrder, false /*inputDependency*/, gradTarget)) {
     AddRigidBodyExternalForces(
         currPose.value,

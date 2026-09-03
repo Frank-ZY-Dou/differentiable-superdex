@@ -34,6 +34,12 @@ struct AssemblyParams {
   // solve fails: the friction transition widens, the solve converges, and the scale is tightened
   // back to 1 with warm starts (NonLinearSolverParams::frictionContinuationLevels).
   real frictionFalloffScale = 1_r;
+  // Assemble the external forces and torques applied to the actors' DoFs. The adjoint's
+  // finite-difference Hessian-vector products turn it off: external forces do not depend on
+  // the state, and a torque is a chart-invariant constant of the residual, which the transport
+  // of the differenced gradients between rotation charts would otherwise treat as a
+  // state-dependent covector (a torque-proportional error in every rotational gradient).
+  bool assemExternalForces = true;
 };
 
 } // namespace mochi

@@ -135,8 +135,15 @@ static void GetHessianVectorProduct(
   MOCHI_FILO_STACK_ALLOCATOR(allocator, 6 * 256 * sizeof(real));
 
   // Set up the gradient assembly function
+  // External forces do not depend on the state and must not go through the chart transport
+  // below (see AssemblyParams::assemExternalForces); the force-input gradient is read from the
+  // adjoint solution directly.
   AssemblyParams params = {
-      .assemObj = false, .assemRes = true, .assemDRes = false, .gradTarget = gradTarget};
+      .assemObj = false,
+      .assemRes = true,
+      .assemDRes = false,
+      .gradTarget = gradTarget,
+      .assemExternalForces = false};
   problemForward.SetAssemblyFunction(
       [&](SnleProblem<real>& problem, AssemblyParams const& /* params */) {
         solver::AssembleIslandPipeline(reg, island, params, problem);
