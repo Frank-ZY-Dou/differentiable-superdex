@@ -74,11 +74,21 @@ solved with failure-adaptive substepping (``PUSH_SUBSTEP_LEVELS`` halvings of
 the step, each substep its own adjoint step, see
 ``superdex.physics.diffsim_rollout``); the guard reports which steps were
 split, and the replay used for the video takes the same substeps.
-``robot_push_policy.mp4`` (``--task push_policy``) is the push solved by a feedback
-policy instead of an open-loop trajectory: a small MLP maps the observed arm pose,
-cube position and time to a residual on the initial joint targets, and its weights
-are trained with the gradient through the simulator (``PolicyRollout``: analytic
-policy gradients, feedback path included).
+``robot_push_policy.mp4`` (``--task push_policy``) is a straight push solved by a
+feedback policy on top of an open-loop plan: a small MLP maps the observed arm
+pose, cube position and orientation and the time (normalized around the initial
+observation) to a
+residual on the plan's joint targets, and its weights are trained with the
+gradient through the simulator (``PolicyRollout``: analytic policy gradients,
+feedback path included) jointly on three cube starts, the nominal one the plan
+was optimized on and two 1.5 cm to either side (Adam; a step that loses the
+contact is undone and the learning rate halved). The loss is the cube's final
+distance to the goal plus a per-step penalty on its rotation: an off-center push
+spins the cube and a spun cube's final position is a chaotic function of the
+push. An open-loop residual of the same architecture, trained the same way, is
+the baseline: one trajectory cannot serve all three starts, the feedback policy
+re-centers on the observed cube; the video ends with the plan alone and both
+policies on every start.
 
 ``robot_hand_grasp.mp4`` (``--task hand``) is the grasp with a five-finger hand
 (FR3 + Tesollo DG-5F): the hand comes down over a cube with the fingers
@@ -129,9 +139,10 @@ import numpy as np
 import superdex.physics as physics
 import superdex.robotics as robotics
 import torch
-from superdex.physics.diffsim_rollout import step_with_substeps
+from superdex.physics.diffsim_rollout import ForwardSolveError, step_with_substeps
 from superdex.physics.diffsim_torch import (
     ArticulatedPoseObservation,
+    OrientationObservation,
     PolicyRollout,
     TorchRollout,
     TranslationObservation,
@@ -787,16 +798,24 @@ def task_push_multi(output_dir: pathlib.Path, num_iterations: int, check: bool) 
 
 
 class ResidualPolicy(torch.nn.Module):
-    """Targets = initial open-loop trajectory at the current step + a small MLP residual of the
-    observation (arm pose, cube position, normalized time). The residual head starts at zero,
-    so iteration 0 reproduces the open-loop rollout."""
+    """Targets = initial open-loop trajectory at the current step + a small MLP residual. With
+    ``feedback`` the residual is a function of the observation (arm pose, cube position) and
+    the normalized time; without it, of the time alone: an open-loop residual with the same
+    architecture and optimizer, the baseline the feedback policy is compared against. The
+    residual head starts at zero, so iteration 0 reproduces the open-loop rollout."""
 
-    def __init__(self, controls0: np.ndarray, observation_size: int):
+    def __init__(self, controls0: np.ndarray, features0: np.ndarray, feature_scale: np.ndarray, feedback: bool):
+        """``features0`` / ``feature_scale``: the input features (observations then the time)
+        are fed as ``(features - features0) / feature_scale``, of order one over a push, so
+        one learning rate suits the joint angles, the cube position and the time alike."""
         super().__init__()
         self.register_buffer("controls0", torch.tensor(controls0, dtype=torch.float64))
+        self.register_buffer("features0", torch.tensor(features0, dtype=torch.float64))
+        self.register_buffer("feature_scale", torch.tensor(feature_scale, dtype=torch.float64))
         self.num_steps = controls0.shape[0]
+        self.feedback = feedback
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(observation_size + 1, PUSH_POLICY_HIDDEN),
+            torch.nn.Linear((features0.shape[0] - 1 if feedback else 0) + 1, PUSH_POLICY_HIDDEN),
             torch.nn.Tanh(),
             torch.nn.Linear(PUSH_POLICY_HIDDEN, PUSH_POLICY_HIDDEN),
             torch.nn.Tanh(),
@@ -807,22 +826,58 @@ class ResidualPolicy(torch.nn.Module):
             self.net[-1].bias.zero_()
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
-        step = int(round(float(features[-1]) * self.num_steps))
-        return self.controls0[min(step, self.num_steps - 1)] + PUSH_POLICY_RESIDUAL_SCALE * self.net(features)
+        step = int(round(float(features[-1].detach()) * self.num_steps))
+        normalized = (features - self.features0) / self.feature_scale
+        inputs = normalized if self.feedback else normalized[-1:]
+        return self.controls0[min(step, self.num_steps - 1)] + PUSH_POLICY_RESIDUAL_SCALE * self.net(inputs)
+
+
+def optimize_open_loop_targets(
+    scene, arm, loss, step_losses, controls0: np.ndarray, dt: float, num_iterations: int, learning_rate: float, grad_clip: float
+) -> np.ndarray:
+    """Adam on the per-step joint targets (as ``run_task`` does, without the recording):
+    returns the optimized targets; the scene is left at the end of the last rollout."""
+    bridge = TorchRollout(
+        scene, dt=dt, num_steps=controls0.shape[0], control_actors=[arm], terminal_losses=[loss], step_losses=step_losses
+    )
+    try:
+        params = torch.tensor(controls0, dtype=torch.float64, requires_grad=True)
+        optimizer = torch.optim.Adam([params], lr=learning_rate)
+        for iteration in range(num_iterations):
+            optimizer.zero_grad()
+            value = bridge(controls=params)
+            value.backward()
+            torch.nn.utils.clip_grad_norm_([params], max_norm=grad_clip)
+            optimizer.step()
+            if iteration % 10 == 0 or iteration == num_iterations - 1:
+                print(f"  open-loop plan iter {iteration:3d}  loss {float(value.detach()):.6f}")
+        return params.detach().numpy().copy()
+    finally:
+        bridge.close()
 
 
 def task_push_policy(output_dir: pathlib.Path, num_iterations: int, check: bool) -> None:
-    """The push with a feedback policy (see the module docstring): Adam on the residual
-    MLP's weights with the closed-loop gradient of the cube's final position."""
+    """The push with a feedback policy (see the module docstring). The open-loop plan is first
+    optimized on the nominal start (``optimize_open_loop_targets``); the residual MLP on top of
+    it is then trained jointly on the ``PUSH_POLICY_STARTS`` cube starts by Adam (learning
+    rate decaying linearly to a tenth) with the gradient clipped and worsening steps undone
+    (a step that raises the mean loss by more than ``PUSH_POLICY_MAX_INCREASE`` is reverted:
+    losing the contact lands on the zero-gradient plateau of the untouched cube, from which no
+    gradient recovers, and near its best the policy's smooth-branch gradient no longer
+    describes the rough landscape - unchecked, Adam then climbs steadily). The piecewise-smooth loss of frictional contact - jumps of ~1e-7 between Newton
+    solution branches, and a chaotic sensitivity of the off-center starts - makes an Armijo
+    line search stall; Adam's fixed-size steps step over it. An open-loop residual of the same
+    architecture, trained the same way, is the baseline: one trajectory cannot serve all
+    starts, the feedback policy reacts to the observed cube."""
     name = "robot_push_policy"
     cube_start = np.array([0.55, 0.0, CUBE_HALF - 0.001])
-    goal = np.array([0.80, 0.10, CUBE_HALF])
+    goal = PUSH_POLICY_GOAL
     print(f"[{name}] IK for the initial joint-target trajectory")
     waypoints = [np.array([0.44 + 0.05 * k, 0.0, 0.10]) for k in range(6)]
     poses = ik_joint_poses(waypoints)
     num_steps = 75
     keys = [(0, poses[0])] + [(15 * k, poses[k]) for k in range(1, 6)]
-    controls0 = interpolate_targets(keys, num_steps)
+    controls_ik = interpolate_targets(keys, num_steps)
 
     scene = physics.create_scene("Differentiable push (policy)")
     scene.set_gravity(GRAVITY)
@@ -855,98 +910,264 @@ def task_push_policy(output_dir: pathlib.Path, num_iterations: int, check: bool)
             g[:3] = cube_position() - goal
             diffsim.get_center_of_mass_transform_backward(cube, g)
 
-    observations = [ArticulatedPoseObservation(arm), TranslationObservation(cube)]
-    torch.manual_seed(0)
-    policy = ResidualPolicy(controls0, sum(o.size for o in observations))
-    try:
-        rollout = PolicyRollout(
-            scene,
-            dt=dt,
-            num_steps=num_steps,
-            policy=policy,
-            observations=observations,
-            control_actors=[arm],
-            time_feature=True,
-            terminal_losses=[CubeLoss()],
+    quat_ref = np.asarray(cube.get_center_of_mass_transform().rotation.tolist(), dtype=np.float64)
+
+    class CubeYawLoss:
+        """0.5 * PUSH_POLICY_YAW_WEIGHT * ||q - q0||^2 on the cube's orientation, at every step:
+        a push that keeps the cube square (an off-center push spins it, and a spun cube's final
+        position is a chaotic function of the push - the terminal loss alone gives noisy
+        gradients)."""
+
+        def _diff(self) -> np.ndarray:
+            return np.asarray(cube.get_center_of_mass_transform().rotation.tolist(), dtype=np.float64) - quat_ref
+
+        def value(self) -> float:
+            d = self._diff()
+            return 0.5 * PUSH_POLICY_YAW_WEIGHT * float(d @ d)
+
+        def accumulate_output_grad(self) -> None:
+            g = np.zeros(7)
+            g[3:] = PUSH_POLICY_YAW_WEIGHT * self._diff()
+            diffsim.get_center_of_mass_transform_backward(cube, g)
+
+    yaw_loss = CubeYawLoss()
+    step_losses = lambda step: [yaw_loss]
+    observations = [ArticulatedPoseObservation(arm), TranslationObservation(cube), OrientationObservation(cube)]
+    state_nominal = scene.capture_state()
+
+    def place_cube(offset) -> None:
+        scene.restore_state(state_nominal, False)
+        cube.set_center_of_mass_transform(
+            physics.TransformRT((cube_start + np.array([offset[0], offset[1], 0.0])).tolist())
         )
-        guard = ConvergenceGuard(scene)
+
+    kinds = ("open-loop", "feedback")  # the feedback policy last: its iterations are recorded
+    policies: dict[str, ResidualPolicy] = {}
+    rollouts: dict[str, list[PolicyRollout]] = {}
+    recorder = None
+    try:
+        print(f"[{name}] open-loop plan: Adam on the joint targets, nominal start")
+        controls_plan = optimize_open_loop_targets(
+            scene, arm, CubeLoss(), step_losses, controls_ik, dt, PUSH_POLICY_PLAN_ITERATIONS, 0.002, 0.02
+        )
+        place_cube(PUSH_POLICY_STARTS[0])
+        features0 = np.concatenate([o.value() for o in observations] + [[0.0]])
+        feature_scale = np.concatenate([np.full(arm.get_num_dofs(), 0.3), np.full(3, 0.25), np.full(4, 0.2), [1.0]])
+        for kind in kinds:
+            torch.manual_seed(0)
+            policies[kind] = ResidualPolicy(controls_plan, features0, feature_scale, kind == "feedback")
+            rollouts[kind] = []
+            for offset in PUSH_POLICY_STARTS:
+                place_cube(offset)
+                rollouts[kind].append(
+                    PolicyRollout(
+                        scene,
+                        dt=dt,
+                        num_steps=num_steps,
+                        policy=policies[kind],
+                        observations=observations,
+                        control_actors=[arm],
+                        time_feature=True,
+                        terminal_losses=[CubeLoss()],
+                        step_losses=step_losses,
+                        max_substep_levels=PUSH_SUBSTEP_LEVELS,
+                        substep_residual_tolerance=PUSH_POLICY_STALL_TOLERANCE,
+                    )
+                )
+        guard = ConvergenceGuard(scene, PUSH_POLICY_STALL_TOLERANCE)
         recorder = Recorder(
             scene,
             goal,
             look_from=[1.9, -1.6, 0.9],
             look_at=[0.6, 0.05, 0.1],
-            title="FR3 push with a feedback policy: Adam on an MLP through the simulator",
+            title="FR3 push with a feedback policy: an MLP trained through the simulator",
         )
-        optimizer = torch.optim.Adam(policy.parameters(), lr=PUSH_POLICY_LEARNING_RATE)
-        losses = []
-        record = {0, 1, 2, 4, 7, 12, 20, 30, num_iterations - 1}
 
-        def replay(capture: bool, caption_fn=None) -> None:
-            scene.restore_state(rollout._state_init, False)
+        def replay(rollout: PolicyRollout, policy, capture: bool, caption_fn=None) -> float:
+            """The closed loop as the rollout runs it (same substepping); ``policy=None`` replays
+            the open-loop plan alone. Returns the loss."""
+            scene.restore_state(rollout.initial_state, False)
             if capture:
                 recorder.begin_iteration()
+            total = 0.0
             for step in range(num_steps):
-                features = np.concatenate([o.value() for o in observations] + [[step / num_steps]])
-                with torch.no_grad():
-                    targets = policy(torch.tensor(features, dtype=torch.float64)).numpy()
+                if policy is None:
+                    targets = controls_plan[step]
+                else:
+                    features = np.concatenate([o.value() for o in observations] + [[step / num_steps]])
+                    with torch.no_grad():
+                        targets = policy(torch.tensor(features, dtype=torch.float64)).numpy()
                 arm.set_articulated_target_pose(np.ascontiguousarray(targets))
-                scene.step(dt)
+                guard.note_substeps(
+                    step, step_with_substeps(scene, dt, PUSH_SUBSTEP_LEVELS, guard.stall_tolerance, step=step)
+                )
                 guard.assert_last_step()
+                total += yaw_loss.value()
                 if capture:
                     recorder.capture(cube_position(), caption_fn(step), hold=(1 if step < num_steps - 1 else 12))
+            return total + CubeLoss().value()
 
-        def closed_loop_loss() -> float:
-            replay(capture=False)
-            return CubeLoss().value()
+        def closed_loop_loss(kind: str) -> float:
+            return float(np.mean([replay(r, policies[kind], capture=False) for r in rollouts[kind]]))
 
-        for iteration in range(num_iterations):
-            optimizer.zero_grad()
-            loss = rollout()
-            loss.backward()
-            losses.append(float(loss.detach()))
-            result = rollout.last_result
-            grads = [p.grad for p in policy.parameters() if p.grad is not None]
-            grad_norm = float(torch.sqrt(sum((g * g).sum() for g in grads)))
-            if iteration == 0 and check:
-                # Directional derivative along the gradient, central finite differences of the
-                # closed-loop loss with the policy weights perturbed.
-                params = [p for p in policy.parameters() if p.grad is not None]
-                direction = [p.grad.detach().clone() / grad_norm for p in params]
-                values = []
-                for eps in (1e-4, 1e-5):
-                    pair = []
-                    for sign in (+1.0, -1.0):
-                        with torch.no_grad():
-                            for p, d in zip(params, direction):
-                                p.add_(sign * eps * d)
-                        pair.append(closed_loop_loss())
-                        with torch.no_grad():
-                            for p, d in zip(params, direction):
-                                p.sub_(sign * eps * d)
-                    values.append((pair[0] - pair[1]) / (2.0 * eps))
+        losses = {kind: [] for kind in kinds}
+        best = {}  # kind -> (iteration, mean loss, parameters): the policy the comparison uses
+        record = {0, 1, 2, 4, 7, 12, 20, 30, num_iterations - 1}
+        for kind in kinds:
+            policy = policies[kind]
+            params = list(policy.parameters())
+            optimizer = torch.optim.Adam(params, lr=PUSH_POLICY_LEARNING_RATE)
+            for iteration in range(num_iterations):
+                # Linear decay of the learning rate to a tenth over the run.
+                optimizer.param_groups[0]["lr"] = PUSH_POLICY_LEARNING_RATE * (1.0 - 0.9 * iteration / max(num_iterations - 1, 1))
+                optimizer.zero_grad()
+                loss = sum(r() for r in rollouts[kind]) / len(rollouts[kind])
+                loss.backward()
+                loss_value = float(loss.detach())
+                losses[kind].append(loss_value)
+                if kind not in best or loss_value < best[kind][1]:
+                    best[kind] = (iteration, loss_value, [p.detach().clone() for p in params])
+                grads = [p.grad.detach().clone() for p in params]
+                grad_norm = float(torch.sqrt(sum((g * g).sum() for g in grads)))
+                results = [r.last_result for r in rollouts[kind]]
+                if kind == "feedback" and iteration == 0 and check:
+                    # Directional derivative along the gradient: central finite differences of
+                    # every start's closed-loop loss with the policy weights perturbed by eps =
+                    # 1e-6, 1e-7, 1e-8 along the normalized gradient of the mean loss. The
+                    # frictional contact makes the loss piecewise smooth: at steps where the
+                    # forward Newton solve is nearly degenerate (100+ iterations to 1e-9) a
+                    # perturbation of a few 1e-8 can land it on another local solution, a jump
+                    # of ~1e-7 in the loss (5e-6 m in the cube position). The adjoint is the
+                    # exact derivative of the branch taken, so the comparison holds for the
+                    # starts whose three FD values agree; the check reports the others as jumps.
+                    # It is only meaningful if the perturbed replays take the same substeps.
+                    splits_before = len(guard.splits)
+                    direction = [g / grad_norm for g in grads]
+                    epsilons = (1e-6, 1e-7, 1e-8)
+                    fd = np.zeros((len(rollouts[kind]), len(epsilons)))
+                    for j, eps in enumerate(epsilons):
+                        for sign_index, sign in enumerate((+1.0, -1.0)):
+                            with torch.no_grad():
+                                for p, d in zip(params, direction):
+                                    p.add_(sign * eps * d)
+                            for i, r in enumerate(rollouts[kind]):
+                                fd[i, j] += (1.0 if sign_index == 0 else -1.0) * replay(r, policy, capture=False)
+                            with torch.no_grad():
+                                for p, d in zip(params, direction):
+                                    p.sub_(sign * eps * d)
+                        fd[:, j] /= 2.0 * eps
+                    print(f"  gradient check (adjoint vs closed-loop central FD at eps 1e-6 / 1e-7 / 1e-8):")
+                    for i, offset in enumerate(PUSH_POLICY_STARTS):
+                        spread = (fd[i].max() - fd[i].min()) / max(abs(fd[i]).max(), 1e-300)
+                        print(
+                            f"    start offset y = {100 * offset[1]:+.1f} cm: fd "
+                            + " / ".join(f"{v:+.5e}" for v in fd[i])
+                            + (
+                                "  [smooth]"
+                                if spread < 1e-2
+                                else "  [loss jumps within the perturbation: another Newton solution branch]"
+                            )
+                        )
+                    mean_fd = fd.mean(axis=0)  # eps 1e-7: below the jumps, above the solver noise
+                    print(
+                        f"    mean: |grad| {grad_norm:.5e}  fd(1e-7) {mean_fd[1]:+.5e}  "
+                        f"rel err {abs(mean_fd[1] - grad_norm) / grad_norm:.1e}"
+                        + (
+                            f"  [{len(guard.splits) - splits_before} perturbed replay steps were split into "
+                            "substeps (a different discretization): the comparison is approximate]"
+                            if len(guard.splits) > splits_before
+                            else ""
+                        )
+                    )
+                if kind == "feedback" and iteration in record:
+                    replay(
+                        rollouts[kind][0],
+                        policy,
+                        capture=True,
+                        caption_fn=lambda step, it=iteration: (
+                            f"iteration {it}   t = {(step + 1) * dt:.2f} s   mean loss = {losses['feedback'][-1]:.5f}"
+                        ),
+                    )
+                # Adam with the gradient clipped; a step that raises the mean closed-loop loss
+                # by more than PUSH_POLICY_MAX_INCREASE is undone (the moments keep the
+                # gradient, the next step is shorter by the decay). The tolerance lets the
+                # optimizer step over the loss's small jumps; it refuses a lost contact, and the
+                # steady climb of the late iterations when the smooth-branch gradient stops
+                # describing the rough landscape (a policy already near its best).
+                torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
+                before = [p.detach().clone() for p in params]
+                optimizer.step()
+                try:
+                    trial_loss = closed_loop_loss(kind)
+                    rejected = trial_loss > loss_value * (1.0 + PUSH_POLICY_MAX_INCREASE)
+                    reason = f"loss x{trial_loss / loss_value:.1f}"
+                except ForwardSolveError as error:
+                    # A violent closed loop the forward solve cannot follow even substepped:
+                    # the same kind of step as a lost contact.
+                    rejected = True
+                    reason = f"forward solve failed at step {error.step}, dt {error.dt:g}, residual {error.residual_norm:.1e}"
+                if rejected:
+                    with torch.no_grad():
+                        for p, b in zip(params, before):
+                            p.copy_(b)
+                splits = [(i, r.split_steps) for i, r in enumerate(results) if r.split_steps]
                 print(
-                    f"  gradient check (adjoint vs closed-loop central FD): |grad| {grad_norm:.5e}  "
-                    f"fd {values[0]:+.5e} / {values[1]:+.5e}  rel err {abs(values[1] - grad_norm) / grad_norm:.1e}  "
-                    f"fd self-consistency {abs(values[0] - values[1]) / abs(values[1]):.0e}"
+                    f"[{name}] {kind:9s} iter {iteration:3d}  loss {loss_value:.6f}  |grad| {grad_norm:.3e}  "
+                    f"lr {optimizer.param_groups[0]['lr']:.1e}  adjoint residual {max(r.max_adjoint_residual for r in results):.1e}"
+                    + (f"  step rejected ({reason})" if rejected else "")
+                    + (f"  substepped {splits}" if splits else "")
                 )
-            if iteration in record:
+        guard.report(name)
+
+        # The plan alone and the trained policies on every start: the open-loop residual is one
+        # trajectory for all starts, the feedback policy reacts to the observed cube. Each policy
+        # is its best iterate by the training loss (Adam keeps exploring the rough landscape).
+        for kind in kinds:
+            iteration, loss_value, values = best[kind]
+            with torch.no_grad():
+                for p, v in zip(policies[kind].parameters(), values):
+                    p.copy_(v)
+            print(f"[{name}] {kind} policy: best iterate {iteration} (mean loss {loss_value:.6f})")
+        print(f"[{name}] final cube distance to the goal per start (plan alone / open-loop residual / feedback)")
+        for i, offset in enumerate(PUSH_POLICY_STARTS):
+            distances = {}
+            for kind, policy in (("plan", None), ("open-loop", policies["open-loop"]), ("feedback", policies["feedback"])):
                 replay(
+                    rollouts["feedback" if kind == "plan" else kind][i],
+                    policy,
                     capture=True,
-                    caption_fn=lambda step, it=iteration: (
-                        f"iteration {it}   t = {(step + 1) * dt:.2f} s   loss = {losses[-1]:.5f}"
+                    caption_fn=lambda step, kind=kind, offset=offset: (
+                        (
+                            "open-loop plan alone"
+                            if kind == "plan"
+                            else f"plan + trained {kind} residual policy"
+                        )
+                        + f"   cube start offset y = {100 * offset[1]:+.1f} cm   t = {(step + 1) * dt:.2f} s"
                     ),
                 )
-            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
-            optimizer.step()
+                distances[kind] = float(np.linalg.norm(cube_position() - goal))
             print(
-                f"[{name}] iter {iteration:3d}  loss {losses[-1]:.6f}  |grad| {grad_norm:.3e}  "
-                f"adjoint residual {result.max_adjoint_residual:.1e}"
+                f"  start offset ({100 * offset[0]:+.1f}, {100 * offset[1]:+.1f}) cm: "
+                f"{100 * distances['plan']:.2f} cm / {100 * distances['open-loop']:.2f} cm / "
+                f"{100 * distances['feedback']:.2f} cm"
             )
-        guard.report(name)
-        rollout.close()
-        recorder.write(output_dir / f"{name}.mp4")
-        save_loss_curve(output_dir / f"{name}_loss.png", losses, "FR3 push, feedback policy: loss vs iteration")
+        for kind in kinds:
+            for r in rollouts[kind]:
+                r.close()
+        recorder.write(output_dir / f"{name}.mp4")  # closes the viewer
+        recorder = None
+        save_loss_curve(
+            output_dir / f"{name}_loss.png", losses["feedback"], "FR3 push, feedback policy: mean loss vs iteration"
+        )
+        save_loss_curve(
+            output_dir / f"{name}_open_loop_loss.png",
+            losses["open-loop"],
+            "FR3 push, open-loop residual baseline: mean loss vs iteration",
+        )
     finally:
+        if recorder is not None:
+            recorder.viewer.close()  # an open offscreen viewer crashes the interpreter's exit
+        scene.release_state(state_nominal)
         robotics.destroy_bot(scene, bot)
         physics.destroy_scene(scene)
 
@@ -955,7 +1176,13 @@ PUSH_MULTI_GAP = 0.01  # [m] between the two cubes at the start
 # Feedback-policy push: residual MLP on the initial trajectory, trained through the simulator.
 PUSH_POLICY_HIDDEN = 32
 PUSH_POLICY_RESIDUAL_SCALE = 0.05  # [rad] the residual head's output scale
-PUSH_POLICY_LEARNING_RATE = 3e-3
+PUSH_POLICY_PLAN_ITERATIONS = 40  # Adam iterations of the open-loop plan on the nominal start
+PUSH_POLICY_GOAL = np.array([0.80, 0.0, CUBE_HALF])  # straight ahead: the plan is a square push
+PUSH_POLICY_YAW_WEIGHT = 2e-3  # per-step weight of the cube's orientation error (1e-2 dominated the distance)
+PUSH_POLICY_STARTS = ((0.0, 0.0), (0.0, -0.015), (0.0, 0.015))  # [m] cube start offsets trained jointly
+PUSH_POLICY_LEARNING_RATE = 3e-3  # Adam on the residual MLP's weights (1e-3 barely moved the feedback policy)
+PUSH_POLICY_MAX_INCREASE = 0.1  # a step raising the mean loss by more than this fraction is undone
+PUSH_POLICY_STALL_TOLERANCE = 1e-5  # a feedback policy explores rougher contact than the open loop
 PUSH_MULTI_GOAL = np.array([0.93, 0.06, CUBE_HALF])  # for the second cube
 
 
