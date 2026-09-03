@@ -31,6 +31,8 @@
   gradients match central finite differences of a manual rollout with the same
   substep schedule; the finest level failing raises ForwardSolveError; the
   arguments are validated;
+- single precision: RunningLossTest also runs on the float32 build (5% tolerance);
+  every other class requires SUPERDEX_PRECISION=double;
 - variable step sizes: the low-level per-step adjoint chained across steps of
   different dt (as substepping produces) matches finite differences for a free
   rigid body's initial velocity and for joint forces on a pendulum (the engine
@@ -40,7 +42,7 @@
   differs from a neighbour's; it scales with the controller damping and is
   pinned here as known behaviour, see VariableStepSizeTest).
 
-Requires SUPERDEX_PRECISION=double.
+Requires SUPERDEX_PRECISION=double except where noted.
 """
 
 from __future__ import annotations
@@ -69,9 +71,11 @@ DT = 0.01
 NUM_STEPS = 6
 
 
+DOUBLE = physics.uses_double_precision()
+double_only = unittest.skipUnless(DOUBLE, "requires SUPERDEX_PRECISION=double")
+
+
 def setUpModule() -> None:
-    if not physics.uses_double_precision():
-        raise unittest.SkipTest("rollout tests require SUPERDEX_PRECISION=double")
     physics.initialize(num_worker_threads=_NUM_WORKER_THREADS)
 
 
@@ -106,6 +110,7 @@ def _controller_setup():
     return scene, chain, targets, forces, apply_inputs
 
 
+@double_only
 class RolloutEquivalenceTest(unittest.TestCase):
     """Driver gradients must match the low-level harness sweep exactly."""
 
@@ -152,9 +157,15 @@ class RolloutEquivalenceTest(unittest.TestCase):
 
 
 class RunningLossTest(unittest.TestCase):
-    """Per-step losses validated against finite differences of the summed cost."""
+    """Per-step losses validated against finite differences of the summed cost.
 
-    FD_EPS = 1e-6
+    Also the single-precision smoke test of the driver: on the float32 build the
+    gradient buffers are float32 and the check uses a coarser difference quotient
+    (eps 1e-3, 5% tolerance) - float32-accurate gradients, as documented.
+    """
+
+    FD_EPS = 1e-6 if DOUBLE else 1e-3
+    TOL = 1e-4 if DOUBLE else 5e-2
 
     def test_running_translation_loss_vs_fd(self) -> None:
         scene, cube = scenes.rigid_free()
@@ -196,11 +207,12 @@ class RunningLossTest(unittest.TestCase):
         rel = np.linalg.norm(grads.initial_velocity - fd) / np.linalg.norm(fd)
         self.assertLessEqual(
             rel,
-            1e-4,
+            self.TOL,
             f"running-loss gradient mismatch: analytic={grads.initial_velocity}, fd={fd}",
         )
 
 
+@double_only
 class TruncationAndClippingTest(unittest.TestCase):
     def test_truncation_semantics(self) -> None:
         scene_full, _, _, _, apply_full = _controller_setup()
@@ -270,6 +282,7 @@ class TruncationAndClippingTest(unittest.TestCase):
             self.assertLessEqual(float(np.linalg.norm(block)), max_norm * (1 + 1e-12))
 
 
+@double_only
 class RigidExternalForceGradientTest(unittest.TestCase):
     """The driver's rigid-actor force gradients (all six DoFs) vs central FD."""
 
@@ -332,6 +345,7 @@ class RigidExternalForceGradientTest(unittest.TestCase):
         np.testing.assert_allclose(adjoint, fd, rtol=1e-6, atol=1e-12)
 
 
+@double_only
 class SoftRolloutTest(unittest.TestCase):
     """The driver on standalone soft actors (phase 5b/5c)."""
 
@@ -451,6 +465,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
+@double_only
 class SubstepTest(unittest.TestCase):
     """Failure-adaptive substepping with an injected failure predicate.
 
@@ -595,6 +610,7 @@ class SubstepTest(unittest.TestCase):
         self.assertEqual(result.num_solver_steps, NUM_STEPS)
 
 
+@double_only
 class VariableStepSizeTest(unittest.TestCase):
     """The per-step adjoint chained across steps of different dt."""
 

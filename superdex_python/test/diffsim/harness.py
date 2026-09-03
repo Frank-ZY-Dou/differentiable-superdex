@@ -203,6 +203,12 @@ def add_vel_eps(entry: ActorEntry, dof: int, eps: float) -> None:
 # Losses (terminal, evaluated on the live scene state after the rollout)
 # ---------------------------------------------------------------------------
 
+def real_dtype():
+    """numpy dtype of the engine's ``real`` (the backward functions reject a mismatching
+    float width)."""
+    return np.float64 if physics.uses_double_precision() else np.float32
+
+
 POS_REF = np.array([1.4, -0.7, 0.5])
 ROT_REF_VECTOR = np.array([-0.8, -0.2, 0.3])
 
@@ -225,7 +231,7 @@ class TranslationErrorLoss:
         pos = np.asarray(
             self.actor.get_center_of_mass_transform().translation, dtype=np.float64
         )
-        grad = np.zeros(RIGID_POSE_SIZE)
+        grad = np.zeros(RIGID_POSE_SIZE, dtype=real_dtype())
         grad[:3] = pos - self.ref
         diffsim.get_center_of_mass_transform_backward(self.actor, grad)
 
