@@ -74,10 +74,18 @@ solved with failure-adaptive substepping (``PUSH_SUBSTEP_LEVELS`` halvings of
 the step, each substep its own adjoint step, see
 ``superdex.physics.diffsim_rollout``); the guard reports which steps were
 split, and the replay used for the video takes the same substeps.
+``robot_grasp_soft.mp4`` (``--task grasp_soft``) is the grasp with the same soft
+cube, solved the same way. Two things differ from the rigid grasp: the fingertip
+links get solid-box collision models (the stock fingertip meshes are thin shells
+that a soft body's surface samples tunnel through; see
+``solid_fingertip_shape_files``, which needs ``h5py``), and the cube's contact
+penalty is 1e7 (at 1e6 the contact layer is softer than the material and the
+fingers sink through it, see ``GRASP_SOFT_PENALTY``).
 
 Requirements: SUPERDEX_PRECISION=double (set below), the robotics extension
-(``superdex.robotics``), polyscope, imageio+ffmpeg, OpenCV, PyTorch, and the
-repository assets (resolved through ``superdex.physics.paths``). Run::
+(``superdex.robotics``), polyscope, imageio+ffmpeg, OpenCV, PyTorch, h5py (soft
+grasp only), and the repository assets (resolved through
+``superdex.physics.paths``). Run::
 
     python example_diffsim_robot_video.py --output-dir ./diffsim_videos --check
 """
@@ -154,6 +162,14 @@ PUSH_SUBSTEP_LEVELS = 2  # failure-adaptive substepping: at most dt/4
 # 1e5 Pa body; the arm-only tasks stall at ~1e-9): stalls below this are accepted, the limit-cycle
 # failures sit at 2e-3..4e-2.
 PUSH_SOFT_STALL_TOLERANCE = 1e-4
+# Soft grasp: the same cube as the rigid grasp (5 cm, 0.25 kg) as a neo-Hookean body.
+GRASP_SOFT_YOUNG = 1e5  # [Pa]
+GRASP_SOFT_FALLOFF = 0.1  # [m/s] friction falloff velocity of the cube (see PUSH_SOFT_FALLOFF)
+# Contact stiffness of the soft cube's surface samples. At 1e6 the contact layer under a
+# fingertip (about 700 N/m over the covered samples) is softer than the cube's material, so the
+# fingertips sink through the layer instead of indenting the cube and the grasp slips during
+# the lift; at 1e7 the cube is carried (fingertip forces 6-7 N at closure, 1.2-1.7 N in the air).
+GRASP_SOFT_PENALTY = 1e7
 CONTACT = physics.ContactParams(penalty_coefficient=1e6, coulomb_friction_coefficient=0.4)
 # The arm's links carry the same frictional material as the cube: the contact
 # pair combines both owners' coefficients by geometric mean, so the arm pushes
@@ -181,6 +197,41 @@ def cube_coords(half: float) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+def solid_fingertip_shape_files(cache_dir: pathlib.Path) -> dict[str, str]:
+    """Solid-box collision models for the two 2F-85 fingertip links, written to
+    ``cache_dir`` (``2f_85_<side>_finger_tip_box.mochi.h5``), keyed by link name.
+
+    The stock fingertip collision meshes are thin shells: their SDF is at most 9 mm
+    deep and the center of their bounding box lies outside the solid. That is fine
+    for the fingers' own contact samples against an object's SDF (the rigid grasp),
+    but a soft body's surface samples tunnel through such a shell - the fingertips
+    sink into the soft cube with 0.05 N instead of 4 N of contact force. A soft
+    body has no SDF of its own, so for the soft grasp the fingertip links carry a
+    solid box with the mesh's extents in the link frame instead (the links keep
+    their mass properties and render models). Requires ``h5py``."""
+    import h5py
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    files = {}
+    for side in ("left", "right"):
+        source = resolve_asset(f"bots/grippers/2f_85/collision/2f_85_{side}_finger_tip.mochi.h5")
+        with h5py.File(source, "r") as model:
+            coords = np.asarray(model["mesh/coordinates"], dtype=np.float64)
+        lo, hi = coords.min(axis=0), coords.max(axis=0)
+        # Corner order of cube_coords(): bit 0 -> x, bit 1 -> y, bit 2 -> z.
+        corners = np.array(
+            [[hi[0] if i & 1 else lo[0], hi[1] if i & 2 else lo[1], hi[2] if i & 4 else lo[2]] for i in range(8)],
+            dtype=np.float32,
+        )
+        path = cache_dir / f"2f_85_{side}_finger_tip_box.mochi.h5"
+        with h5py.File(path, "w") as out:
+            mesh = out.create_group("mesh")
+            mesh.create_dataset("coordinates", data=corners)
+            mesh.create_dataset("connectivity", data=CUBE_CONN.reshape(-1, 4))
+        files[f"2f_85_{side}_finger_tip_link"] = str(path)
+    return files
+
+
 def spawn_bot(
     scene,
     bot_path: str,
@@ -189,20 +240,30 @@ def spawn_bot(
     with_controller: bool = True,
     with_contact: bool = True,
     contact=None,
+    link_shape_files=None,
 ):
     """A bot prefab with the given contact material and (optionally) a pose
     controller whose gains come from ``gains_of(joint_name) -> (k, d)`` for each
     revolute joint (welded and closed-loop joints get no tracking term). Returns
     (bot, articulated actor, ``ee_link`` actor, robotics context); the context
-    must outlive the bot."""
+    must outlive the bot. ``link_shape_files`` maps link names (suffix match) to
+    collision model files that replace the prefab's."""
     prefab = robotics.load_bot_prefab_from_file(str(resolve_asset(bot_path)))
     contact = ARM_CONTACT if contact is None else contact
+    replaced = set()
     for i in range(len(prefab.links)):
         link = prefab.links[i]
         link.contact = contact
         if not with_contact:
             link.collider_type = physics.ColliderType.NONE
+        for name, path in (link_shape_files or {}).items():
+            if link.name.endswith(name):
+                link.shape_file = path
+                replaced.add(name)
         prefab.links[i] = link
+    missing = set(link_shape_files or {}) - replaced
+    if missing:
+        raise ValueError(f"no link of {bot_path} matches the shape overrides {sorted(missing)}")
     context = robotics.create_context()
     bot = robotics.create_bot(scene, prefab, context)
     arm = bot.get_articulated_actor()
@@ -245,11 +306,14 @@ def spawn_arm(scene, with_controller: bool = True, with_contact: bool = True):
     return spawn_bot(scene, ARM_BOT, EE_LINK, _arm_gains(), with_controller, with_contact)
 
 
-def spawn_gripper_arm(scene, with_controller: bool = True, with_contact: bool = True):
+def spawn_gripper_arm(
+    scene, with_controller: bool = True, with_contact: bool = True, link_shape_files=None
+):
     """FR3 arm with the Robotiq 2F-85 gripper (a closed-loop linkage: two of its
     joints are welded cycle closures, six are revolute); the gripper's revolute
     joints get soft gains, the arm's the reach/push gains times
-    GRASP_ARM_GAIN_SCALE. The returned end-effector actor is the gripper base."""
+    GRASP_ARM_GAIN_SCALE. The returned end-effector actor is the gripper base.
+    ``link_shape_files``: see :func:`spawn_bot`."""
     arm_gains = _arm_gains()
 
     def gains_of(name):
@@ -259,7 +323,14 @@ def spawn_gripper_arm(scene, with_controller: bool = True, with_contact: bool = 
         return GRIPPER_GAINS
 
     return spawn_bot(
-        scene, GRIPPER_BOT, GRIPPER_EE_LINK, gains_of, with_controller, with_contact, GRASP_CONTACT
+        scene,
+        GRIPPER_BOT,
+        GRIPPER_EE_LINK,
+        gains_of,
+        with_controller,
+        with_contact,
+        GRASP_CONTACT,
+        link_shape_files,
     )
 
 
@@ -794,34 +865,72 @@ def grasp_ik_poses(points):
     return poses
 
 
-def build_grasp_task():
+def build_grasp_task(soft: bool = False, fingertip_box_dir: pathlib.Path | None = None):
     """Scene, actors and initial controls of the grasp task (see :func:`task_grasp`).
-    Returns (scene, bot, arm, cube, context, controls0, goal, dt)."""
+    Returns (scene, bot, arm, cube, cube_position, context, controls0, goal, dt);
+    ``cube_position()`` is the cube's center of mass (rigid) or mean node position
+    (soft, ``soft=True``: a neo-Hookean cube of the same size and mass, gripped by
+    solid-box fingertips written to ``fingertip_box_dir``, see
+    :func:`solid_fingertip_shape_files`)."""
+    if soft and fingertip_box_dir is None:
+        raise ValueError("the soft grasp needs fingertip_box_dir for the fingertip collision models")
     cube_pos = np.array([0.50, 0.0, GRASP_CUBE_HALF - 0.001])
-    print("[robot_grasp] IK for the descend / grasp / lift poses")
+    print(f"[{'robot_grasp_soft' if soft else 'robot_grasp'}] IK for the descend / grasp / lift poses")
     grasp_mid = cube_pos + np.array([GRASP_TIP_AHEAD, 0.0, 0.015])
     pre_mid = grasp_mid + np.array([0.0, 0.0, 0.12])
     lift_mid = np.array([cube_pos[0], cube_pos[1], 0.30])
     q_pre, q_grasp, q_lift = grasp_ik_poses([pre_mid, grasp_mid, lift_mid])
 
-    scene = physics.create_scene("robot_grasp")
+    scene = physics.create_scene("robot_grasp_soft" if soft else "robot_grasp")
     scene.set_gravity([0.0, 0.0, -9.81])
-    bot, arm, base, context = spawn_gripper_arm(scene)
+    bot, arm, base, context = spawn_gripper_arm(
+        scene, link_shape_files=solid_fingertip_shape_files(fingertip_box_dir) if soft else None
+    )
     scene.create_rigid_actor(
         name="ground",
         shape=physics.create_plane_shape(normal=[0.0, 0.0, 1.0], distance=0.0),
         is_static=True,
         contact=GRASP_CONTACT,
     )
-    cube = scene.create_rigid_actor(
-        name="cube",
-        shape=physics.create_tet_mesh_shape(
-            coordinates=cube_coords(GRASP_CUBE_HALF), connectivity=CUBE_CONN
-        ),
-        density=GRASP_CUBE_DENSITY,
-        contact=GRASP_CONTACT,
-        world_from_local=physics.TransformRT(cube_pos.tolist()),
-    )
+    if soft:
+        coordinates, connectivity = box_tet_mesh(size=2.0 * GRASP_CUBE_HALF, cells=PUSH_SOFT_CELLS)
+        rest = coordinates.reshape(-1, 3)
+        material = physics.SoftMaterialParams(
+            density=GRASP_CUBE_DENSITY, mass_damping_coefficient=PUSH_SOFT_MASS_DAMPING
+        )
+        material.neo_hookean = physics.NeoHookeanMaterialParams(
+            youngs_modulus=GRASP_SOFT_YOUNG, poisson_ratio=PUSH_SOFT_POISSON
+        )
+        cube = scene.create_soft_actor(
+            name="cube",
+            shape=physics.create_tet_mesh_shape(coordinates=coordinates, connectivity=connectivity),
+            material=material,
+            contact=physics.ContactParams(
+                penalty_coefficient=GRASP_SOFT_PENALTY,
+                coulomb_friction_coefficient=GRASP_CONTACT.coulomb_friction_coefficient,
+                friction_falloff_vel=GRASP_SOFT_FALLOFF,
+            ),
+            world_from_local=physics.TransformRT(cube_pos.tolist()),
+        )
+
+        def cube_position() -> np.ndarray:
+            u = np.asarray(cube.get_displacements(), dtype=np.float64).reshape(-1, 3)
+            return cube_pos + (rest + u).mean(axis=0)
+
+    else:
+        cube = scene.create_rigid_actor(
+            name="cube",
+            shape=physics.create_tet_mesh_shape(
+                coordinates=cube_coords(GRASP_CUBE_HALF), connectivity=CUBE_CONN
+            ),
+            density=GRASP_CUBE_DENSITY,
+            contact=GRASP_CONTACT,
+            world_from_local=physics.TransformRT(cube_pos.tolist()),
+        )
+
+        def cube_position() -> np.ndarray:
+            return np.asarray(cube.get_center_of_mass_transform().translation)
+
     arm.set_articulated_pose_from_joints(q_pre)
     configure(scene)
 
@@ -839,10 +948,20 @@ def build_grasp_task():
     # Where the cube ends up when it stays in the grasp (under the lifted fingertips),
     # displaced sideways: the optimizer has to carry it there.
     goal = np.array([cube_pos[0] - 0.005, cube_pos[1], 0.27]) + GRASP_GOAL_OFFSET
-    return scene, bot, arm, cube, context, controls0, goal, dt
+    return scene, bot, arm, cube, cube_position, context, controls0, goal, dt
 
 
 def task_grasp(output_dir: pathlib.Path, num_iterations: int, check: bool) -> None:
+    _task_grasp_impl(output_dir, num_iterations, check, soft=False)
+
+
+def task_grasp_soft(output_dir: pathlib.Path, num_iterations: int, check: bool) -> None:
+    """The grasp with a soft cube (see :func:`task_grasp`); failure-adaptive substeps as in
+    the soft push."""
+    _task_grasp_impl(output_dir, num_iterations, check, soft=True)
+
+
+def _task_grasp_impl(output_dir: pathlib.Path, num_iterations: int, check: bool, soft: bool) -> None:
     """FR3 + 2F-85: descend onto a cube, close the fingers, lift it straight up.
     The goal for the cube lies 15 cm beside the lift line, so the loss (the
     cube's final position) can only be reduced by carrying the held cube
@@ -856,7 +975,10 @@ def task_grasp(output_dir: pathlib.Path, num_iterations: int, check: bool) -> No
     parametrizes the carry by knots updated along the gradient's direction:
     Adam's first step moves every per-step target by the learning rate at
     once, and that jerk drops the cube too.)"""
-    scene, bot, arm, cube, context, controls0, goal, dt = build_grasp_task()
+    name = "robot_grasp_soft" if soft else "robot_grasp"
+    scene, bot, arm, cube, cube_position, context, controls0, goal, dt = build_grasp_task(
+        soft, fingertip_box_dir=output_dir / "fingertip_boxes" if soft else None
+    )
     # Optimize the arm's targets of the carry phase; the fingers keep their closure
     # (a finger shoving the cube sideways is the quickest way to move it, and to drop it).
     trainable = np.zeros(controls0.shape, dtype=bool)
@@ -890,27 +1012,35 @@ def task_grasp(output_dir: pathlib.Path, num_iterations: int, check: bool) -> No
 
     class CubeLoss:
         def value(self) -> float:
-            d = np.asarray(cube.get_center_of_mass_transform().translation) - goal
+            d = cube_position() - goal
             return 0.5 * float(d @ d)
 
         def accumulate_output_grad(self) -> None:
-            d = np.asarray(cube.get_center_of_mass_transform().translation) - goal
-            g = np.zeros(7)
-            g[:3] = d
-            diffsim.get_center_of_mass_transform_backward(cube, g)
+            d = cube_position() - goal
+            if soft:
+                num_nodes = np.asarray(cube.get_displacements()).size // 3
+                diffsim.get_displacements_backward(cube, np.tile(d / num_nodes, num_nodes))
+            else:
+                g = np.zeros(7)
+                g[:3] = d
+                diffsim.get_center_of_mass_transform_backward(cube, g)
 
     try:
         run_task(
-            "robot_grasp",
+            name,
             scene,
             arm,
             controls0=controls0,
             loss=CubeLoss(),
-            tracked_point=lambda: np.asarray(cube.get_center_of_mass_transform().translation),
+            tracked_point=cube_position,
             target=goal,
             look_from=[1.4, -1.2, 0.7],
             look_at=[0.5, 0.0, 0.15],
-            title="FR3 + 2F-85 grasp: normalized gradient descent on the carry knots through frictional contact",
+            title=(
+                "FR3 + 2F-85 grasp of a soft cube: normalized gradient descent on the carry knots"
+                if soft
+                else "FR3 + 2F-85 grasp: normalized gradient descent on the carry knots through frictional contact"
+            ),
             output_dir=output_dir,
             num_iterations=num_iterations,
             learning_rate=0.02,
@@ -920,6 +1050,8 @@ def task_grasp(output_dir: pathlib.Path, num_iterations: int, check: bool) -> No
             parametrize=parametrize,
             params0=params0,
             optimizer_kind="ngd",
+            substep_levels=PUSH_SUBSTEP_LEVELS if soft else 0,
+            stall_tolerance=PUSH_SOFT_STALL_TOLERANCE if soft else None,
         )
     finally:
         robotics.destroy_bot(scene, bot)
@@ -1158,7 +1290,7 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=40)
     parser.add_argument(
         "--task",
-        choices=["reach", "push", "push_soft", "grasp", "tendon", "both", "all"],
+        choices=["reach", "push", "push_soft", "grasp", "grasp_soft", "tendon", "both", "all"],
         default="all",
     )
     parser.add_argument("--check", action="store_true", help="finite-difference gradient check first")
@@ -1174,6 +1306,8 @@ def main() -> None:
         task_push_soft(args.output_dir, args.iterations, args.check)
     if args.task in ("grasp", "all"):
         task_grasp(args.output_dir, args.iterations, args.check)
+    if args.task in ("grasp_soft", "all"):
+        task_grasp_soft(args.output_dir, args.iterations, args.check)
     if args.task in ("tendon", "all"):
         task_tendon(args.output_dir, args.iterations, args.check)
     print(f"done in {time.time() - start:.1f} s")
