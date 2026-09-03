@@ -14,6 +14,11 @@
 
 """PyTorch autograd bridge for differentiable SuperDex rollouts.
 
+Two entry points: :class:`TorchRollout` for open-loop inputs (control sequences,
+forces, parameters as tensors) and :class:`PolicyRollout` for a closed loop (a
+torch policy maps the observed state to the controller targets at every step,
+and the policy parameters receive the loss gradient, feedback path included).
+
 :class:`TorchRollout` wraps a fixed scene + rollout schedule + loss into a
 callable that maps input tensors to a scalar ``torch.Tensor`` loss, with the
 backward pass served by the engine's discrete adjoint
@@ -113,9 +118,13 @@ import numpy as np
 
 import superdex.physics as physics
 from superdex.physics.diffsim_rollout import (
-    RIGID_DOF_SIZE,
     DifferentiableRollout,
+    RIGID_DOF_SIZE,
+    RIGID_POSE_SIZE,
     RolloutResult,
+    _StepRecord,
+    _real_dtype,
+    step_with_substeps,
 )
 
 try:
@@ -146,7 +155,15 @@ SOFT_MATERIAL_FIELDS = (
     "mass_damping_coefficient",
 )
 
-__all__ = ["CONTACT_PARAM_FIELDS", "SOFT_MATERIAL_FIELDS", "TorchRollout"]
+__all__ = [
+    "ArticulatedPoseObservation",
+    "CONTACT_PARAM_FIELDS",
+    "PolicyRollout",
+    "PolicyRolloutResult",
+    "SOFT_MATERIAL_FIELDS",
+    "TorchRollout",
+    "TranslationObservation",
+]
 
 
 def _soft_material_get(params, field: str) -> float:
@@ -582,3 +599,292 @@ class TorchRollout:
             grad_initial_states,
             grad_soft_materials,
         )
+
+
+# ---------------------------------------------------------------------------
+# Closed-loop rollouts: a torch policy in the loop, gradients through the feedback
+# ---------------------------------------------------------------------------
+
+
+class ArticulatedPoseObservation:
+    """The joint pose of an articulated actor (rotation-vector DoFs) as an observation."""
+
+    def __init__(self, actor):
+        if actor.get_type() != physics.ActorType.ARTICULATED:
+            raise ValueError(f"{actor.get_name()!r} is not an articulated actor")
+        self.actor = actor
+        self.size = actor.get_num_dofs()
+
+    def value(self) -> np.ndarray:
+        pose = np.zeros(self.size)
+        self.actor.get_articulated_pose(pose)
+        return pose
+
+    def accumulate_output_grad(self, grad: np.ndarray) -> None:
+        diffsim.get_articulated_pose_backward(
+            self.actor, np.ascontiguousarray(grad, dtype=_real_dtype())
+        )
+
+
+class TranslationObservation:
+    """The world translation of a rigid actor's center of mass as an observation."""
+
+    size = 3
+
+    def __init__(self, actor):
+        if actor.get_type() != physics.ActorType.RIGID:
+            raise ValueError(f"{actor.get_name()!r} is not a rigid actor")
+        self.actor = actor
+
+    def value(self) -> np.ndarray:
+        return np.asarray(self.actor.get_center_of_mass_transform().translation, dtype=np.float64)
+
+    def accumulate_output_grad(self, grad: np.ndarray) -> None:
+        full = np.zeros(RIGID_POSE_SIZE, dtype=_real_dtype())
+        full[:3] = grad
+        diffsim.get_center_of_mass_transform_backward(self.actor, full)
+
+
+@dataclasses.dataclass
+class PolicyRolloutResult:
+    loss: float
+    fd_valid: bool
+    max_adjoint_residual: float
+    steps_swept: int
+    split_steps: list
+
+
+class _PolicyRolloutLoss(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, rollout, *params):
+        loss, grads = rollout._run(params)
+        ctx.grads = grads
+        return torch.tensor(loss, dtype=torch.float64)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return (None, *[grad_output * g for g in ctx.grads])
+
+
+class PolicyRollout:
+    """A closed-loop differentiable rollout: at every step a torch policy maps the current
+    observation (and optionally the previous ``history - 1`` observations) to the
+    pose-controller targets of the control actors, and the loss gradient with respect to
+    the policy parameters is computed with the engine's adjoint, including the feedback
+    path (the dependence of each control on the states the policy observed).
+
+    ``policy`` is a callable (typically an ``nn.Module``) from a float64 tensor of shape
+    ``(history * total_observation_size,)`` - the newest observation first - to a float64
+    tensor of shape ``(total_control_size,)``, the concatenated targets of
+    ``control_actors``; every parameter of ``policy.parameters()`` that requires a gradient
+    receives ``.grad`` from ``loss.backward()``. Observations are the ``value()`` /
+    ``accumulate_output_grad(grad)`` objects above, taken from the pre-step state (the
+    initial state for the first step, whose observation is treated as a constant: only
+    the states produced by the rollout carry the feedback gradient). Losses follow the
+    ``diffsim_rollout`` protocol. As in :class:`TorchRollout`, the forward and backward
+    sweeps both run when the object is called, and every call restores the initial scene
+    state captured at construction.
+
+    The policy gradient is dL/dtheta = sum_k (du_k/dtheta)^T lambda_k, where lambda_k is
+    the engine's gradient with respect to the targets applied at step k; the feedback
+    enters through lambda_{x_{k-1}} += (do/dx_{k-1})^T (du_k/do)^T lambda_k, injected as
+    an output gradient at the observed state before that step's back-propagation.
+    """
+
+    def __init__(
+        self,
+        scene,
+        dt: float,
+        num_steps: int,
+        policy,
+        observations: Sequence,
+        control_actors: Sequence,
+        *,
+        history: int = 1,
+        terminal_losses: Sequence = (),
+        step_losses: Callable[[int], Sequence] | None = None,
+        max_substep_levels: int = 0,
+        substep_residual_tolerance: float | None = None,
+    ):
+        if not terminal_losses and step_losses is None:
+            raise ValueError("provide terminal_losses and/or step_losses")
+        if history < 1:
+            raise ValueError("history must be at least 1")
+        if not control_actors:
+            raise ValueError("provide at least one control actor")
+        if not observations:
+            raise ValueError("provide at least one observation")
+        self.scene = scene
+        self.dt = dt
+        self.num_steps = num_steps
+        self.policy = policy
+        self.observations = list(observations)
+        self.history = history
+        self._terminal_losses = list(terminal_losses)
+        self._step_losses = step_losses
+        self._driver = DifferentiableRollout(
+            scene,
+            dt=dt,
+            num_steps=num_steps,
+            max_substep_levels=max_substep_levels,
+            substep_residual_tolerance=substep_residual_tolerance,
+        )
+        by_name = {entry.name: entry for entry in self._driver.entries}
+        self._control_entries = []
+        for actor in control_actors:
+            name = actor.get_name()
+            if name not in by_name or not by_name[name].has_controller:
+                raise ValueError(f"control actor {name!r} has no pose controller")
+            self._control_entries.append(by_name[name])
+        self.control_size = sum(e.dofs_size for e in self._control_entries)
+        self.observation_size = sum(o.size for o in self.observations)
+        self._params = [p for p in policy.parameters() if p.requires_grad] if hasattr(policy, "parameters") else []
+        self._state_init = scene.capture_state()
+        self.last_result: PolicyRolloutResult | None = None
+
+    def close(self) -> None:
+        if self._state_init is not None:
+            self.scene.release_state(self._state_init)
+            self._state_init = None
+
+    def __call__(self) -> torch.Tensor:
+        if self._state_init is None:
+            raise RuntimeError("PolicyRollout is closed")
+        return _PolicyRolloutLoss.apply(self, *self._params)
+
+    # -- pieces ------------------------------------------------------------
+
+    def _observe(self) -> np.ndarray:
+        return np.concatenate([np.asarray(o.value(), dtype=np.float64).reshape(-1) for o in self.observations])
+
+    def _inject_observation_grad(self, grad: np.ndarray) -> None:
+        offset = 0
+        for o in self.observations:
+            o.accumulate_output_grad(grad[offset : offset + o.size])
+            offset += o.size
+
+    def _apply_controls(self, controls: np.ndarray) -> None:
+        offset = 0
+        for entry in self._control_entries:
+            entry.actor.set_articulated_target_pose(
+                np.ascontiguousarray(controls[offset : offset + entry.dofs_size], dtype=np.float64)
+            )
+            offset += entry.dofs_size
+
+    def _read_control_grad(self) -> np.ndarray:
+        real = _real_dtype()
+        grad = np.zeros(self.control_size)
+        offset = 0
+        for entry in self._control_entries:
+            g = np.zeros(entry.dofs_size, dtype=real)
+            diffsim.set_articulated_target_pose_backward(entry.actor, g)
+            grad[offset : offset + entry.dofs_size] = g
+            offset += entry.dofs_size
+        return grad
+
+    def _run(self, params):
+        scene = self.scene
+        driver = self._driver
+        scene.restore_state(self._state_init, False)
+        # Forward: policy in the loop; keep each step's torch graph for the reverse sweep.
+        obs_history = [self._observe()] * self.history  # newest first
+        graphs = []  # (obs_tensor, control_tensor) per step
+        records: list[_StepRecord] = []
+        try:
+            for step in range(self.num_steps):
+                obs = np.concatenate(obs_history[: self.history])
+                with torch.enable_grad():
+                    obs_t = torch.tensor(obs, dtype=torch.float64, requires_grad=True)
+                    u_t = self.policy(obs_t)
+                if u_t.shape != (self.control_size,) or u_t.dtype != torch.float64:
+                    raise ValueError(
+                        f"the policy must return a float64 tensor of shape ({self.control_size},), "
+                        f"got {tuple(u_t.shape)} {u_t.dtype}"
+                    )
+                graphs.append((obs_t, u_t))
+                self._apply_controls(u_t.detach().numpy())
+                if driver.max_substep_levels == 0:
+                    pre = scene.capture_state()
+                    scene.step(self.dt)
+                    records.append(_StepRecord(step, self.dt, pre, scene.capture_state()))
+                else:
+                    step_with_substeps(
+                        scene,
+                        self.dt,
+                        driver.max_substep_levels,
+                        driver.substep_residual_tolerance,
+                        step=step,
+                        on_substep=lambda pre, post, sub_dt, step=step: records.append(
+                            _StepRecord(step, sub_dt, pre, post)
+                        ),
+                    )
+                obs_history.insert(0, self._observe())
+        except BaseException:
+            driver._release(records)
+            raise
+        loss_value = sum(loss.value() for loss in self._terminal_losses)
+
+        # Reverse sweep. pending[k] is the gradient to inject at the state after step k
+        # (the observation the policy used for later steps); the initial state (k = -1) is
+        # a constant.
+        pending: dict[int, np.ndarray] = {}
+        param_grads = [np.zeros(p.shape) for p in params]
+        fd_valid = True
+        max_residual = 0.0
+        steps_swept = 0
+        diffsim.reset_back_propagation(scene)
+        for i in range(len(records) - 1, -1, -1):
+            record = records[i]
+            last_of_step = i == len(records) - 1 or records[i + 1].step != record.step
+            first_of_step = i == 0 or records[i - 1].step != record.step
+            diffsim.prepare_back_propagate(scene, record.post, record.pre)
+            if i == len(records) - 1:
+                for loss in self._terminal_losses:
+                    loss.accumulate_output_grad()
+            if last_of_step:
+                if self._step_losses is not None:
+                    for loss in self._step_losses(record.step):
+                        loss_value += loss.value()
+                        loss.accumulate_output_grad()
+                if record.step in pending:
+                    self._inject_observation_grad(pending.pop(record.step))
+            diffsim.back_propagate(scene)
+            steps_swept += 1
+            stats = diffsim.get_back_propagation_scene_stats(scene)
+            fd_valid = fd_valid and stats.finite_diff_valid
+            max_residual = max(max_residual, stats.residual_norm)
+            if first_of_step:
+                lambda_u = self._read_control_grad()
+                obs_t, u_t = graphs[record.step]
+                grads = torch.autograd.grad(
+                    u_t,
+                    [obs_t, *params],
+                    grad_outputs=torch.tensor(lambda_u, dtype=torch.float64),
+                    allow_unused=True,
+                )
+                for accum, g in zip(param_grads, grads[1:]):
+                    if g is not None:
+                        accum += g.detach().numpy()
+                if grads[0] is not None:
+                    obs_grad = grads[0].detach().numpy()
+                    for h in range(self.history):
+                        source = record.step - 1 - h  # the state after step `source`
+                        if source < 0:
+                            continue
+                        block = obs_grad[h * self.observation_size : (h + 1) * self.observation_size]
+                        pending[source] = pending.get(source, 0.0) + block
+        split_steps = []
+        for record in records:
+            if split_steps and split_steps[-1][0] == record.step:
+                split_steps[-1] = (record.step, split_steps[-1][1] + 1)
+            else:
+                split_steps.append((record.step, 1))
+        driver._release(records)
+        self.last_result = PolicyRolloutResult(
+            loss=loss_value,
+            fd_valid=fd_valid,
+            max_adjoint_residual=max_residual,
+            steps_swept=steps_swept,
+            split_steps=[entry for entry in split_steps if entry[1] > 1],
+        )
+        return loss_value, [torch.tensor(g, dtype=torch.float64) for g in param_grads]

@@ -548,3 +548,152 @@ class ContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PolicyRolloutTest(unittest.TestCase):
+    """Closed-loop policy gradients: a linear policy on the pendulum maps the observed
+    joint pose (and, with history 2, the previous one) to the controller targets; the
+    gradients with respect to the policy weights and biases must match central finite
+    differences of the closed-loop rollout, which include the feedback path.
+    """
+
+    FD_EPS = 1e-6
+    TOL = 1e-5
+
+    def _closed_loop(self, history: int, running: bool):
+        diffsim_torch = _make_bridge_module()
+        scene, chain = scenes.pendulum(with_controller=True)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        num_dofs = chain.get_num_dofs()
+        num_steps = 6
+        pose0 = np.zeros(num_dofs)
+        chain.get_articulated_pose(pose0)
+        terminal = ArticulatedPoseErrorLoss(chain, ref=pose0 + 0.1)
+        running_loss = ArticulatedPoseErrorLoss(chain, ref=pose0 - 0.05)
+        policy = torch.nn.Linear(history * num_dofs, num_dofs).double()
+        with torch.no_grad():
+            weight = 0.1 * np.cos(np.arange(history * num_dofs * num_dofs, dtype=np.float64)).reshape(
+                num_dofs, history * num_dofs
+            )
+            weight[:, :num_dofs] += 0.9 * np.eye(num_dofs)  # mostly "hold the current pose"
+            policy.weight.copy_(torch.tensor(weight))
+            policy.bias.copy_(torch.tensor(0.02 * np.arange(1, num_dofs + 1, dtype=np.float64)))
+        rollout = diffsim_torch.PolicyRollout(
+            scene,
+            dt=DT,
+            num_steps=num_steps,
+            policy=policy,
+            observations=[diffsim_torch.ArticulatedPoseObservation(chain)],
+            control_actors=[chain],
+            history=history,
+            terminal_losses=[terminal],
+            step_losses=(lambda step: [running_loss]) if running else None,
+        )
+        self.addCleanup(rollout.close)
+        return scene, chain, policy, rollout, terminal, running_loss, num_steps, history, num_dofs
+
+    def _fd_check(self, history: int, running: bool) -> None:
+        scene, chain, policy, rollout, terminal, running_loss, num_steps, history, n = self._closed_loop(
+            history, running
+        )
+        loss = rollout()
+        loss.backward()
+        analytic = {name: p.grad.detach().numpy().copy() for name, p in policy.named_parameters()}
+        state_init = scene.capture_state()
+
+        def objective(weight: np.ndarray, bias: np.ndarray) -> float:
+            scene.restore_state(state_init, False)
+            obs = np.zeros(n)
+            chain.get_articulated_pose(obs)
+            hist = [obs.copy()] * history
+            total = 0.0
+            for _ in range(num_steps):
+                u = weight @ np.concatenate(hist[:history]) + bias
+                chain.set_articulated_target_pose(np.ascontiguousarray(u))
+                scene.step(DT)
+                chain.get_articulated_pose(obs)
+                hist.insert(0, obs.copy())
+                if running:
+                    total += running_loss.value()
+            return total + terminal.value()
+
+        weight = policy.weight.detach().numpy().copy()
+        bias = policy.bias.detach().numpy().copy()
+        loss_value = float(loss.detach())
+        self.assertAlmostEqual(objective(weight, bias), loss_value, delta=1e-12 * max(1.0, abs(loss_value)))
+        for name, array in (("weight", weight), ("bias", bias)):
+            fd = np.zeros_like(array)
+            for index in np.ndindex(array.shape):
+                values = []
+                for sign in (+1.0, -1.0):
+                    saved = array[index]
+                    array[index] = saved + sign * self.FD_EPS
+                    values.append(objective(weight, bias))
+                    array[index] = saved
+                fd[index] = (values[0] - values[1]) / (2.0 * self.FD_EPS)
+            rel = np.linalg.norm(analytic[name] - fd) / np.linalg.norm(fd)
+            self.assertLessEqual(rel, self.TOL, f"{name} gradient mismatch:\n{analytic[name]}\n{fd}")
+        scene.release_all_states()
+        result = rollout.last_result
+        self.assertTrue(result.fd_valid)
+        self.assertEqual(result.steps_swept, num_steps)
+
+    def test_linear_policy_history_1_vs_fd(self) -> None:
+        self._fd_check(history=1, running=False)
+
+    def test_linear_policy_history_2_running_loss_vs_fd(self) -> None:
+        self._fd_check(history=2, running=True)
+
+    def test_nonlinear_policy_vs_fd(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, chain = scenes.pendulum(with_controller=True)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        n = chain.get_num_dofs()
+        pose0 = np.zeros(n)
+        chain.get_articulated_pose(pose0)
+        terminal = ArticulatedPoseErrorLoss(chain, ref=pose0 + 0.1)
+        torch.manual_seed(0)
+        policy = torch.nn.Sequential(torch.nn.Linear(n, 8), torch.nn.Tanh(), torch.nn.Linear(8, n)).double()
+        with torch.no_grad():
+            policy[2].weight.mul_(0.1)
+            policy[2].bias.copy_(torch.tensor(pose0))
+        rollout = diffsim_torch.PolicyRollout(
+            scene, dt=DT, num_steps=5, policy=policy,
+            observations=[diffsim_torch.ArticulatedPoseObservation(chain)],
+            control_actors=[chain], terminal_losses=[terminal],
+        )
+        self.addCleanup(rollout.close)
+        loss = rollout()
+        loss.backward()
+        params = [p for p in policy.parameters()]
+        analytic = np.concatenate([p.grad.detach().numpy().ravel() for p in params])
+        state_init = scene.capture_state()
+
+        def objective() -> float:
+            scene.restore_state(state_init, False)
+            obs = np.zeros(n)
+            for _ in range(5):
+                chain.get_articulated_pose(obs)
+                with torch.no_grad():
+                    u = policy(torch.tensor(obs, dtype=torch.float64)).numpy()
+                chain.set_articulated_target_pose(np.ascontiguousarray(u))
+                scene.step(DT)
+            return terminal.value()
+
+        fd = []
+        for p in params:
+            flat = p.data.view(-1)
+            for j in range(flat.numel()):
+                saved = float(flat[j])
+                values = []
+                for sign in (+1.0, -1.0):
+                    flat[j] = saved + sign * self.FD_EPS
+                    values.append(objective())
+                flat[j] = saved
+                fd.append((values[0] - values[1]) / (2.0 * self.FD_EPS))
+        fd = np.array(fd)
+        scene.release_all_states()
+        rel = np.linalg.norm(analytic - fd) / np.linalg.norm(fd)
+        self.assertLessEqual(rel, self.TOL, f"policy gradient mismatch: rel {rel}")
