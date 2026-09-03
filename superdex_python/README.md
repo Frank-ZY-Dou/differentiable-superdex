@@ -45,9 +45,9 @@ contact included. Three layers build on each other:
 - `superdex.physics.diffsim_torch.TorchRollout` - a `torch.autograd.Function` around the
   driver: controls, external forces, gravity, contact materials, densities, soft initial states
   and soft material parameters as differentiable tensors; `PolicyRollout` closes the loop: a
-  torch policy maps the observed joint poses / positions to the controller targets at every
-  step and its parameters receive the loss gradient through the simulator, feedback included
-  (analytic policy gradients).
+  torch policy maps the observed joint poses / positions to the controller targets and/or the
+  external forces (joint torques) at every step and its parameters receive the loss gradient
+  through the simulator, feedback included (analytic policy gradients).
 
 Supported: rigid, articulated (with pose controllers), soft (tetrahedral FEM) and rod actors;
 contact between them and against static colliders (a soft or rod actor collides with rigid and

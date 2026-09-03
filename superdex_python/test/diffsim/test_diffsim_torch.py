@@ -653,6 +653,67 @@ class PolicyRolloutTest(unittest.TestCase):
     def test_linear_policy_time_feature_vs_fd(self) -> None:
         self._fd_check(history=1, running=True, time_feature=True)
 
+    def test_torque_policy_vs_fd(self) -> None:
+        """A torque policy on a pendulum without a controller (joint torques from the joint
+        pose), plus a mixed targets-and-torques policy on the controller pendulum."""
+        diffsim_torch = _make_bridge_module()
+        for with_controller in (False, True):
+            scene, chain = scenes.pendulum(with_controller=with_controller)
+            self.addCleanup(physics.destroy_scene, scene)
+            configure_for_differentiability(scene)
+            n = chain.get_num_dofs()
+            pose0 = np.zeros(n)
+            chain.get_articulated_pose(pose0)
+            terminal = ArticulatedPoseErrorLoss(chain, ref=pose0 + 0.1)
+            out_size = 2 * n if with_controller else n
+            policy = torch.nn.Linear(n, out_size).double()
+            with torch.no_grad():
+                policy.weight.copy_(torch.tensor(0.3 * np.cos(np.arange(out_size * n, dtype=np.float64)).reshape(out_size, n)))
+                policy.bias.copy_(torch.tensor(0.05 * np.arange(1, out_size + 1, dtype=np.float64)))
+                if with_controller:
+                    policy.weight[:n, :] += torch.eye(n, dtype=torch.float64)
+            force_dofs = np.arange(n, dtype=np.int32)
+            rollout = diffsim_torch.PolicyRollout(
+                scene, dt=DT, num_steps=5, policy=policy,
+                observations=[diffsim_torch.ArticulatedPoseObservation(chain)],
+                control_actors=[chain] if with_controller else (), force_actors=[chain],
+                terminal_losses=[terminal],
+            )
+            self.addCleanup(rollout.close)
+            loss = rollout()
+            loss.backward()
+            analytic = {name: p.grad.detach().numpy().copy() for name, p in policy.named_parameters()}
+            state_init = scene.capture_state()
+            weight = policy.weight.detach().numpy().copy()
+            bias = policy.bias.detach().numpy().copy()
+
+            def objective() -> float:
+                scene.restore_state(state_init, False)
+                obs = np.zeros(n)
+                for _ in range(5):
+                    chain.get_articulated_pose(obs)
+                    u = weight @ obs + bias
+                    if with_controller:
+                        chain.set_articulated_target_pose(np.ascontiguousarray(u[:n]))
+                    chain.set_external_forces_on_dofs(force_dofs, np.ascontiguousarray(u[-n:]))
+                    scene.step(DT)
+                return terminal.value()
+
+            self.assertAlmostEqual(objective(), float(loss.detach()), delta=1e-12)
+            for name, array in (("weight", weight), ("bias", bias)):
+                fd = np.zeros_like(array)
+                for index in np.ndindex(array.shape):
+                    values = []
+                    for sign in (+1.0, -1.0):
+                        saved = array[index]
+                        array[index] = saved + sign * self.FD_EPS
+                        values.append(objective())
+                        array[index] = saved
+                    fd[index] = (values[0] - values[1]) / (2.0 * self.FD_EPS)
+                rel = np.linalg.norm(analytic[name] - fd) / np.linalg.norm(fd)
+                self.assertLessEqual(rel, self.TOL, f"controller={with_controller} {name}: rel {rel}")
+            scene.release_all_states()
+
     def test_nonlinear_policy_vs_fd(self) -> None:
         diffsim_torch = _make_bridge_module()
         scene, chain = scenes.pendulum(with_controller=True)

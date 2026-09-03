@@ -16,8 +16,9 @@
 
 Two entry points: :class:`TorchRollout` for open-loop inputs (control sequences,
 forces, parameters as tensors) and :class:`PolicyRollout` for a closed loop (a
-torch policy maps the observed state to the controller targets at every step,
-and the policy parameters receive the loss gradient, feedback path included).
+torch policy maps the observed state to the controller targets and/or the
+external forces - joint torques - at every step, and the policy parameters
+receive the loss gradient, feedback path included).
 
 :class:`TorchRollout` wraps a fixed scene + rollout schedule + loss into a
 callable that maps input tensors to a scalar ``torch.Tensor`` loss, with the
@@ -675,9 +676,12 @@ class PolicyRollout:
 
     ``policy`` is a callable (typically an ``nn.Module``) from a float64 tensor of shape
     ``(history * total_observation_size,)`` - the newest observation first - to a float64
-    tensor of shape ``(total_control_size,)``, the concatenated targets of
-    ``control_actors``; every parameter of ``policy.parameters()`` that requires a gradient
-    receives ``.grad`` from ``loss.backward()``. Observations are the ``value()`` /
+    tensor of shape ``(total_control_size,)``: the concatenated pose-controller targets of
+    ``control_actors`` followed by the external forces on the force DoFs of ``force_actors``
+    (all six world-frame DoFs of a standalone rigid actor, the single-DoF joints of an
+    articulated one; torque control of an articulated actor without a pose controller is the
+    ``force_actors``-only case); every parameter of ``policy.parameters()`` that requires a
+    gradient receives ``.grad`` from ``loss.backward()``. Observations are the ``value()`` /
     ``accumulate_output_grad(grad)`` objects above, taken from the pre-step state (the
     initial state for the first step, whose observation is treated as a constant: only
     the states produced by the rollout carry the feedback gradient). Losses follow the
@@ -700,7 +704,8 @@ class PolicyRollout:
         num_steps: int,
         policy,
         observations: Sequence,
-        control_actors: Sequence,
+        control_actors: Sequence = (),
+        force_actors: Sequence = (),
         *,
         history: int = 1,
         time_feature: bool = False,
@@ -713,8 +718,8 @@ class PolicyRollout:
             raise ValueError("provide terminal_losses and/or step_losses")
         if history < 1:
             raise ValueError("history must be at least 1")
-        if not control_actors:
-            raise ValueError("provide at least one control actor")
+        if not control_actors and not force_actors:
+            raise ValueError("provide at least one control or force actor")
         if not observations:
             raise ValueError("provide at least one observation")
         self.scene = scene
@@ -740,7 +745,15 @@ class PolicyRollout:
             if name not in by_name or not by_name[name].has_controller:
                 raise ValueError(f"control actor {name!r} has no pose controller")
             self._control_entries.append(by_name[name])
-        self.control_size = sum(e.dofs_size for e in self._control_entries)
+        self._force_entries = []
+        for actor in force_actors:
+            name = actor.get_name()
+            if name not in by_name or not by_name[name].force_dofs:
+                raise ValueError(f"force actor {name!r} takes no external forces")
+            self._force_entries.append(by_name[name])
+        self.target_size = sum(e.dofs_size for e in self._control_entries)
+        self.force_size = sum(len(e.force_dofs) for e in self._force_entries)
+        self.control_size = self.target_size + self.force_size
         self.observation_size = sum(o.size for o in self.observations)
         self.input_size = history * self.observation_size + (1 if self.time_feature else 0)
         self._params = [p for p in policy.parameters() if p.requires_grad] if hasattr(policy, "parameters") else []
@@ -751,6 +764,14 @@ class PolicyRollout:
         if self._state_init is not None:
             self.scene.release_state(self._state_init)
             self._state_init = None
+
+    @property
+    def initial_state(self):
+        """The scene state captured at construction that every rollout starts from (a
+        ``scene.restore_state`` argument, e.g. to replay the trained policy)."""
+        if self._state_init is None:
+            raise RuntimeError("PolicyRollout is closed")
+        return self._state_init
 
     def __call__(self) -> torch.Tensor:
         if self._state_init is None:
@@ -775,17 +796,38 @@ class PolicyRollout:
                 np.ascontiguousarray(controls[offset : offset + entry.dofs_size], dtype=np.float64)
             )
             offset += entry.dofs_size
+        for entry in self._force_entries:
+            size = len(entry.force_dofs)
+            entry.actor.set_external_forces_on_dofs(
+                np.asarray(entry.force_dofs, dtype=np.int32),
+                np.ascontiguousarray(controls[offset : offset + size], dtype=np.float64),
+            )
+            offset += size
 
-    def _read_control_grad(self) -> np.ndarray:
+    def _read_target_grad(self, into: np.ndarray) -> None:
+        """The targets' gradient of the step just back-propagated (read once per step: the
+        engine folds the inherited substeps' gradients into the setting substep)."""
         real = _real_dtype()
-        grad = np.zeros(self.control_size)
         offset = 0
         for entry in self._control_entries:
             g = np.zeros(entry.dofs_size, dtype=real)
             diffsim.set_articulated_target_pose_backward(entry.actor, g)
-            grad[offset : offset + entry.dofs_size] = g
+            into[offset : offset + entry.dofs_size] += g
             offset += entry.dofs_size
-        return grad
+
+    def _accumulate_force_grad(self, into: np.ndarray) -> None:
+        """The external forces' gradient of the (sub)step just back-propagated (summed over
+        the substeps of a step: the same forces act in each of them)."""
+        real = _real_dtype()
+        offset = self.target_size
+        for entry in self._force_entries:
+            size = len(entry.force_dofs)
+            g = np.zeros(size, dtype=real)
+            diffsim.set_external_forces_on_dofs_backward(
+                entry.actor, np.asarray(entry.force_dofs, dtype=np.int32), g
+            )
+            into[offset : offset + size] += g
+            offset += size
 
     def _run(self, params):
         scene = self.scene
@@ -839,6 +881,7 @@ class PolicyRollout:
         fd_valid = True
         max_residual = 0.0
         steps_swept = 0
+        lambda_u = np.zeros(self.control_size)  # the current step's control gradient
         diffsim.reset_back_propagation(scene)
         for i in range(len(records) - 1, -1, -1):
             record = records[i]
@@ -860,8 +903,11 @@ class PolicyRollout:
             stats = diffsim.get_back_propagation_scene_stats(scene)
             fd_valid = fd_valid and stats.finite_diff_valid
             max_residual = max(max_residual, stats.residual_norm)
+            if last_of_step:
+                lambda_u = np.zeros(self.control_size)
+            self._accumulate_force_grad(lambda_u)
             if first_of_step:
-                lambda_u = self._read_control_grad()
+                self._read_target_grad(lambda_u)
                 obs_t, u_t = graphs[record.step]
                 grads = torch.autograd.grad(
                     u_t,

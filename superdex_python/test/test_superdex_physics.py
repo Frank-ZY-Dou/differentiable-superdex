@@ -46,14 +46,11 @@ def _drop_superdex_test_stand_ins() -> None:
         del sys.modules[name]
 
 
-def _import_superdex_physics_modules() -> tuple[
-    ModuleType, ModuleType, ModuleType, ModuleType
-]:
+def _import_superdex_physics_modules() -> tuple[ModuleType, ModuleType, ModuleType]:
     _drop_superdex_test_stand_ins()
     try:
         physics = importlib.import_module("superdex.physics")
         debugger = importlib.import_module("superdex.physics.debugger")
-        mesh = importlib.import_module("superdex.physics.mesh")
         viewer = importlib.import_module("superdex.physics.viewer")
     except ImportError as error:
         if _is_missing_native_module(error) and not os.environ.get(
@@ -64,21 +61,41 @@ def _import_superdex_physics_modules() -> tuple[
             ) from error
         raise
 
-    return physics, debugger, mesh, viewer
+    return physics, debugger, viewer
+
+
+def _import_superdex_physics_mesh() -> ModuleType:
+    """`superdex.physics.mesh` wraps the `mochi_mesh` extension, which only a build with
+    `MOCHI_BUILD_MESH_LIB` provides (the studio); the physics wheels ship `mochi_physics`
+    alone (tools/check_wheels.py), so a missing mesh extension is a skip even where the
+    physics extension is required."""
+    try:
+        return importlib.import_module("superdex.physics.mesh")
+    except ImportError as error:
+        if _is_missing_native_module(error):
+            raise unittest.SkipTest(
+                f"SuperDex physics mesh module requires the mesh extension: {error}"
+            ) from error
+        raise
 
 
 class SuperdexPhysicsImportTest(unittest.TestCase):
     def test_import_smoke(self) -> None:
-        physics, debugger, mesh, viewer = _import_superdex_physics_modules()
+        physics, debugger, viewer = _import_superdex_physics_modules()
 
         self.assertTrue(hasattr(physics, "Actor"))
-        self.assertTrue(hasattr(mesh, "remesh_surface"))
         self.assertTrue(hasattr(viewer, "Viewer"))
         self.assertTrue(hasattr(debugger, "attach"))
 
+    def test_mesh_module(self) -> None:
+        physics, _, _ = _import_superdex_physics_modules()
+        mesh = _import_superdex_physics_mesh()
+
+        self.assertTrue(hasattr(mesh, "remesh_surface"))
+        self.assertIs(physics.mesh, mesh)
+
     def test_lazy_submodules_are_available_from_physics(self) -> None:
-        physics, debugger, mesh, viewer = _import_superdex_physics_modules()
+        physics, debugger, viewer = _import_superdex_physics_modules()
 
         self.assertIs(physics.debugger, debugger)
-        self.assertIs(physics.mesh, mesh)
         self.assertIs(physics.viewer, viewer)
