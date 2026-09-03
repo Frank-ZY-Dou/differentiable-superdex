@@ -107,6 +107,7 @@ Project SuperDex has first-class support for Python across the board. The quicke
 5. Run
     * Optional: To run Python examples in double precision (float64), set the environment variable `SUPERDEX_PRECISION=double`; otherwise, single precision is used.
     * Physics example: `uv run --no-project superdex_physics/examples/example_tendon_comparison.py`
+    * Differentiable simulation (gradients through contact, double precision): `SUPERDEX_PRECISION=double uv run --no-project superdex_physics/examples/example_diffsim_robot_video.py --task push --check`; see the [SuperDex Physics README](superdex_python/README.md#differentiable-simulation)
     * Robotics example: `uv run --no-project superdex_robotics/examples/control/example_osc_jsc_control.py`
     * SuperDex Studio: `uv run --no-project superdex-studio`
     * Note:  `--no-project` is required for `uv run` cmds within this repo or else it will build from source
