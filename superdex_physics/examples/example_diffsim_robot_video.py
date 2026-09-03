@@ -163,6 +163,9 @@ HAUL_CABLE_ELEMENTS = 16
 HAUL_DT, HAUL_STEPS = 0.02, 60
 HAUL_NEWTON_TOL = 1e-7  # the cable island's Newton residual stalls at ~5e-9 (round-off)
 HAUL_STALL_TOLERANCE = 1e-6
+# Under aggressive trajectories a step of the cable island occasionally runs out of Newton
+# iterations at ~2e-6 residual (a slack, buckling cable); such steps are substepped.
+HAUL_SUBSTEP_LEVELS = 2
 TENDON_SCENE = "samples/tendon_comparison_articulation.mochi_scene"
 TENDON_SLIDER_GAINS = (200.0, 5.0)  # pose-controller gains of the tendon slider (prismatic joint)
 TENDON_HINGE_DAMPING = 0.02  # the finger hinges are passive: no stiffness, light damping
@@ -1163,7 +1166,8 @@ def task_haul(output_dir: pathlib.Path, num_iterations: int, check: bool) -> Non
     trajectory drags the box straight along +y; the goal lies 10 cm beside that
     line, so the optimizer has to swing the drag sideways. Rod contact is disabled
     against the arm and the box (the cable is tied to both), the box and the arm
-    slide on the ground."""
+    slide on the ground. Steps whose Newton solve runs out of iterations above
+    the stall tolerance are substepped (HAUL_SUBSTEP_LEVELS)."""
     print("[robot_haul] IK for the initial end-effector drag")
     waypoints = [HAUL_EE_START + (HAUL_EE_END - HAUL_EE_START) * k / 5 for k in range(6)]
     poses = ik_joint_poses(waypoints)
@@ -1241,6 +1245,7 @@ def task_haul(output_dir: pathlib.Path, num_iterations: int, check: bool) -> Non
             check=check,
             grad_clip=0.02,
             curves=cable_centerline,
+            substep_levels=HAUL_SUBSTEP_LEVELS,
             stall_tolerance=HAUL_STALL_TOLERANCE,
         )
     finally:

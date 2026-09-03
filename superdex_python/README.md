@@ -74,6 +74,12 @@ and `haul` (an FR3 arm reaching, pushing a rigid, a soft or two cubes, a 2F-85 g
 carrying a rigid or a soft cube, a tendon-driven finger with a rod as the cable, and the arm
 hauling a box with a cable); `example_diffsim_video.py` holds the actor-level demos.
 
+Cost (one thread, double precision, a 2026 desktop CPU): the FR3 arm pushing a cube
+(75 steps of 20 ms) runs at about 6 ms per forward step and 4 ms per adjoint step, a
+forward-plus-backward rollout in under a second; with a soft cube (64 nodes) the adjoint step
+costs about 2.5 forward steps. The demo optimizations above (40 iterations, with the replays
+that record the videos) take between half a minute (cable haul) and three minutes (soft grasp).
+
 Known limitations: the adjoint is exact for steps of any size and for consecutive steps of
 different sizes, except that pose-controller target gradients keep a residual of about 1e-3
 (relative) at steps whose size differs from a neighbour's (pinned by a test);
