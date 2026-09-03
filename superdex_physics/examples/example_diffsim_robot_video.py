@@ -166,6 +166,7 @@ HAUL_STALL_TOLERANCE = 1e-6
 # Under aggressive trajectories a step of the cable island occasionally runs out of Newton
 # iterations at ~2e-6 residual (a slack, buckling cable); such steps are substepped.
 HAUL_SUBSTEP_LEVELS = 2
+HAUL_LEARNING_RATE = 0.004  # Adam; 0.002 halves the loss in 40 iterations, 0.004 reaches 0.00096 in 120
 TENDON_SCENE = "samples/tendon_comparison_articulation.mochi_scene"
 TENDON_SLIDER_GAINS = (200.0, 5.0)  # pose-controller gains of the tendon slider (prismatic joint)
 TENDON_HINGE_DAMPING = 0.02  # the finger hinges are passive: no stiffness, light damping
@@ -1240,7 +1241,7 @@ def task_haul(output_dir: pathlib.Path, num_iterations: int, check: bool) -> Non
             title="FR3 cable haul: Adam on the joint targets through the cable and ground friction",
             output_dir=output_dir,
             num_iterations=num_iterations,
-            learning_rate=0.002,
+            learning_rate=HAUL_LEARNING_RATE,
             dt=HAUL_DT,
             check=check,
             grad_clip=0.02,
