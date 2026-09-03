@@ -283,6 +283,31 @@ class RigidBodyVel {
     _vsym = SimdFullToSym(sym);
   }
 
+  // Re-express a finite-difference velocity for a new step size. A clean (omega, vsym) pair
+  // encodes the rotation increment DR of the last step of size hPrev (sin(theta) = hPrev |omega|).
+  // EvalTimeSteppedRotation() would extrapolate it over a step of size hNew as the matrix
+  // (2 eye - DR^T) R scaled to hNew, which is not a rotation when hNew != hPrev, while the
+  // adjoint's previous-delta chain treats the increment as a rotation (its error grows like
+  // s (1 - s) theta^2, s = hNew / hPrev). Instead, keep the angular rate theta / hPrev and encode
+  // the rotation exp(s theta u) at hNew: omega' = sin(s theta) u / hNew, with vsym recomputed by
+  // UpdateVSymIfDirty(hNew). The translation velocity needs no change, and neither does a dirty
+  // (externally set) velocity: UpdateVSymIfDirty(hNew) already encodes it at hNew. Identity for
+  // hNew == hPrev.
+  void RescaleRotationIncrement(real hPrev, real hNew) {
+    if (_isVSymDirty || hPrev == hNew || !(hPrev > 0_r) || !(hNew > 0_r)) {
+      return;
+    }
+    real const normOmega = Sqrt(NormSqr<3>(_omega));
+    if (normOmega == 0_r) {
+      return;
+    }
+    // Clamp the previous increment to a quarter turn (the representation's validity limit,
+    // see UpdateVSymIfDirty) and the rescaled one as well.
+    real const theta = std::asin(Min(1_r, hPrev * normOmega));
+    real const thetaNew = Min(theta * hNew / hPrev, real(1.5707963267948966));
+    SetOmega((std::sin(thetaNew) / (hNew * normOmega)) * _omega); // marks vsym dirty
+  }
+
   void SetZero() {
     _vcom = {};
     _omega = {};

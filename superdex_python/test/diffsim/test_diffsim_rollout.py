@@ -35,12 +35,12 @@
   every other class requires SUPERDEX_PRECISION=double;
 - variable step sizes: the low-level per-step adjoint chained across steps of
   different dt (as substepping produces) matches finite differences for a free
-  rigid body's initial velocity and for joint forces on a pendulum (the engine
-  rescales the previous-delta adjoint by dt_k / dt_{k-1} and runs the adjoint's
-  pre-step with the current step's dt); the pose-controller target gradients
-  keep a small residual mismatch (about 1e-3 relative, only at steps whose dt
-  differs from a neighbour's; it scales with the controller damping and is
-  pinned here as known behaviour, see VariableStepSizeTest).
+  rigid body's initial velocity, for joint forces and for pose-controller
+  targets on a pendulum (the engine rescales the previous-delta adjoint by
+  dt_k / dt_{k-1}, runs the adjoint's pre-step with the current step's dt, and
+  re-expresses a finite-difference angular velocity for a changed step size so
+  that the rotation predictor stays a rotation); a spinning free body keeps its
+  angular rate across a step-size change.
 
 Requires SUPERDEX_PRECISION=double except where noted.
 """
@@ -477,10 +477,6 @@ class SubstepTest(unittest.TestCase):
 
     FD_EPS = 1e-6
     TOL = 1e-5
-    # Pose-controller target gradients at steps whose dt differs from a neighbour's keep a
-    # residual mismatch of up to ~1e-3 relative (VariableStepSizeTest pins it); the force
-    # gradients are exact.
-    TOL_TARGETS = 1e-3
     SCHEDULE = {2: [DT / 2, DT / 2], 4: [DT / 4, DT / 4, DT / 2]}
     # Attempt indices (one per scene.step in the forward rollout) declared failed:
     # step 2 at DT; step 4 at DT and its first half.
@@ -554,12 +550,12 @@ class SubstepTest(unittest.TestCase):
         fd_controls = fd_block(targets)
         fd_forces = fd_block(forces)
         scene.release_all_states()
-        for name, analytic, fd, tol in (
-            ("controls", grads.control_targets, fd_controls, self.TOL_TARGETS),
-            ("forces", grads.external_forces, fd_forces, self.TOL),
+        for name, analytic, fd in (
+            ("controls", grads.control_targets, fd_controls),
+            ("forces", grads.external_forces, fd_forces),
         ):
             rel = np.linalg.norm(analytic - fd) / np.linalg.norm(fd)
-            self.assertLessEqual(rel, tol, f"{name} gradient mismatch:\n{analytic}\n{fd}")
+            self.assertLessEqual(rel, self.TOL, f"{name} gradient mismatch:\n{analytic}\n{fd}")
             # The split steps must carry the summed substep gradients, not the last one.
             for step, _ in result.split_steps:
                 self.assertGreater(np.linalg.norm(fd[:, step]), 0.0)
@@ -694,16 +690,14 @@ class VariableStepSizeTest(unittest.TestCase):
         errors = self._per_step_errors(scene, chain, forces, apply_inputs, read_step)
         self.assertLessEqual(max(errors), self.TOL, f"joint-force gradient errors per step: {errors}")
 
-    def test_articulated_controller_targets_vs_fd_pinned(self) -> None:
-        """Pins the known residual of pose-controller target gradients at variable dt.
+    def test_articulated_controller_targets_vs_fd(self) -> None:
+        """Pose-controller target gradients at variable dt (with the controller's
+        damping term, which couples consecutive targets through the target velocity).
 
-        With the controller's damping term (stiffness 50, damping 5 here) the target
-        gradient of a step whose dt differs from a neighbour's is off by ~1e-4..1e-3
-        relative (exact with damping 0 up to ~1e-5, exact at uniform dt); the steps with
-        the same dt as both neighbours are exact. Cause not identified yet (it is not
-        the previous-delta rescaling, the pre-step dt, nor the state chain: rigid, soft
-        and joint-force gradients are exact). The bounds below assert the current
-        behaviour so that a change in either direction is noticed.
+        Before the engine re-expressed finite-difference angular velocities for a
+        changed step size, these were off by ~1e-4..1e-3 (up to 3e-2 at 0.2 rad per
+        step): the rotation predictor of the previous joint increment was a linearly
+        scaled matrix, not a rotation, while the adjoint's delta chain assumes one.
         """
         scene, chain, targets, forces, apply_inputs = _controller_setup()
         self.addCleanup(physics.destroy_scene, scene)
@@ -720,11 +714,44 @@ class VariableStepSizeTest(unittest.TestCase):
             return g
 
         errors = self._per_step_errors(scene, chain, targets, apply_targets, read_step)
-        # DTS = [DT, DT/2, DT/4, DT, DT/2, DT]: the last step's column is exact (no later
-        # step feeds it); every earlier step touches a dt change and carries the residual.
-        self.assertLessEqual(errors[-1], self.TOL, f"last-step control gradient: {errors}")
-        self.assertLessEqual(max(errors), 5e-3, f"control gradient errors per step: {errors}")
-        self.assertGreater(max(errors), 1e-6, f"the pinned residual vanished: {errors}")
+        self.assertLessEqual(max(errors), self.TOL, f"control gradient errors per step: {errors}")
+
+    def test_spin_rate_preserved_across_dt_change(self) -> None:
+        """Forward semantics of a step-size change. The rigid-body merit extrapolates the
+        previous rotation increment DR linearly, R~ = (2 I - DR^T) R, and a free spin (no
+        gravity, no torque, isotropic inertia) settles on the rotation nearest to R~: an
+        increment of phi(theta) = atan(sin theta / (2 - cos theta)) for a previous
+        increment theta (the extrapolation's own per-step map, 0.2 rad -> 0.1936 rad).
+        When the step shrinks by s, the engine re-encodes the previous finite-difference
+        angular velocity so that the extrapolated increment is s theta (the angular rate
+        is preserved), hence theta2 = phi(s theta1). The old matrix-scaled extrapolation
+        (not a rotation) gave atan(s sin theta / (1 + s (1 - cos theta))), 6e-3 relative
+        away here."""
+        scene, cube = scenes.rigid_free()
+        self.addCleanup(physics.destroy_scene, scene)
+        scene.set_gravity([0.0, 0.0, 0.0])
+        configure_for_differentiability(scene)
+        cube.set_velocity(np.zeros(3), np.array([20.0, 0.0, 0.0]))  # 0.2 rad per 10 ms step
+
+        def rotation_angle(before, after) -> float:
+            # angle of the relative rotation after * before^-1 from the quaternions (x, y, z, w)
+            qb = np.array([before.rotation[i] for i in range(4)])
+            qa = np.array([after.rotation[i] for i in range(4)])
+            # q_rel = qa * conj(qb); w component:
+            w = qa[3] * qb[3] + qa[0] * qb[0] + qa[1] * qb[1] + qa[2] * qb[2]
+            return 2.0 * np.arccos(min(1.0, abs(w)))
+
+        t0 = cube.get_center_of_mass_transform()
+        scene.step(DT)
+        t1 = cube.get_center_of_mass_transform()
+        scene.step(DT / 2)
+        t2 = cube.get_center_of_mass_transform()
+        theta1 = rotation_angle(t0, t1)
+        theta2 = rotation_angle(t1, t2)
+        self.assertGreater(theta1, 0.15)
+        scaled = 0.5 * theta1
+        expected = np.arctan2(np.sin(scaled), 2.0 - np.cos(scaled))
+        self.assertLess(abs(theta2 - expected), 1e-9 * theta1, f"theta1 {theta1}, theta2 {theta2}, expected {expected}")
 
     def test_rigid_initial_velocity_vs_fd(self) -> None:
         scene, cube = scenes.rigid_free()

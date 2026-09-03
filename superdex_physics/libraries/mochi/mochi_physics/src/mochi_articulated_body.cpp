@@ -3096,6 +3096,10 @@ void articulated::compound::UpdateVSym(
     ecs::CtxGlobal<CSceneTime const> time,
     CArticulatedJointVels<TimeStep::Current>& outJointVels) {
   for (auto& jointVel : outJointVels.value) {
+    // See rigid::UpdateVSym: the previous step's finite-difference joint velocity is re-expressed
+    // for this step's size (no-op for uniform step sizes).
+    jointVel.value.RescaleRotationIncrement(
+        static_cast<real>(time->DeltaTimePrev()), static_cast<real>(time->DeltaTime()));
     jointVel.value.UpdateVSymIfDirty(static_cast<real>(time->DeltaTime()));
   }
 }

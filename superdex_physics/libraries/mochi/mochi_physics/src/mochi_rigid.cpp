@@ -1377,6 +1377,10 @@ void mochi::rigid::UpdateVSym(
     ecs::Included<TagRigidActor>,
     ecs::CtxGlobal<CSceneTime const> time,
     CRigidVel<TimeStep::Current>& outVel) {
+  // A finite-difference velocity of the previous step is re-expressed for this step's size (a
+  // no-op for uniform step sizes; see RigidBodyVel::RescaleRotationIncrement).
+  outVel.value.RescaleRotationIncrement(
+      static_cast<real>(time->DeltaTimePrev()), static_cast<real>(time->DeltaTime()));
   outVel.value.UpdateVSymIfDirty(static_cast<real>(time->DeltaTime()));
 }
 
