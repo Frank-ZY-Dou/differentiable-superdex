@@ -560,7 +560,7 @@ class PolicyRolloutTest(unittest.TestCase):
     FD_EPS = 1e-6
     TOL = 1e-5
 
-    def _closed_loop(self, history: int, running: bool):
+    def _closed_loop(self, history: int, running: bool, time_feature: bool = False):
         diffsim_torch = _make_bridge_module()
         scene, chain = scenes.pendulum(with_controller=True)
         self.addCleanup(physics.destroy_scene, scene)
@@ -571,10 +571,11 @@ class PolicyRolloutTest(unittest.TestCase):
         chain.get_articulated_pose(pose0)
         terminal = ArticulatedPoseErrorLoss(chain, ref=pose0 + 0.1)
         running_loss = ArticulatedPoseErrorLoss(chain, ref=pose0 - 0.05)
-        policy = torch.nn.Linear(history * num_dofs, num_dofs).double()
+        input_size = history * num_dofs + (1 if time_feature else 0)
+        policy = torch.nn.Linear(input_size, num_dofs).double()
         with torch.no_grad():
-            weight = 0.1 * np.cos(np.arange(history * num_dofs * num_dofs, dtype=np.float64)).reshape(
-                num_dofs, history * num_dofs
+            weight = 0.1 * np.cos(np.arange(input_size * num_dofs, dtype=np.float64)).reshape(
+                num_dofs, input_size
             )
             weight[:, :num_dofs] += 0.9 * np.eye(num_dofs)  # mostly "hold the current pose"
             policy.weight.copy_(torch.tensor(weight))
@@ -587,15 +588,16 @@ class PolicyRolloutTest(unittest.TestCase):
             observations=[diffsim_torch.ArticulatedPoseObservation(chain)],
             control_actors=[chain],
             history=history,
+            time_feature=time_feature,
             terminal_losses=[terminal],
             step_losses=(lambda step: [running_loss]) if running else None,
         )
         self.addCleanup(rollout.close)
         return scene, chain, policy, rollout, terminal, running_loss, num_steps, history, num_dofs
 
-    def _fd_check(self, history: int, running: bool) -> None:
+    def _fd_check(self, history: int, running: bool, time_feature: bool = False) -> None:
         scene, chain, policy, rollout, terminal, running_loss, num_steps, history, n = self._closed_loop(
-            history, running
+            history, running, time_feature
         )
         loss = rollout()
         loss.backward()
@@ -608,8 +610,11 @@ class PolicyRolloutTest(unittest.TestCase):
             chain.get_articulated_pose(obs)
             hist = [obs.copy()] * history
             total = 0.0
-            for _ in range(num_steps):
-                u = weight @ np.concatenate(hist[:history]) + bias
+            for step in range(num_steps):
+                features = np.concatenate(hist[:history])
+                if time_feature:
+                    features = np.append(features, step / num_steps)
+                u = weight @ features + bias
                 chain.set_articulated_target_pose(np.ascontiguousarray(u))
                 scene.step(DT)
                 chain.get_articulated_pose(obs)
@@ -644,6 +649,9 @@ class PolicyRolloutTest(unittest.TestCase):
 
     def test_linear_policy_history_2_running_loss_vs_fd(self) -> None:
         self._fd_check(history=2, running=True)
+
+    def test_linear_policy_time_feature_vs_fd(self) -> None:
+        self._fd_check(history=1, running=True, time_feature=True)
 
     def test_nonlinear_policy_vs_fd(self) -> None:
         diffsim_torch = _make_bridge_module()

@@ -21,8 +21,12 @@ All notable changes to this repository will be documented here.
   (`NonLinearSolverParams.friction_continuation_levels`) and failure-adaptive substepping in the
   rollout driver (`DifferentiableRollout(max_substep_levels=...)`, each substep its own adjoint
   step).
-- Examples: `example_diffsim_robot_video.py` (reach, push, soft push, two-cube push, gripper
-  grasp, soft grasp, five-finger hand grasp, tendon finger, cable haul) and
+- `superdex.physics.diffsim_torch.PolicyRollout`: closed-loop rollouts with a torch policy in
+  the loop; the policy parameters receive the loss gradient through the simulator, feedback
+  path included (analytic policy gradients).
+- Examples: `example_diffsim_robot_video.py` (reach, push, soft push, two-cube push, push with a
+  feedback policy, gripper grasp, soft grasp, five-finger hand grasp, tendon finger, cable haul)
+  and
   `example_diffsim_sysid.py --mode soft` (Young's modulus and Poisson's ratio identification).
 - CI: `diffsim-tests` workflow builds both physics wheels and runs the suite in both precisions.
 

@@ -681,9 +681,11 @@ class PolicyRollout:
     ``accumulate_output_grad(grad)`` objects above, taken from the pre-step state (the
     initial state for the first step, whose observation is treated as a constant: only
     the states produced by the rollout carry the feedback gradient). Losses follow the
-    ``diffsim_rollout`` protocol. As in :class:`TorchRollout`, the forward and backward
-    sweeps both run when the object is called, and every call restores the initial scene
-    state captured at construction.
+    ``diffsim_rollout`` protocol. With ``time_feature`` the normalized step index
+    ``step / num_steps`` is appended to the policy input (after the observation history),
+    so a policy can carry a time-dependent baseline; it contributes no gradient. As in
+    :class:`TorchRollout`, the forward and backward sweeps both run when the object is
+    called, and every call restores the initial scene state captured at construction.
 
     The policy gradient is dL/dtheta = sum_k (du_k/dtheta)^T lambda_k, where lambda_k is
     the engine's gradient with respect to the targets applied at step k; the feedback
@@ -701,6 +703,7 @@ class PolicyRollout:
         control_actors: Sequence,
         *,
         history: int = 1,
+        time_feature: bool = False,
         terminal_losses: Sequence = (),
         step_losses: Callable[[int], Sequence] | None = None,
         max_substep_levels: int = 0,
@@ -720,6 +723,7 @@ class PolicyRollout:
         self.policy = policy
         self.observations = list(observations)
         self.history = history
+        self.time_feature = bool(time_feature)
         self._terminal_losses = list(terminal_losses)
         self._step_losses = step_losses
         self._driver = DifferentiableRollout(
@@ -738,6 +742,7 @@ class PolicyRollout:
             self._control_entries.append(by_name[name])
         self.control_size = sum(e.dofs_size for e in self._control_entries)
         self.observation_size = sum(o.size for o in self.observations)
+        self.input_size = history * self.observation_size + (1 if self.time_feature else 0)
         self._params = [p for p in policy.parameters() if p.requires_grad] if hasattr(policy, "parameters") else []
         self._state_init = scene.capture_state()
         self.last_result: PolicyRolloutResult | None = None
@@ -793,6 +798,8 @@ class PolicyRollout:
         try:
             for step in range(self.num_steps):
                 obs = np.concatenate(obs_history[: self.history])
+                if self.time_feature:
+                    obs = np.append(obs, step / self.num_steps)
                 with torch.enable_grad():
                     obs_t = torch.tensor(obs, dtype=torch.float64, requires_grad=True)
                     u_t = self.policy(obs_t)
