@@ -1,0 +1,82 @@
+# Differentiable-simulation tests: build the single- and double-precision physics wheels from
+# source the way the wheels workflow does (cibuildwheel, manylinux container, toolchain from the
+# pyprojects) and run the `superdex_python` test suite against them in both precisions -- the
+# diffsim gradient checks (every path against independent finite differences) need the double
+# build, the single build runs the float32 smoke test and the loader tests.
+#
+# Triggers on pushes to main and on pull requests that touch the engine, the Python facade or
+# the fp64 payload, and by hand. It is slow (two native builds, about an hour): that is the
+# price of testing what ships rather than a host build with a different compiler.
+#
+# Every `uses:` is pinned to a commit SHA for the reasons given in wheels.yml.
+name: diffsim-tests
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'superdex_physics/**'
+      - 'superdex_python/**'
+      - 'superdex_physics_fp64/**'
+      - 'tools/build_wheels.py'
+      - '.github/workflows/diffsim-tests.yml'
+  pull_request:
+    paths:
+      - 'superdex_physics/**'
+      - 'superdex_python/**'
+      - 'superdex_physics_fp64/**'
+      - 'tools/build_wheels.py'
+      - '.github/workflows/diffsim-tests.yml'
+  workflow_dispatch:
+# Read-only. Nothing here writes to the repository or needs a secret.
+permissions:
+  contents: read
+env:
+  CIBUILDWHEEL_VERSION: 4.1.1
+  PYTHON_VERSION: '3.12'
+jobs:
+  diffsim:
+    name: diffsim tests · ubuntu-22.04
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install the driver's tools
+        shell: bash
+        run: python -m pip install --upgrade pip "cibuildwheel==${CIBUILDWHEEL_VERSION}" build
+      - name: Build the physics wheels (single and double precision)
+        shell: bash
+        run: |
+          python tools/build_wheels.py \
+            --output wheelhouse \
+            --only superdex_python \
+            --only superdex_physics_fp64 \
+            --container-network
+      - name: Install the wheels and the torch bridge's dependency
+        shell: bash
+        run: |
+          python -m pip install --find-links wheelhouse superdex-physics superdex-physics-fp64
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -c "import superdex.physics as p; print('single precision import ok')"
+          SUPERDEX_PRECISION=double python -c "import superdex.physics as p; assert p.uses_double_precision(); print('double precision import ok')"
+      - name: Test in double precision (diffsim gradient checks, torch bridge)
+        shell: bash
+        working-directory: superdex_python
+        env:
+          SUPERDEX_PRECISION: double
+          SUPERDEX_REQUIRE_NATIVE: '1'
+        run: python -m unittest discover -s test -t . -v
+      - name: Test in single precision (float32 smoke test, loader)
+        shell: bash
+        working-directory: superdex_python
+        env:
+          SUPERDEX_REQUIRE_NATIVE: '1'
+        run: python -m unittest discover -s test -t . -v
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: wheels-diffsim-tests
+          path: wheelhouse/*.whl
+          if-no-files-found: ignore
