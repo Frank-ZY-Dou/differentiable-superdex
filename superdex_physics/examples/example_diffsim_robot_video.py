@@ -74,6 +74,13 @@ solved with failure-adaptive substepping (``PUSH_SUBSTEP_LEVELS`` halvings of
 the step, each substep its own adjoint step, see
 ``superdex.physics.diffsim_rollout``); the guard reports which steps were
 split, and the replay used for the video takes the same substeps.
+``robot_haul.mp4`` (``--task haul``) hauls a box with a cable: a rod actor tied by
+node-to-rigid constraints to the FR3's end-effector link and to the top of a box
+on the ground; the arm's joint targets are optimized so that the dragged box
+ends at a goal off the initial drag line. The gradient flows from the box through
+the cable (the rod adjoint) and the constraints into the arm; the only contacts
+are the box and the arm against the ground (cable contact is disabled).
+
 ``robot_grasp_soft.mp4`` (``--task grasp_soft``) is the grasp with the same soft
 cube, solved the same way. Two things differ from the rigid grasp: the fingertip
 links get solid-box collision models (the stock fingertip meshes are thin shells
@@ -135,6 +142,21 @@ NGD_DECAY = 0.95  # per-iteration decay of the normalized-gradient step length
 GRASP_TIP_AHEAD = 0.012  # the pose controller lags 1 cm behind the IK pose during the descent
 # Per-joint PD gains of the pose controller (stiffness [N m/rad], damping [N m s/rad]).
 JOINT_GAINS = list(zip([400, 400, 300, 300, 150, 100, 60], [40, 40, 30, 30, 15, 10, 6]))
+# Cable haul: a box (10 cm, 0.3 kg) on the ground, a 3 mm cable (E 2e7 Pa: a soft cable, so the
+# pull stretches it visibly) from the end effector to the box top; the arm drags the box +y.
+HAUL_BOX_HALF = 0.05
+HAUL_BOX_DENSITY = 300.0  # [kg/m^3]
+HAUL_BOX_START = np.array([0.50, -0.20, HAUL_BOX_HALF - 0.001])
+HAUL_EE_START = np.array([0.50, 0.05, 0.35])  # end-effector waypoints of the initial drag
+HAUL_EE_END = np.array([0.50, 0.35, 0.35])
+HAUL_GOAL = np.array([0.60, 0.05, HAUL_BOX_HALF])  # 10 cm beside the drag line
+HAUL_CABLE_RADIUS = 0.003  # [m]
+HAUL_CABLE_YOUNG = 2e7  # [Pa]
+HAUL_CABLE_DENSITY = 1000.0  # [kg/m^3]
+HAUL_CABLE_ELEMENTS = 16
+HAUL_DT, HAUL_STEPS = 0.02, 60
+HAUL_NEWTON_TOL = 1e-7  # the cable island's Newton residual stalls at ~5e-9 (round-off)
+HAUL_STALL_TOLERANCE = 1e-6
 TENDON_SCENE = "samples/tendon_comparison_articulation.mochi_scene"
 TENDON_SLIDER_GAINS = (200.0, 5.0)  # pose-controller gains of the tendon slider (prismatic joint)
 TENDON_HINGE_DAMPING = 0.02  # the finger hinges are passive: no stiffness, light damping
@@ -1059,6 +1081,133 @@ def _task_grasp_impl(output_dir: pathlib.Path, num_iterations: int, check: bool,
         del context
 
 
+def build_cable(scene, start: np.ndarray, end: np.ndarray, name: str):
+    """A straight rod actor (the cable) from ``start`` to ``end`` with the haul
+    cable's material; returns (rod, rest node positions, edges, node-constraint
+    stiffness = EA / L)."""
+    ex = physics.experimental
+    nodes = start + np.linspace(0.0, 1.0, HAUL_CABLE_ELEMENTS + 1)[:, None] * (end - start)
+    tangent = (end - start) / np.linalg.norm(end - start)
+    axis = np.array([1.0, 0.0, 0.0])
+    axis -= (axis @ tangent) * tangent
+    axis /= np.linalg.norm(axis)
+    model = ex.generate_tubular_rod_model_data(
+        nodes=nodes.tolist(),
+        element_frame_axes=[axis.tolist()] * HAUL_CABLE_ELEMENTS,
+        radius=HAUL_CABLE_RADIUS,
+        num_cross_section_segments=6,
+        is_closed_loop=False,
+    )
+    area = np.pi * HAUL_CABLE_RADIUS**2
+    inertia = 0.25 * np.pi * HAUL_CABLE_RADIUS**4
+    material = ex.RodMaterialParams(
+        linear_density=HAUL_CABLE_DENSITY * area,
+        linear_rotational_inertia=HAUL_CABLE_DENSITY * 2.0 * inertia,
+        axial_stiffness=HAUL_CABLE_YOUNG * area,
+        torsional_stiffness=0.4 * HAUL_CABLE_YOUNG * 2.0 * inertia,  # G = E / (2 (1 + nu)), nu = 0.25
+        flexural_stiffness=[HAUL_CABLE_YOUNG * inertia, HAUL_CABLE_YOUNG * inertia],
+    )
+    rod = ex.create_rod_actor(
+        scene,
+        ex.RodActorParams(
+            name=name, shape=physics.create_model_shape(model), material=material, has_gravity=True
+        ),
+    )
+    edges = np.array([[i, i + 1] for i in range(HAUL_CABLE_ELEMENTS)], dtype=np.int32)
+    return rod, nodes, edges, HAUL_CABLE_YOUNG * area / np.linalg.norm(end - start)
+
+
+def task_haul(output_dir: pathlib.Path, num_iterations: int, check: bool) -> None:
+    """FR3 hauling a box with a cable (see the module docstring). The initial
+    trajectory drags the box straight along +y; the goal lies 10 cm beside that
+    line, so the optimizer has to swing the drag sideways. Rod contact is disabled
+    against the arm and the box (the cable is tied to both), the box and the arm
+    slide on the ground."""
+    print("[robot_haul] IK for the initial end-effector drag")
+    waypoints = [HAUL_EE_START + (HAUL_EE_END - HAUL_EE_START) * k / 5 for k in range(6)]
+    poses = ik_joint_poses(waypoints)
+    keys = [(0, poses[0])] + [(12 * k, poses[k]) for k in range(1, 6)]
+    controls0 = interpolate_targets(keys, HAUL_STEPS)
+
+    scene = physics.create_scene("Differentiable haul")
+    scene.set_gravity(GRAVITY)
+    bot, arm, ee, context = spawn_arm(scene)
+    scene.create_rigid_actor(
+        name="ground",
+        shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+        is_static=True,
+        contact=CONTACT,
+    )
+    box = scene.create_rigid_actor(
+        name="box",
+        shape=physics.create_tet_mesh_shape(coordinates=cube_coords(HAUL_BOX_HALF), connectivity=CUBE_CONN),
+        density=HAUL_BOX_DENSITY,
+        contact=CONTACT,
+        world_from_local=physics.TransformRT(HAUL_BOX_START.tolist()),
+    )
+    arm.set_articulated_pose_from_joints(poses[0])
+    # The cable runs from the end effector's center of mass to the box top.
+    start = np.asarray(ee.get_center_of_mass_transform().translation)
+    end = HAUL_BOX_START + np.array([0.0, 0.0, HAUL_BOX_HALF])
+    rod, rod_reference, rod_edges, stiffness = build_cable(scene, start, end, "cable")
+    scene.enable_actor_contact_symmetric(
+        rod.get_handle(), arm.get_handle(), False, physics.IncludeNestedActors.YES
+    )
+    scene.enable_actor_contact_symmetric(
+        rod.get_handle(), box.get_handle(), False, physics.IncludeNestedActors.NO
+    )
+    for node, actor, local in ((0, ee, [0.0, 0.0, 0.0]), (HAUL_CABLE_ELEMENTS, box, [0.0, 0.0, HAUL_BOX_HALF])):
+        scene.create_deformable_node_to_rigid_constraint(
+            deformable_actor=rod.get_handle(),
+            rigid_actor=actor.get_handle(),
+            deformable_node_index=node,
+            rigid_local_pos=local,
+            stiffness=stiffness,
+        )
+    configure(scene, newton_tol=HAUL_NEWTON_TOL)
+
+    def cable_centerline():
+        nodes = rod_reference + np.asarray(rod.get_displacements()).reshape(-1, 4)[:, :3]
+        return [("cable", nodes, rod_edges, 0.006, [0.85, 0.65, 0.1])]
+
+    class BoxLoss:
+        def value(self) -> float:
+            d = np.asarray(box.get_center_of_mass_transform().translation) - HAUL_GOAL
+            return 0.5 * float(d @ d)
+
+        def accumulate_output_grad(self) -> None:
+            d = np.asarray(box.get_center_of_mass_transform().translation) - HAUL_GOAL
+            g = np.zeros(7)
+            g[:3] = d
+            diffsim.get_center_of_mass_transform_backward(box, g)
+
+    try:
+        run_task(
+            "robot_haul",
+            scene,
+            arm,
+            controls0=controls0,
+            loss=BoxLoss(),
+            tracked_point=lambda: np.asarray(box.get_center_of_mass_transform().translation),
+            target=HAUL_GOAL,
+            look_from=[1.9, -1.4, 0.9],
+            look_at=[0.55, 0.05, 0.15],
+            title="FR3 cable haul: Adam on the joint targets through the cable and ground friction",
+            output_dir=output_dir,
+            num_iterations=num_iterations,
+            learning_rate=0.002,
+            dt=HAUL_DT,
+            check=check,
+            grad_clip=0.02,
+            curves=cable_centerline,
+            stall_tolerance=HAUL_STALL_TOLERANCE,
+        )
+    finally:
+        robotics.destroy_bot(scene, bot)
+        physics.destroy_scene(scene)
+        del context
+
+
 def _rotate(q: np.ndarray, o: np.ndarray) -> np.ndarray:
     """R(q) o for a unit quaternion q = (x, y, z, w)."""
     v, w = q[:3], q[3]
@@ -1290,7 +1439,7 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=40)
     parser.add_argument(
         "--task",
-        choices=["reach", "push", "push_soft", "grasp", "grasp_soft", "tendon", "both", "all"],
+        choices=["reach", "push", "push_soft", "grasp", "grasp_soft", "tendon", "haul", "both", "all"],
         default="all",
     )
     parser.add_argument("--check", action="store_true", help="finite-difference gradient check first")
@@ -1310,6 +1459,8 @@ def main() -> None:
         task_grasp_soft(args.output_dir, args.iterations, args.check)
     if args.task in ("tendon", "all"):
         task_tendon(args.output_dir, args.iterations, args.check)
+    if args.task in ("haul", "all"):
+        task_haul(args.output_dir, args.iterations, args.check)
     print(f"done in {time.time() - start:.1f} s")
     physics.shutdown()
 
