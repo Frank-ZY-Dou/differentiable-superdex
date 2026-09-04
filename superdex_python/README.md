@@ -91,6 +91,14 @@ which their Newton solve still converges to the tolerance the adjoint needs. Kno
 five-finger hand grasp (`--task hand`) still relies on a compliant 1e6 contact, and its fingers
 pass into the cube; at the default stiffness its closure pushes the cube away.
 
+`superdex.physics.utils.penetration.PenetrationChecker` measures the interpenetration of a
+scene from the engine's contact samples (the deepest sample per actor pair after each step,
+a report, an assertion) - a penalty contact overlaps under load, about 1-3.5 mm at the default
+stiffness in these demos, and the checker is how the demos' replays keep it bounded (5 mm for
+the rigid tasks). What the samples do not see, it does not see: the FR3 wrist links' render
+models extend up to a centimetre beyond their collision hulls in places, so a wrist that
+visibly enters a cube may be overlapping less than it looks.
+
 Cost (one thread, double precision, a 2026 desktop CPU): the FR3 arm pushing a cube
 (75 steps of 20 ms) runs at about 6 ms per forward step and 4 ms per adjoint step, a
 forward-plus-backward rollout in under a second; with a soft cube (64 nodes) the adjoint step

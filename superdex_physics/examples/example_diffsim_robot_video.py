@@ -151,6 +151,7 @@ from superdex.physics.diffsim_torch import (
 )
 from superdex.physics.paths import resolve_asset, resolve_asset_root
 from superdex.physics.utils import render_model_registry
+from superdex.physics.utils.penetration import PenetrationChecker
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from example_diffsim_video import GRAVITY, Recorder, box_tet_mesh, save_loss_curve  # noqa: E402
@@ -267,6 +268,11 @@ GRASP_SOFT_PENALTY = 1e7
 # penetration is ~1 mm, the forward Newton solve needs fewer iterations (40 vs 65 on average)
 # and the adjoint's gradient check is as clean (entries agree with FD to 1e-6..2e-5).
 CONTACT = physics.ContactParams(penalty_coefficient=1e9, coulomb_friction_coefficient=0.4)
+# The interpenetration the replays of the rigid tasks may reach [m] (the deepest contact
+# sample of any actor pair, checked by ConvergenceGuard): a penalty contact at the default
+# stiffness overlaps by 1-3.5 mm under these loads (the wrist on the pushed cube, the
+# gripper pads on the grasped one); more means a softer material or a broken contact.
+MAX_PENETRATION = 0.005
 # The arm's links carry the same frictional material as the cube: the contact
 # pair combines both owners' coefficients by geometric mean, so the arm pushes
 # the cube through frictional contact (and the cube slides on the ground with
@@ -559,14 +565,21 @@ class ConvergenceGuard:
     """Checks every forward step of a replay: CONVERGED is required, except that a
     solve that stalled (STOPPED) below ``stall_tolerance`` - the round-off floor of
     these robot models, 1e-9 relative to the ~1e2 N force scale - is counted and
-    reported rather than treated as a failure. Anything worse aborts the run."""
+    reported rather than treated as a failure. Anything worse aborts the run.
+
+    It also records the interpenetration of every replayed step (the deepest contact
+    sample per actor pair, ``superdex.physics.utils.penetration``); ``max_penetration``
+    [m] makes a deeper overlap abort the run at the end (None: report only, for the
+    tasks whose compliant contact is a known issue)."""
 
     stall_tolerance = 1e-7
 
-    def __init__(self, scene, stall_tolerance: float | None = None):
+    def __init__(self, scene, stall_tolerance: float | None = None, max_penetration: float | None = None):
         self.scene = scene
         if stall_tolerance is not None:
             self.stall_tolerance = stall_tolerance
+        self.max_penetration = max_penetration
+        self.penetration = PenetrationChecker(scene)
         self.checked = 0
         self.stalled = 0
         self.splits: list[tuple[int, int]] = []  # (step, number of substeps) of split steps
@@ -590,6 +603,7 @@ class ConvergenceGuard:
                 f"forward Newton solve did not converge (status {status}, "
                 f"residual {stats.residual_norm:.2e}, iters {stats.max_non_linear_iters})"
             )
+        self.penetration.record(self.checked)
         self.checked += 1
 
     def report(self, name: str) -> None:
@@ -598,6 +612,9 @@ class ConvergenceGuard:
             f"({self.stalled} stalled below {self.stall_tolerance:.0e} residual, "
             f"{len(self.splits)} split into substeps: {self.splits[:8]})"
         )
+        print(f"[{name}] " + self.penetration.report(self.max_penetration).replace("\n", f"\n[{name}] "))
+        if self.max_penetration is not None:
+            self.penetration.assert_below(self.max_penetration)
 
 
 # ---------------------------------------------------------------------------
@@ -629,6 +646,7 @@ def run_task(
     curves=None,
     substep_levels: int = 0,
     stall_tolerance: float | None = None,
+    max_penetration: float | None = MAX_PENETRATION,
 ) -> None:
     """Optimizes the rollout loss over the pose-controller targets.
 
@@ -647,9 +665,11 @@ def run_task(
     ``substep_levels`` > 0 enables failure-adaptive substepping in the rollout
     and in the replay: a step whose Newton solve fails (not converged and above
     the guard's stall tolerance) is redone as 2, 4, ... substeps. ``stall_tolerance``
-    overrides the guard's default residual floor for stalled solves."""
+    overrides the guard's default residual floor for stalled solves;
+    ``max_penetration`` the interpenetration the replays may reach (see
+    :class:`ConvergenceGuard`)."""
     num_steps = controls0.shape[0]
-    guard = ConvergenceGuard(scene, stall_tolerance)
+    guard = ConvergenceGuard(scene, stall_tolerance, max_penetration)
     bridge = TorchRollout(
         scene,
         dt=dt,
@@ -991,7 +1011,7 @@ def task_push_policy(output_dir: pathlib.Path, num_iterations: int, check: bool)
                         substep_residual_tolerance=PUSH_POLICY_STALL_TOLERANCE,
                     )
                 )
-        guard = ConvergenceGuard(scene, PUSH_POLICY_STALL_TOLERANCE)
+        guard = ConvergenceGuard(scene, PUSH_POLICY_STALL_TOLERANCE, MAX_PENETRATION)
         recorder = Recorder(
             scene,
             goal,
@@ -1348,6 +1368,9 @@ def _task_push_impl(
             # contact) each trap the forward Newton solve at isolated steps: substep them.
             substep_levels=PUSH_SUBSTEP_LEVELS if (soft or multi) else 0,
             stall_tolerance=PUSH_SOFT_STALL_TOLERANCE if soft else None,
+            # The soft cube's compliant contact (PUSH_SOFT_PENALTY) overlaps more than the
+            # rigid limit; its penetration is reported, not bounded.
+            max_penetration=None if soft else MAX_PENETRATION,
         )
     finally:
         robotics.destroy_bot(scene, bot)
@@ -1716,6 +1739,9 @@ def _task_grasp_impl(
             params0=params0,
             optimizer_kind="ngd",
             substep_levels=PUSH_SUBSTEP_LEVELS if (soft or hand) else 0,
+            # The soft cube's 1e7 contact and the hand's known-issue 1e6 contact overlap
+            # more than the rigid limit; their penetration is reported, not bounded.
+            max_penetration=None if (soft or hand) else MAX_PENETRATION,
             stall_tolerance=(
                 PUSH_SOFT_STALL_TOLERANCE if soft else (HAND_STALL_TOLERANCE if hand else None)
             ),

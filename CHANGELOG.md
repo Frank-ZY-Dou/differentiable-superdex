@@ -21,6 +21,9 @@ All notable changes to this repository will be documented here.
   (`NonLinearSolverParams.friction_continuation_levels`) and failure-adaptive substepping in the
   rollout driver (`DifferentiableRollout(max_substep_levels=...)`, each substep its own adjoint
   step).
+- `superdex.physics.utils.penetration.PenetrationChecker`: the interpenetration of a scene from
+  the engine's contact samples (deepest sample per actor pair after each step, a report and an
+  assertion); the diffsim demos' replays report it and bound it for the rigid tasks.
 - `superdex.physics.diffsim_torch.PolicyRollout`: closed-loop rollouts with a torch policy in
   the loop (joint poses, rigid positions and orientations and soft-body centroids as
   observations;
