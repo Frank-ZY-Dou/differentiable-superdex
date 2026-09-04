@@ -60,6 +60,72 @@ gradients of the contact merit, Armijo line search, friction continuation) and d
 recentering of soft actors. Use double precision (`SUPERDEX_PRECISION=double`): the driver
 runs on the single-precision build too, but the gradients are then only float32-accurate.
 
+A complete example - a cube pushed to a goal by per-step forces found by Adam through the
+simulator (double precision; reaches the goal to within a centimetre and prints the final
+distance):
+
+```python
+import numpy as np
+import torch
+import superdex.physics as physics
+from superdex.physics import diffsim
+from superdex.physics.diffsim_torch import TorchRollout
+
+physics.initialize(num_worker_threads=0)
+scene = physics.create_scene("push")
+scene.set_gravity([0.0, 0.0, -9.81])
+contact = physics.ContactParams(coulomb_friction_coefficient=0.5)
+scene.create_rigid_actor(
+    name="ground", is_static=True, contact=contact,
+    shape=physics.create_plane_shape(normal=[0.0, 0.0, 1.0], distance=0.0),
+)
+# A dynamic rigid actor needs a surface mesh: a 10 cm cube as a tetrahedral mesh (its
+# eight corners, x varying fastest, split into five tetrahedra).
+h = 0.05
+corners = np.array([[x, y, z] for z in (-h, h) for y in (-h, h) for x in (-h, h)])
+tets = np.array([[0, 1, 2, 4], [6, 7, 4, 2], [5, 4, 7, 1], [3, 2, 1, 7], [1, 2, 4, 7]])
+cube = scene.create_rigid_actor(
+    name="cube", density=1000.0, contact=contact,
+    shape=physics.create_tet_mesh_shape(coordinates=corners.ravel(), connectivity=tets.ravel()),
+    world_from_local=physics.TransformRT([0.0, 0.0, h]),
+)
+diffsim.make_scene_differentiable(scene)  # the solver settings the adjoint needs
+# The adjoint assumes the step equations hold exactly: converge the forward Newton solve
+# far below the engine's default tolerance (1e-3).
+params = scene.get_solver_params()
+newton = params.non_linear_solver
+newton.abs_tol = newton.rel_tol = 1e-10
+newton.max_iter = 200
+params.non_linear_solver = newton
+scene.set_solver_params(params)
+
+goal = np.array([0.3, 0.0, 0.05])
+
+class GoalLoss:  # 0.5 * |final position - goal|^2 and its adjoint
+    def value(self) -> float:
+        d = np.asarray(cube.get_center_of_mass_transform().translation) - goal
+        return 0.5 * float(d @ d)
+
+    def accumulate_output_grad(self) -> None:
+        grad = np.zeros(7)  # translation (3) + quaternion (4)
+        grad[:3] = np.asarray(cube.get_center_of_mass_transform().translation) - goal
+        diffsim.get_center_of_mass_transform_backward(cube, grad)
+
+# Per-step external forces (and torques) on the cube's 6 DoFs as the optimization variable.
+rollout = TorchRollout(scene, dt=0.01, num_steps=50, force_actors=[cube], terminal_losses=[GoalLoss()])
+forces = torch.zeros(50, 6, dtype=torch.float64, requires_grad=True)
+optimizer = torch.optim.Adam([forces], lr=0.2)
+for iteration in range(80):  # the cube first has to break static friction, then the force profile is shaped
+    optimizer.zero_grad()
+    loss = rollout(forces=forces)  # forward rollout + discrete adjoint on backward()
+    loss.backward()
+    optimizer.step()
+print(f"final distance to the goal: {np.sqrt(2 * float(loss)):.4f} m")
+rollout.close()
+physics.destroy_scene(scene)
+physics.shutdown()
+```
+
 Every gradient path is validated against central finite differences of the same rollout in
 `superdex_python/test/diffsim` (run from `superdex_python`):
 
@@ -101,6 +167,23 @@ stiffness in these demos, and the checker is how the demos' replays keep it boun
 the rigid tasks). What the samples do not see, it does not see: the FR3 wrist links' render
 models extend up to a centimetre beyond their collision hulls in places, so a wrist that
 visibly enters a cube may be overlapping less than it looks.
+
+What the demos reach (40 iterations unless noted; the loss is half the squared distance of
+the manipulated object to its goal, so 1e-4 is about 1.4 cm and 1e-6 about 1.4 mm; every run
+starts with the adjoint checked against central finite differences along its own gradient):
+
+| task | what is optimized | loss at start | loss at the end | adjoint vs FD |
+|---|---|---|---|---|
+| `reach` | joint targets, free motion | 6.7e-2 | 2.0e-4 | 1.2e-5 |
+| `push` | joint targets through frictional contact | 7.4e-3 | 2.2e-5 | 6.0e-6 |
+| `push_multi` | joint targets through two contacts (cube pushes cube) | 6.8e-3 | 3.2e-5 | 4.4e-6 |
+| `push_soft` | joint targets, FEM cube, substepped | 7.6e-3 | 1.3e-4 | 6.8e-5 |
+| `push_policy` | MLP weights, closed loop, three cube starts (100 it.) | 3.8e-3 (mean) | 8.5e-5; 0.1 / 0.6 / 0.8 cm to the goal | 2.0e-3 (mean over starts) |
+| `grasp` | carry knots, 2F-85 gripper, closed-loop linkage | 1.1e-2 | 2e-6 | 1.4e-4 |
+| `grasp_soft` | carry knots, FEM cube in the gripper | 1.1e-2 | < 1e-6 | 1.3e-3 |
+| `hand` | carry knots, DG-5F fingertip pinch, 27 DoFs | 1.1e-2 | < 1e-6 | 3.0e-5 |
+| `tendon` | tendon pull of a rod-driven finger | 9.9e-4 | < 1e-6 | 1.1e-4 |
+| `haul` | joint targets through a cable to a box | 6.6e-3 | 2.5e-3 | 2.3e-5 |
 
 Cost (one thread, double precision, a 2026 desktop CPU): the FR3 arm pushing a cube
 (75 steps of 20 ms) runs at about 6 ms per forward step and 4 ms per adjoint step, a
