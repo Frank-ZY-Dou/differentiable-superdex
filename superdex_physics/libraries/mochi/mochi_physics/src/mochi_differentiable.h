@@ -374,9 +374,13 @@ void ResetBackPropagationContainers(
     CDiffDerivedStepGrad& outGradDerivedStep,
     CDiffTargetPoseGrad* outTargetPoseGrad);
 
-// System to reset contact force adjoints before running backward contact queries.
+// System to reset contact force adjoints before running backward contact queries. The forward
+// assembly stores the contact forces in `ContactDetectionResult::forcePerUnitArea` for every
+// pair with a contact query (TagQueryActiveContacts: contact points, node contact forces or
+// the total contact force), and back-propagation uses that container for the force adjoints:
+// it must start from zero for every such actor, not only for those with a total-force query.
 void PrepareContactForceAdjoints(
-    CQueryActorContactForces const& queryActorContactForces,
+    ecs::RequiredTag<TagQueryActiveContacts>,
     CRequiresFarSdfEvaluation const* farSdfEval,
     CActiveCollisions<ContactType::Async, TimeStep::Current>& outActiveCollisionsAsync,
     CActiveCollisions<ContactType::Sync, TimeStep::Current>& outActiveCollisionsSync,

@@ -680,9 +680,10 @@ static void PrepareBackPropagationIslandAsync(
   solver::PreFirstStageLocalPipeline(reg, descendants);
   solver::PreStageLocalPipeline(reg, descendants, problem);
 
-  // Run collision detection if some actor has queries enabled
+  // Run collision detection if some actor has contact queries enabled (the contact containers
+  // then carry the forward forces, which back-propagation reuses for the force adjoints)
   if (std::any_of(descendants.actors.begin(), descendants.actors.end(), [&](auto const& e) {
-        return reg.any_of<CQueryActorContactForces>(e);
+        return reg.any_of<TagQueryActiveContacts>(e);
       })) {
     // We must visit the full island, to account for cases where the queried actors act as
     // colliders.
@@ -1447,7 +1448,7 @@ void mochi::ResetBackPropagationContainers(
 }
 
 void mochi::PrepareContactForceAdjoints(
-    CQueryActorContactForces const& /*queryActorContactForces*/,
+    ecs::RequiredTag<TagQueryActiveContacts>,
     [[maybe_unused]] CRequiresFarSdfEvaluation const* farSdfEval,
     CActiveCollisions<ContactType::Async, TimeStep::Current>& outActiveCollisionsAsync,
     CActiveCollisions<ContactType::Sync, TimeStep::Current>& outActiveCollisionsSync,

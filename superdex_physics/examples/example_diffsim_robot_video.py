@@ -91,12 +91,12 @@ re-centers on the observed cube; the video ends with the plan alone and both
 policies on every start.
 
 ``robot_hand_grasp.mp4`` (``--task hand``) is the grasp with a five-finger hand
-(FR3 + Tesollo DG-5F): the hand comes down over a cube with the fingers
-horizontal, wraps fingers 2-3 over its far side and the thumb over the near side,
-lifts it, and the carry knots are optimized like the gripper grasp (27 controlled
-DoFs, some 20 finger links in frictional contact). Known issue: this grasp relies
-on a compliant contact (``HAND_CONTACT``, 1e6 Pa/m) and the fingers pass into the
-cube; see the constant's comment.
+(FR3 + Tesollo DG-5F): the hand comes down above and behind a 5 cm cube with the
+fingers horizontal, pinches it between the fingertips of fingers 2-4 on its far
+face and the thumb on its near face, lifts it, and the carry knots are optimized
+like the gripper grasp (27 controlled DoFs, the finger pads in frictional contact
+at the engine's default stiffness; see the ``HAND_*`` constants for the geometry
+and why a wrap is not reachable).
 
 ``robot_push_multi.mp4`` (``--task push_multi``) is the push with two cubes in a
 row: the end effector pushes the first cube, which pushes the second; the loss
@@ -208,24 +208,32 @@ HAUL_LEARNING_RATE = 0.004  # Adam; 0.002 halves the loss in 40 iterations, 0.00
 # proximal flexion joints (0.6 of it on the distal one) and the thumb goes to HAND_THUMB.
 HAND_BOT = "bots/arm_hand_combos/fr3_dg5f_short/right/fr3_dg5f_short_right.superdex_bot"
 HAND_PALM_LINK = "dg5f_link_palm"
-HAND_CUBE_HALF = 0.035
-HAND_CUBE_DENSITY = 300.0  # [kg/m^3]: a 7 cm cube of 0.1 kg
+HAND_CUBE_HALF = 0.025
+HAND_CUBE_DENSITY = 300.0  # [kg/m^3]: a 5 cm cube of 0.04 kg
 HAND_CUBE_POS = np.array([0.45, 0.0, HAND_CUBE_HALF - 0.001])
-HAND_BACK, HAND_UP = 0.08, 0.09  # [m] the IK reaches the palm 4 cm closer in y (orientation wins)
-HAND_FLEX = 1.1  # [rad]
-HAND_THUMB = (0.3, -1.2, 0.8, 0.5)  # [rad] joints 1_1 (abduction), 1_2 (opposition), 1_3, 1_4
+# The grasp is a fingertip pinch: the palm hovers above and behind the cube (palm normal
+# down, fingers along +y), the closing fingers 2-4 curl down onto the cube's far face at its
+# mid-height and the thumb, opposed under the palm, presses the near face. In the palm frame
+# (x = palm normal, z = finger direction) the closed fingertips sit 90 mm below and 135 mm
+# ahead of the palm center and the thumb tip 90 mm below and 80 mm ahead, so the palm goes
+# HAND_UP above and HAND_BACK behind the cube center; HAND_SIDE shifts it sideways so that
+# fingers 2 and 3 straddle the cube's lateral center. A power wrap is not reachable for a
+# cube this size: the thumb's tip cannot get more than ~50 mm behind the finger pads along
+# the finger direction (its opposition sweeps laterally), so palm-down wraps of a 7 cm cube
+# only "held" it by passing the fingers through it at a compliant contact.
+HAND_BACK, HAND_UP, HAND_SIDE = 0.11, 0.095, 0.015  # [m]
+HAND_FLEX = (0.5, 1.0, 0.4)  # [rad] closed MCP / PIP / DIP of fingers 2-5
+HAND_THUMB = (0.3, -1.2, 1.0, 0.0)  # [rad] joints 1_1 (abduction), 1_2 (opposition), 1_3, 1_4
 HAND_IK_WEIGHT = 3.0  # position target weight against the two orientation points
 HAND_CLOSE_START, HAND_CLOSE_STEPS, HAND_LIFT_END = 30, 25, 100
 HAND_CARRY_START = 65
 # The hand-cube island (27 DoFs, some 20 finger links in contact) occasionally runs out of Newton
 # iterations at ~5e-7 residual: stalls below this are accepted, worse steps are substepped.
 HAND_STALL_TOLERANCE = 1e-5
-# KNOWN ISSUE: the five-finger grasp only holds the cube with a compliant contact. At this
-# stiffness the fingers pass up to 3.5 cm into the 7 cm cube (they cage it from inside); at the
-# engine default (1e9, see GRASP_CONTACT) the closure pushes the cube away and the hand lifts
-# empty, in every palm height / offset / flexion / thumb / cube size tried. A closure that wraps
-# the cube physically (pre-shaped fingers, thumb opposition) is pending.
-HAND_CONTACT = physics.ContactParams(penalty_coefficient=1e6, coulomb_friction_coefficient=0.8)
+# The pinch squeezes the position-controlled fingertips a few millimetres into the cube at the
+# default contact stiffness (5-7 mm on the finger pads, the closure targets lie inside the
+# cube); that is the grip force, and the replays' penetration limit allows it.
+HAND_MAX_PENETRATION = 0.01
 TENDON_SCENE = "samples/tendon_comparison_articulation.mochi_scene"
 TENDON_SLIDER_GAINS = (200.0, 5.0)  # pose-controller gains of the tendon slider (prismatic joint)
 TENDON_HINGE_DAMPING = 0.02  # the finger hinges are passive: no stiffness, light damping
@@ -1517,7 +1525,7 @@ def spawn_hand_arm(scene, with_controller: bool = True, with_contact: bool = Tru
         return GRIPPER_GAINS
 
     return spawn_bot(
-        scene, HAND_BOT, HAND_PALM_LINK, gains_of, with_controller, with_contact, HAND_CONTACT
+        scene, HAND_BOT, HAND_PALM_LINK, gains_of, with_controller, with_contact, GRASP_CONTACT
     )
 
 
@@ -1563,7 +1571,7 @@ def build_hand_grasp_task():
     """Scene, actors and initial controls of the five-finger grasp (see the module docstring);
     the same return value as :func:`build_grasp_task`."""
     print("[robot_hand_grasp] IK for the descend / grasp / lift palm poses")
-    grasp = HAND_CUBE_POS + np.array([0.0, -HAND_BACK, HAND_UP])
+    grasp = HAND_CUBE_POS + np.array([HAND_SIDE, -HAND_BACK, HAND_UP])
     q_pre, q_grasp, q_lift = hand_ik_poses(
         [grasp + np.array([0.0, 0.0, 0.15]), grasp, grasp + np.array([0.0, 0.0, 0.25])]
     )
@@ -1574,13 +1582,13 @@ def build_hand_grasp_task():
         name="ground",
         shape=physics.create_plane_shape(normal=[0.0, 0.0, 1.0], distance=0.0),
         is_static=True,
-        contact=HAND_CONTACT,
+        contact=GRASP_CONTACT,
     )
     cube = scene.create_rigid_actor(
         name="cube",
         shape=physics.create_tet_mesh_shape(coordinates=cube_coords(HAND_CUBE_HALF), connectivity=CUBE_CONN),
         density=HAND_CUBE_DENSITY,
-        contact=HAND_CONTACT,
+        contact=GRASP_CONTACT,
         world_from_local=physics.TransformRT(HAND_CUBE_POS.tolist()),
     )
     n = arm.get_num_dofs()
@@ -1596,7 +1604,7 @@ def build_hand_grasp_task():
         h = hand_open.copy()
         for finger in range(2, 6):
             b = 4 * (finger - 1)
-            for j, amount in ((1, HAND_FLEX), (2, HAND_FLEX), (3, 0.6 * HAND_FLEX)):
+            for j, amount in zip((1, 2, 3), HAND_FLEX):  # joints x_2 (MCP), x_3 (PIP), x_4 (DIP)
                 h[b + j] = hand_open[b + j] + fraction * (amount - hand_open[b + j])
         for j in range(4):
             h[j] = hand_open[j] + fraction * (HAND_THUMB[j] - hand_open[j])
@@ -1617,7 +1625,7 @@ def build_hand_grasp_task():
 
     # Where the cube ends up in the grasp after the lift (measured on the initial trajectory),
     # displaced sideways: the optimizer has to carry it there.
-    goal = np.array([0.49, 0.02, 0.30]) + GRASP_GOAL_OFFSET
+    goal = np.array([0.476, 0.052, 0.265]) + GRASP_GOAL_OFFSET
     return scene, bot, arm, cube, cube_position, context, controls0, goal, dt
 
 
@@ -1739,9 +1747,9 @@ def _task_grasp_impl(
             params0=params0,
             optimizer_kind="ngd",
             substep_levels=PUSH_SUBSTEP_LEVELS if (soft or hand) else 0,
-            # The soft cube's 1e7 contact and the hand's known-issue 1e6 contact overlap
-            # more than the rigid limit; their penetration is reported, not bounded.
-            max_penetration=None if (soft or hand) else MAX_PENETRATION,
+            # The soft cube's 1e7 contact overlaps more than the rigid limit (reported, not
+            # bounded); the hand's pinch squeezes the fingertips into the cube by design.
+            max_penetration=None if soft else (HAND_MAX_PENETRATION if hand else MAX_PENETRATION),
             stall_tolerance=(
                 PUSH_SOFT_STALL_TOLERANCE if soft else (HAND_STALL_TOLERANCE if hand else None)
             ),

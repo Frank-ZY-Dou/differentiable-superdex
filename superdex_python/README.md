@@ -87,9 +87,12 @@ Poisson's ratio, recovered to 0.01%).
 The rigid tasks use the engine's default contact stiffness (1e9 Pa/m, `physics.ContactParams()`):
 a softer material lets a position-controlled arm sink visibly into what it pushes. The soft
 tasks use a stiffness commensurate with their material (1e6 on a 1e5 Pa cube), the level at
-which their Newton solve still converges to the tolerance the adjoint needs. Known issue: the
-five-finger hand grasp (`--task hand`) still relies on a compliant 1e6 contact, and its fingers
-pass into the cube; at the default stiffness its closure pushes the cube away.
+which their Newton solve still converges to the tolerance the adjoint needs. The five-finger
+hand grasp is a fingertip pinch (fingers 2-4 on the far face of a 5 cm cube, the thumb on the
+near face) at the default stiffness: the DG-5F's thumb cannot oppose the finger pads along the
+finger direction by more than about 5 cm, so a palm-down power wrap of a 7 cm cube is not
+reachable, and the first version of the demo only held its cube by passing the fingers through
+it at a compliant contact.
 
 `superdex.physics.utils.penetration.PenetrationChecker` measures the interpenetration of a
 scene from the engine's contact samples (the deepest sample per actor pair after each step,

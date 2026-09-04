@@ -170,6 +170,47 @@ class PenetrationCheckerTest(unittest.TestCase):
         self.assertGreater(pairs[contact_pairs[0]].depth, 0.0)
         self.assertLess(pairs[contact_pairs[0]].depth, 0.01)
 
+    def test_query_leaves_the_adjoint_unchanged(self) -> None:
+        """The contact-point query must not change the differentiable rollout: the engine
+        stores the forward contact forces in the container that back-propagation reuses for
+        the force adjoints whenever a contact query is registered, so the adjoint must zero
+        it for every contact query (it once did so only for the total-force query, and the
+        checker's query turned the gradient of a chain pushing a cube into 1e10)."""
+        from superdex.physics.diffsim_rollout import DifferentiableRollout
+
+        from .diffsim.harness import TranslationErrorLoss, configure_for_differentiability
+
+        if not physics.uses_double_precision():
+            raise unittest.SkipTest("the adjoint's finite-difference self-check needs double precision")
+        num_steps = 30
+        controls = np.stack([np.linspace(0.0, -1.2, num_steps), np.zeros(num_steps)], axis=1)
+
+        def gradient(with_query: bool):
+            scene, chain, cube = scenes.chain_pushing_cube()
+            self.addCleanup(physics.destroy_scene, scene)
+            configure_for_differentiability(scene)
+            checker = PenetrationChecker(scene) if with_query else None
+            start = np.asarray(cube.get_center_of_mass_transform().translation, dtype=np.float64)
+            loss = TranslationErrorLoss(cube, ref=start + np.array([0.08, 0.0, 0.0]))
+            result = DifferentiableRollout(scene, dt=DT, num_steps=num_steps).run(
+                apply_inputs=lambda step: chain.set_articulated_target_pose(
+                    np.ascontiguousarray(controls[step])
+                ),
+                terminal_losses=[loss],
+            )
+            self.assertTrue(result.fd_valid, result.flagged_steps)
+            if checker is not None:
+                checker.record()
+                self.assertGreater(checker.max_depth(), 0.0, "the query must still see the contact")
+            return result.loss, result.gradients[chain.get_name()].control_targets.copy(), result.max_adjoint_residual
+
+        loss_plain, grad_plain, residual_plain = gradient(False)
+        loss_query, grad_query, residual_query = gradient(True)
+        self.assertAlmostEqual(loss_query, loss_plain, delta=1e-12)
+        self.assertLess(residual_query, 1e-4, residual_query)
+        rel = np.linalg.norm(grad_query - grad_plain) / np.linalg.norm(grad_plain)
+        self.assertLess(rel, 1e-6, (rel, np.linalg.norm(grad_plain), np.linalg.norm(grad_query)))
+
     def test_query_survives_a_state_restore(self) -> None:
         scene, cube = scenes.rigid_on_plane("none", initial_velocity=(0.0, 0.0, 0.0))
         self.addCleanup(physics.destroy_scene, scene)

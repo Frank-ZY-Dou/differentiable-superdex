@@ -36,8 +36,9 @@ All notable changes to this repository will be documented here.
   The rigid tasks use the engine's default contact stiffness (1e9 Pa/m): the 1e6 material of the
   first version let the wrist sink about a centimetre into the pushed cube and the gripper's
   fingertips 15 mm into the grasped one; the soft push keeps a 1e6 contact commensurate with its
-  1e5 Pa material (at 1e9 its Newton solve fails), the soft grasp its 1e7 cube. Known issue: the
-  five-finger hand grasp still needs a compliant contact (the fingers pass into the cube).
+  1e5 Pa material (at 1e9 its Newton solve fails), the soft grasp its 1e7 cube. The five-finger
+  hand grasp is a fingertip pinch of a 5 cm cube at the default stiffness (its first version only
+  held a 7 cm cube by passing the fingers through it at a compliant contact).
   and
   `example_diffsim_sysid.py --mode soft` (Young's modulus and Poisson's ratio identification).
 - CI: `diffsim-tests` workflow builds both physics wheels and runs the suite in both precisions.
