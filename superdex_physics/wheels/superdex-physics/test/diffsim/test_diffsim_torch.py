@@ -23,11 +23,9 @@ validation path on top of the suite's own FD tests.
 - gradcheck over linear external forces + gravity + contact parameters +
   density on a cube-on-plane contact scene, with the physical parameters
   reached through a smooth reparameterization so every gradcheck perturbation
-  is well-scaled (this also exercises chaining into an upstream torch graph).
-  Torque gradients are excluded from gradcheck because of a known engine
-  approximation, and that exclusion is licensed by two tests that PIN the
-  approximation instead of hiding it (see
-  :class:`TorqueGradientApproximationTest`);
+  is well-scaled (this also exercises chaining into an upstream torch graph),
+  torques included (:class:`TorqueGradientTest` measures the torque gradients
+  against finite differences on their own);
 - bridge loss equals the direct DifferentiableRollout loss;
 - repeated calls are deterministic (bitwise-equal loss and gradients);
 - gradcheck over a soft cube's initial nodal state + gravity + contact
@@ -189,20 +187,14 @@ class GradcheckParametersTest(unittest.TestCase):
             [[1e8, 0.4, 0.1, 5.0]], dtype=torch.float64
         )
         density_base = torch.tensor([1000.0], dtype=torch.float64)
-        # Torque columns (DoFs 3-5) are held at a constant baseline instead
-        # of being gradchecked: their gradients carry the engine's
-        # O(per-step-rotation) merit-function approximation, which is
-        # measured and pinned by TorqueGradientApproximationTest below.
-        torque_baseline = torch.tensor(
-            0.3 * np.cos(np.arange(3 * num_steps, dtype=np.float64)).reshape(
-                num_steps, 3
-            ),
-            dtype=torch.float64,
-        )
+        # All six force DoFs are gradchecked, torques included: since the adjoint
+        # operator carries the moving-chart term of the external torques (see
+        # TorqueGradientTest below) the torque gradients are exact to the finite-difference
+        # noise of the adjoint's products.
 
-        def f(contact_scale, density_scale, linear_forces, gravity):
+        def f(contact_scale, density_scale, forces, gravity):
             return bridge(
-                forces=torch.cat([linear_forces, torque_baseline], dim=1),
+                forces=forces,
                 gravity=gravity,
                 contact_params=contact_base * (1.0 + 0.05 * contact_scale),
                 densities=density_base * (1.0 + 0.05 * density_scale),
@@ -210,10 +202,13 @@ class GradcheckParametersTest(unittest.TestCase):
 
         contact_scale = torch.zeros((1, 4), dtype=torch.float64, requires_grad=True)
         density_scale = torch.zeros(1, dtype=torch.float64, requires_grad=True)
-        linear_forces = torch.tensor(
-            0.5
-            * np.sin(np.arange(3 * num_steps, dtype=np.float64)).reshape(
-                num_steps, 3
+        forces = torch.tensor(
+            np.concatenate(
+                [
+                    0.5 * np.sin(np.arange(3 * num_steps, dtype=np.float64)).reshape(num_steps, 3),
+                    0.3 * np.cos(np.arange(3 * num_steps, dtype=np.float64)).reshape(num_steps, 3),
+                ],
+                axis=1,
             ),
             dtype=torch.float64,
             requires_grad=True,
@@ -224,7 +219,7 @@ class GradcheckParametersTest(unittest.TestCase):
         self.assertTrue(
             torch.autograd.gradcheck(
                 f,
-                (contact_scale, density_scale, linear_forces, gravity),
+                (contact_scale, density_scale, forces, gravity),
                 eps=1e-6,
                 atol=1e-8,
                 rtol=1e-4,
@@ -281,79 +276,108 @@ class GradcheckParametersTest(unittest.TestCase):
         self.assertAlmostEqual(result.loss, loss_a, places=12)
 
 
-class TorqueGradientApproximationTest(unittest.TestCase):
-    """Pins the engine's rotational-gradient approximation under external torques.
+class TorqueGradientTest(unittest.TestCase):
+    """Rotational gradients under external torques against central finite differences.
 
-    With an external torque the rigid rotational gradients (dL/dtorque and, equally,
-    dL/d(initial angular velocity)) carry a relative error proportional to the torque
-    and independent of the angular velocity; without a torque they are exact to 1e-9
-    at any per-step rotation. Half of it was the adjoint's Hessian-vector products
-    transporting the constant torque term between rotation charts (removed on
-    2026-09-03: external forces no longer enter those products); the remaining half
-    is a symmetric term (the operator's asymmetry probe stays at 1e-9): measured
-    2.2e-4 at 0.3 N*m and 8.6e-4 at 1.2 N*m on a free cube (before: 4.3e-4 and
-    1.7e-3), and on the contact scene 6.5e-4 relative / 3.4e-10 absolute (before:
-    2.4e-2 / 5.3e-10). These tests assert the deviation EXISTS (lower bound) and
-    stays SMALL (upper bound): an engine fix that makes torque gradients exact flips
-    the lower bound, prompting a documentation update and the reinstatement of
-    torque columns into gradcheck.
+    The step residual is evaluated in the chart of the iterate itself (a left rotation
+    increment at the current rotation), so the Jacobian of the step map is the derivative of
+    the moving-chart residual: the fixed-chart Hessian H the adjoint's finite-difference
+    products produce, minus 1/2 [tau]x on the rotation block of every standalone rigid actor
+    with an external torque tau (the chart's derivative acting on the state-independent part
+    of the residual; ``exp(eta) exp(delta) = exp(delta + eta - delta x eta / 2 + ...)``). Until
+    2026-09-05 the adjoint solved with H alone, and the torque and rotational gradients were
+    off by half the rotation the torque induces in a step: 2.2e-4 relative at 0.3 N m and
+    8.6e-4 at 1.2 N m on a free cube (before 2026-09-03 twice that, when the constant torque
+    term was still transported inside the products - the other half of the same term, with
+    the wrong sign). With the term in the operator (both the Krylov and the Newton outer
+    solver) the free-cube errors are 1.6e-7 and 3.1e-5 (measured 2026-09-05; the finite
+    differences are taken at eps 1e-6 on a loss of order 1e-3). These tests assert the
+    gradients are exact to those levels, with a margin, and that the torque gradients are not
+    trivially zero.
     """
 
-    def _torque_adjoint_and_fd(self, scene_fn, loss_cls, amplitude):
+    def _torque_adjoint_and_fd(self, scene_fn, loss_cls, amplitude, num_steps=1, newton_outer=False):
         diffsim_torch = _make_bridge_module()
         scene, cube = scene_fn()
         self.addCleanup(physics.destroy_scene, scene)
         configure_for_differentiability(scene)
+        if newton_outer:
+            params = diffsim.get_back_propagation_solver_params(scene)
+            params.use_newton_outer_solver = True
+            diffsim.set_back_propagation_solver_params(scene, params)
         bridge = diffsim_torch.TorchRollout(
             scene,
             dt=DT,
-            num_steps=1,
+            num_steps=num_steps,
             force_actors=[cube],
             terminal_losses=[loss_cls(cube)],
         )
         self.addCleanup(bridge.close)
-        base = np.zeros((1, 6))
-        base[:, 3:] = amplitude * np.cos(np.arange(3)).reshape(1, 3)
+        base = np.zeros((num_steps, 6))
+        base[:, 3:] = amplitude * np.cos(np.arange(3 * num_steps)).reshape(num_steps, 3)
         f0 = torch.tensor(base, dtype=torch.float64, requires_grad=True)
         bridge(forces=f0).backward()
-        adjoint = f0.grad.numpy()[0, 3:].copy()
-        fd = np.zeros(3)
+        adjoint = f0.grad.numpy()[:, 3:].copy()
+        fd = np.zeros_like(adjoint)
         eps = 1e-6
-        for i, dof in enumerate(range(3, 6)):
-            values = []
-            for sign in (+1.0, -1.0):
-                perturbed = base.copy()
-                perturbed[0, dof] += sign * eps
-                values.append(
-                    bridge(
-                        forces=torch.tensor(perturbed, dtype=torch.float64)
-                    ).item()
-                )
-            fd[i] = (values[0] - values[1]) / (2 * eps)
+        for k in range(num_steps):
+            for i, dof in enumerate(range(3, 6)):
+                values = []
+                for sign in (+1.0, -1.0):
+                    perturbed = base.copy()
+                    perturbed[k, dof] += sign * eps
+                    values.append(
+                        bridge(
+                            forces=torch.tensor(perturbed, dtype=torch.float64)
+                        ).item()
+                    )
+                fd[k, i] = (values[0] - values[1]) / (2 * eps)
+        self.assertGreater(float(np.abs(fd).max()), 1e-6, "vacuous: the torque does not move the loss")
         return adjoint, fd
 
-    def test_free_cube_error_tracks_per_step_rotation(self) -> None:
+    def test_free_cube_moderate_torque_is_exact(self) -> None:
         adjoint, fd = self._torque_adjoint_and_fd(
             scenes.rigid_free, QuaternionErrorLoss, amplitude=0.3
         )
         rel = np.abs(adjoint - fd) / np.maximum(np.abs(fd), 1e-14)
-        # Measured 2.15e-4 at this amplitude (4.3e-4 before external forces were taken
-        # out of the finite-difference Hessian-vector products).
-        self.assertGreater(float(rel.max()), 1e-4, "approximation gone - update docs")
-        self.assertLess(float(rel.max()), 1e-3)
+        self.assertLess(float(rel.max()), 2e-6, rel)  # measured 1.6e-7
 
-    def test_contact_scene_error_is_small_and_tiny_absolute(self) -> None:
+    def test_free_cube_large_torque_is_exact(self) -> None:
+        # 1.2 N m rotates this cube by 2.3e-3 rad per step; measured 3.1e-5 for one step and
+        # 8.3e-5 for five (8.6e-4 / 2.0e-3 without the chart term).
         adjoint, fd = self._torque_adjoint_and_fd(
-            lambda: scenes.rigid_on_plane("rich"),
-            TranslationErrorLoss,
-            amplitude=0.3,
+            scenes.rigid_free, QuaternionErrorLoss, amplitude=1.2
         )
         rel = np.abs(adjoint - fd) / np.maximum(np.abs(fd), 1e-14)
-        # Measured 6.5e-4 relative, 3.4e-10 absolute (2.35e-2 / 5.3e-10 before external
-        # forces were taken out of the finite-difference Hessian-vector products).
-        self.assertGreater(float(rel.max()), 1e-4, "approximation gone - update docs")
-        self.assertLess(float(rel.max()), 5e-3)
-        self.assertLess(float(np.abs(adjoint - fd).max()), 1e-8)
+        self.assertLess(float(rel.max()), 1e-4, rel)
+        adjoint, fd = self._torque_adjoint_and_fd(
+            scenes.rigid_free, QuaternionErrorLoss, amplitude=1.2, num_steps=5
+        )
+        rel = np.abs(adjoint - fd) / np.maximum(np.abs(fd), 1e-14)
+        self.assertLess(float(rel.max()), 3e-4, rel)
+
+    def test_newton_outer_solver_carries_the_term_too(self) -> None:
+        adjoint, fd = self._torque_adjoint_and_fd(
+            scenes.rigid_free, QuaternionErrorLoss, amplitude=1.2, newton_outer=True
+        )
+        rel = np.abs(adjoint - fd) / np.maximum(np.abs(fd), 1e-14)
+        self.assertLess(float(rel.max()), 1e-4, rel)  # measured 3.1e-5, as the Krylov path
+
+    def test_contact_scene_torque_gradients(self) -> None:
+        """A cube sliding on the ground with a torque: the torque gradients of a translation
+        loss are small (1e-8, the torque barely moves the cube) and the adjoint reproduces
+        them to the adjoint solve's tolerance: 2.6e-10 absolute for one step, 4.2e-9 over
+        five (before the chart term 3.4e-10 / 8.5e-9)."""
+        adjoint, fd = self._torque_adjoint_and_fd(
+            lambda: scenes.rigid_on_plane("rich"), TranslationErrorLoss, amplitude=0.3
+        )
+        self.assertLess(float(np.abs(adjoint - fd).max()), 2e-9)
+        adjoint, fd = self._torque_adjoint_and_fd(
+            lambda: scenes.rigid_on_plane("rich"), TranslationErrorLoss, amplitude=0.3, num_steps=5
+        )
+        self.assertLess(float(np.abs(adjoint - fd).max()), 2e-8)
+        rel = np.abs(adjoint - fd) / np.maximum(np.abs(fd), 1e-14)
+        self.assertLess(float(rel.max()), 5e-3, rel)  # measured 6.8e-4
 
 
 class GradcheckSoftTest(unittest.TestCase):
@@ -869,7 +893,7 @@ class PolicyRolloutTest(unittest.TestCase):
         """A cube sliding on the ground is both observed (its contact force) and driven (the
         policy's output is the external force on it): the observation's gradient then also
         enters the force output of the step it was taken after (F = m dv/dt - m g - f_ext).
-        No torques, so the rigid torque approximation is not involved. Directional FD along
+        No torques. Directional FD along
         the gradient at eps 1e-6 / 1e-7, plus the largest weight entries where FD is smooth."""
         diffsim_torch = _make_bridge_module()
         scene, cube = scenes.rigid_on_plane("coulomb", initial_velocity=(0.5, 0.0, 0.0))
@@ -1078,8 +1102,7 @@ class PolicyRolloutTest(unittest.TestCase):
         """A policy fed the pushed cube's orientation quaternion (and the chain pose and time)
         drives the controlled chain pushing a rigid cube: the off-center push spins the cube,
         so the observed orientation depends on the earlier controls and the loss (the cube's
-        final position) sees the policy through it. No external torques, so the rigid torque
-        approximation is not involved. Directional FD along the gradient at eps 1e-5 / 1e-6,
+        final position) sees the policy through it. No external torques. Directional FD along the gradient at eps 1e-5 / 1e-6,
         plus the largest weight entries where FD is smooth."""
         diffsim_torch = _make_bridge_module()
         scene, chain, cube = scenes.chain_pushing_cube()
@@ -1458,11 +1481,10 @@ class EngineContactForceAdjointTest(unittest.TestCase):
         self.assertLessEqual(rel, 1e-6, rel)
 
     def test_moving_collider_is_wrong(self) -> None:
-        """A rigid pusher (pushed and tilted by external forces, friction none, so neither the
-        rigid torque approximation's rotational term nor friction is involved) against the
-        target cube: the engine adjoint is off by more than 3% (measured 15% on
-        2026-09-05); the controlled chain pushing the cube with Coulomb friction, by more
-        than 10% (measured 26%)."""
+        """A rigid pusher (pushed and tilted by external forces, friction none) against the
+        target cube: the engine adjoint is off by more than 3% (measured 15% on 2026-09-05,
+        12% once the adjoint operator carried the torque chart term); the controlled chain
+        pushing the cube with Coulomb friction, by more than 10% (measured 26%)."""
         dofs = np.arange(6, dtype=np.int32)
         forces = np.zeros((self.NUM_STEPS, 6))
         forces[:, 0] = 80.0

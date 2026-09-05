@@ -86,16 +86,15 @@ Design and contract:
   default ``1e-3``-ish tolerances, friction-heavy gradients can be off by
   several percent against finite differences.
 
-Known engine approximation (measured 2026-08-30, pinned by the test suite):
-gradients w.r.t. the TORQUE components (DoFs 3-5) of a standalone rigid
-actor's external forces carry a relative error of order the per-step rotation
-angle - the engine's external-torque residual uses a merit function valid
-near identity rotation steps (the error scales linearly with the applied
-torque: 2.1e-4 at 0.15 N*m to 1.7e-3 at 1.2 N*m on a free cube), and contact
-coupling can push the relative error on near-zero torque gradients to a few
-percent (absolute error stayed below 1e-9 in all probes). Linear-force,
-control, gravity, contact-parameter and density gradients pass
-``torch.autograd.gradcheck`` exactly.
+Every input group, torques included, passes ``torch.autograd.gradcheck``.
+The torque gradients of a standalone rigid actor need the adjoint operator to
+carry the moving-chart term of the external torque (the step residual is
+evaluated in the chart of the iterate itself, so the step Jacobian is the
+fixed-chart Hessian minus 1/2 [tau]x on the rotation block; the engine adds
+its transpose in the adjoint solve since 2026-09-05). Before that the torque
+and rotational gradients were off by half the rotation the torque induces in
+a step (2.2e-4 relative at 0.3 N*m, 8.6e-4 at 1.2 N*m on a free cube); now
+1.6e-7 and 3.1e-5 (``TorqueGradientTest``).
 
 Known engine limitation (measured 2026-09-05, pinned by
 ``EngineContactForceAdjointTest``): the contact-force query adjoint,

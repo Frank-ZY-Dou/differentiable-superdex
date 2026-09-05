@@ -305,6 +305,90 @@ static void ApplyDense(
   }
 }
 
+// The step residual is evaluated in the chart of the iterate itself (a left rotation increment at
+// the current rotation), so the Jacobian of the implicit step map is the derivative of the
+// moving-chart residual, J = d r(exp(delta) x) / d delta. The finite-difference products
+// transport every residual back to the chart at x (rigid::TransportGradient) and the analytic
+// assembly differentiates in that fixed chart, so both produce the symmetric Hessian H of the
+// merit. J differs from H by the derivative of the chart acting on the state-independent part of
+// the residual, which at a solved step equals the external torque tau of a standalone rigid actor:
+// exp(eta) exp(delta) = exp(delta + eta - delta x eta / 2 + ...) gives J = H - 1/2 [tau]x on that
+// actor's rotation block, and the adjoint solve needs J^T = H + 1/2 [tau]x. Without this term the
+// torque and rotational gradients were off by half the per-step rotation the torque induces
+// (2.2e-4 relative at 0.3 N m on a free cube, 2026-09-03).
+//
+// Adds sign * 1/2 tau x v_rot to out for every standalone rigid actor of the island with an
+// external torque; returns whether there is one.
+static bool AddRigidTorqueChartTerm(
+    entt::registry const& reg,
+    CIslandDescendants const& descendants,
+    real sign,
+    ColumnVectorView<real const> in,
+    ColumnVectorView<real> out) {
+  bool any = false;
+  for (entt::entity const e : descendants.rigidActors) {
+    if (reg.any_of<TagArticulatedLinkActor>(e)) {
+      continue;
+    }
+    auto const* externalForces = reg.try_get<CExternalForces const>(e);
+    if (!externalForces || externalForces->Empty()) {
+      continue;
+    }
+    Real3 tau = {};
+    bool hasTorque = false;
+    for (int i = 0; i < isize(externalForces->dofs); ++i) {
+      int const dof = externalForces->dofs[i];
+      if (dof >= RigidSize::kDTrans && dof < RigidSize::kDAll && externalForces->forces[i] != 0_r) {
+        tau[dof - RigidSize::kDTrans] = externalForces->forces[i];
+        hasTorque = true;
+      }
+    }
+    if (!hasTorque) {
+      continue;
+    }
+    any = true;
+    int const offset = reg.get<CDofOffset const>(e).dofsOffset + RigidSize::kDTrans;
+    real const v0 = in[offset];
+    real const v1 = in[offset + 1];
+    real const v2 = in[offset + 2];
+    real const half = 0.5_r * sign;
+    out[offset] += half * (tau[1] * v2 - tau[2] * v1);
+    out[offset + 1] += half * (tau[2] * v0 - tau[0] * v2);
+    out[offset + 2] += half * (tau[0] * v1 - tau[1] * v0);
+  }
+  return any;
+}
+
+// The dense counterpart: adds sign * 1/2 [tau]x to the rotation diagonal block of every standalone
+// rigid actor with an external torque (sign -1 turns the fixed-chart Hessian into J).
+static void AddRigidTorqueChartTerm(
+    entt::registry const& reg, CIslandDescendants const& descendants, real sign, Matrix<real>& mat) {
+  for (entt::entity const e : descendants.rigidActors) {
+    if (reg.any_of<TagArticulatedLinkActor>(e)) {
+      continue;
+    }
+    auto const* externalForces = reg.try_get<CExternalForces const>(e);
+    if (!externalForces || externalForces->Empty()) {
+      continue;
+    }
+    Real3 tau = {};
+    for (int i = 0; i < isize(externalForces->dofs); ++i) {
+      int const dof = externalForces->dofs[i];
+      if (dof >= RigidSize::kDTrans && dof < RigidSize::kDAll) {
+        tau[dof - RigidSize::kDTrans] = externalForces->forces[i];
+      }
+    }
+    int const o = reg.get<CDofOffset const>(e).dofsOffset + RigidSize::kDTrans;
+    real const half = 0.5_r * sign;
+    mat(o, o + 1) += -half * tau[2];
+    mat(o, o + 2) += half * tau[1];
+    mat(o + 1, o) += half * tau[2];
+    mat(o + 1, o + 2) += -half * tau[0];
+    mat(o + 2, o) += -half * tau[1];
+    mat(o + 2, o + 1) += half * tau[0];
+  }
+}
+
 // Use a Krylov solver for the linear problem dres * z = rhs, where dres is approximated.
 // The approximate Hessian hat(dres) is used as preconditioner, and dres * v products
 // are computed via finite differences in GetHessianVectorProduct.
@@ -507,13 +591,78 @@ static void KrylovSolveZ(
     }
   }
 
+  // The Krylov solvers need the symmetric operator H, so the antisymmetric chart term of
+  // J^T = H + 1/2 [tau]x (AddRigidTorqueChartTerm) goes in by defect correction: with
+  // res = rhs - J^T z, solve H dz = res and add dz, until res meets the outer criterion. The
+  // contraction factor |H^-1 1/2 [tau]x| is of the order of the rotation the torque induces in a
+  // step, so a few rounds reach the tolerance; a round whose symmetric solve diverges stops the
+  // correction and the true residual below reports what remains.
+  auto const& descendants = reg.get<CIslandDescendants const>(island);
+  {
+    MOCHI_FILO_STACK_ALLOCATOR(chartAllocator, 2 * 256 * sizeof(real));
+    ColumnVector<real> res(rhs.Rows(), &chartAllocator);
+    ColumnVector<real> dz(rhs.Rows(), &chartAllocator);
+    int constexpr kMaxChartRounds = 8;
+    for (int round = 0; round < kMaxChartRounds; ++round) {
+      hessianOp(AsConstView(outZ), AsView(res));
+      if (!AddRigidTorqueChartTerm(reg, descendants, 1_r, AsConstView(outZ), AsView(res))) {
+        break; // no external torque on a standalone rigid actor: J^T = H
+      }
+      res *= -1_r;
+      res += rhs;
+      if (res.Norm() <= outerThreshold) {
+        break;
+      }
+      dz.SetZero();
+      auto const resView = AsConstView(res);
+      auto dzView = AsView(dz);
+      auto roundResult = krylov::PCG(
+          hessianOp,
+          resView,
+          dzView,
+          precOp,
+          backpropParams.outerSolverMaxIter,
+          pcgStatusCheck,
+          /*abortIfNotSpd*/ true,
+          backpropParams.verbosity,
+          /*usePolakRibiere*/ true,
+          InitialGuessHint::Zero);
+      if (roundResult.convergence == LinearSolverConvergenceStatus::Diverged) {
+        dz.SetZero();
+        krylov::StatusImplicitResidualNorm<real> roundMinresStatusCheck(
+            backpropParams.outerSolverRelTol,
+            backpropParams.outerSolverAbsTol,
+            static_cast<real>(newtonParamsForward.relDivTol));
+        roundResult = krylov::MinRes(
+            hessianOp,
+            resView,
+            dzView,
+            precOp,
+            backpropParams.outerSolverMaxIter,
+            roundMinresStatusCheck,
+            backpropParams.verbosity,
+            InitialGuessHint::Zero);
+        if (roundResult.convergence == LinearSolverConvergenceStatus::Diverged) {
+          if (backpropParams.verbosity >= VerbosityLevel::Warning) {
+            MOCHI_LOG_WARNING(
+                "Torque chart correction: the symmetric solve diverged in round %d.", round);
+          }
+          break;
+        }
+      }
+      outZ += dz;
+      outerResult.numIterDone += roundResult.numIterDone;
+    }
+  }
+
   // Replace the solver's residual estimate by the true residual of the returned solution (a
-  // fresh Hessian-vector product: MINRES's implicit residual can be far from it, see the
-  // integrity check above), so that the reported adjoint residual never under-reports. One
+  // fresh product of the full operator J^T: MINRES's implicit residual can be far from it, see
+  // the integrity check above), so that the reported adjoint residual never under-reports. One
   // extra product per solve.
   MOCHI_FILO_STACK_ALLOCATOR(probeAllocator, 2 * 256 * sizeof(real));
   ColumnVector<real> hz(rhs.Rows(), &probeAllocator);
   hessianOp(AsConstView(outZ), AsView(hz));
+  AddRigidTorqueChartTerm(reg, descendants, 1_r, AsConstView(outZ), AsView(hz));
   real const rhsDotHz = hz.Dot(rhs);
   hz -= rhs;
   outerResult.residualNorm = static_cast<double>(hz.Norm());
@@ -612,10 +761,18 @@ static void NewtonSolveZ(
       // Stack memory for 100 dofs
       MOCHI_FILO_STACK_ALLOCATOR(allocator, 100 * sizeof(real));
 
-      // Finite-difference approximation of dres * z
+      // Finite-difference approximation of dres * z, plus the chart term of J^T
+      // (AddRigidTorqueChartTerm; the Newton iteration converges to the solution of the full
+      // operator with the symmetric approximate dresidual as its Jacobian).
       ColumnVector<real> dresTimesZ(problem.GetDofsSize(), &allocator);
       GetHessianVectorProduct(
           reg, island, GradTarget::Current, problemForward, problem.GetSolution(), dresTimesZ);
+      AddRigidTorqueChartTerm(
+          reg,
+          reg.get<CIslandDescendants const>(island),
+          1_r,
+          AsConstView(problem.GetSolution()),
+          AsView(dresTimesZ));
 
       if (params.assemObj) {
         // obj = 1/2 * zT * dres * z - zT * rhs
@@ -1279,8 +1436,11 @@ static void StepJacobianSolveIslandAsync(
       .assemObj = false, .assemRes = false, .assemDRes = true, .psdDRes = false};
   problem.UpdateObjResDRes(paramsExactDRes);
 
-  // Direct factorization using LU
-  LU<real> invDRes(ToMatrix(problem.GetDResidual()));
+  // Direct factorization using LU of the step Jacobian: the fixed-chart Hessian plus the
+  // moving-chart term of the external torques (AddRigidTorqueChartTerm).
+  Matrix<real> dResCurr = ToMatrix(problem.GetDResidual());
+  AddRigidTorqueChartTerm(reg, descendants, -1_r, dResCurr);
+  LU<real> invDRes(dResCurr);
 
   // Derivative with respect to previous state
   paramsExactDRes.gradTarget = GradTarget::Previous;

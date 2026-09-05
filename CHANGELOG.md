@@ -14,13 +14,19 @@ releases on that base; these distributions are built from this repository, not f
   and articulated colliders included) and node-to-rigid constraints, with gradients for initial
   states, per-step controller targets and external forces, gravity, contact materials, densities
   and soft material parameters; every path is checked against independent finite differences in
-  `superdex_physics/wheels/superdex-physics/test/diffsim` (133 tests) and the C++ suites.
+  `superdex_physics/wheels/superdex-physics/test/diffsim` (135 tests) and the C++ suites.
 - Adjoint correctness fixes: rod and soft residual sizing across assemblies, inner-solver
   convergence norm, relative outer tolerance with the true residual reported, stage-start contact
   Jacobians for deformable-vs-dynamic contact, exact adjoints across steps of different sizes
   (previous-delta rescaling, pre-step at the current step size, finite-difference angular
   velocities re-expressed for a changed step size), `get_step_jacobian` for consecutive steps of
-  different sizes.
+  different sizes, and the moving-chart term of external torques on rigid bodies in the adjoint
+  operator (the step residual lives in the chart of the iterate, so the step Jacobian is the
+  fixed-chart Hessian minus `1/2 [tau]x` on the rotation block; the adjoint solve now uses its
+  transpose, by defect correction around the symmetric Krylov solve or directly in the Newton
+  outer solver, and `get_step_jacobian` the term itself). Torque gradients went from 2.2e-4
+  relative at 0.3 N m (8.6e-4 at 1.2 N m) to 1.6e-7 (3.1e-5) on a free cube and are gradchecked
+  with every other input group.
 - Forward robustness for differentiable scenes: friction continuation
   (`NonLinearSolverParams.friction_continuation_levels`) and failure-adaptive substepping in the
   rollout driver (`DifferentiableRollout(max_substep_levels=...)`, each substep its own adjoint
