@@ -165,7 +165,7 @@ def rigid_raw_pose(actor) -> np.ndarray:
 
 def add_pose_eps(entry: ActorEntry, dof: int, eps: float) -> None:
     if entry.articulated:
-        pose = np.zeros(entry.dofs_size)
+        pose = np.zeros(entry.dofs_size, dtype=real_dtype())
         entry.actor.get_articulated_pose(pose)
         pose[dof] += eps
         entry.actor.set_articulated_pose_from_joints(pose)
@@ -183,14 +183,14 @@ def add_pose_eps(entry: ActorEntry, dof: int, eps: float) -> None:
 
 def add_vel_eps(entry: ActorEntry, dof: int, eps: float) -> None:
     if entry.articulated:
-        vel = np.zeros(entry.dofs_size)
+        vel = np.zeros(entry.dofs_size, dtype=real_dtype())
         entry.actor.get_articulated_joint_velocities(vel)
         vel[dof] += eps
         entry.actor.set_articulated_joint_velocities(vel)
         return
     lin = np.asarray(entry.actor.get_linear_velocity(), dtype=np.float64)
     ang = np.asarray(entry.actor.get_angular_velocity(), dtype=np.float64)
-    delta = np.zeros(3)
+    delta = np.zeros(3, dtype=real_dtype())
     delta[dof % 3] = eps
     if dof < _D_TRANS:
         lin += delta
@@ -263,7 +263,7 @@ class QuaternionErrorLoss:
         return 0.5 * float(diff @ diff)
 
     def accumulate_output_grad(self) -> None:
-        grad = np.zeros(RIGID_POSE_SIZE)
+        grad = np.zeros(RIGID_POSE_SIZE, dtype=real_dtype())
         grad[3:] = self._quat() - self.q_ref
         diffsim.get_center_of_mass_transform_backward(self.actor, grad)
 
@@ -322,7 +322,7 @@ class ArticulatedPoseErrorLoss:
         self.ref = np.asarray(ref, dtype=np.float64)
 
     def _pose(self) -> np.ndarray:
-        pose = np.zeros(self.actor.get_num_dofs())
+        pose = np.zeros(self.actor.get_num_dofs(), dtype=real_dtype())
         self.actor.get_articulated_pose(pose)
         return pose
 
@@ -391,7 +391,7 @@ class GradientCheckCase:
         self.control = np.zeros((self.total_input, num_steps))
         for entry in self.entries:
             if entry.input_size > 0:
-                pose = np.zeros(entry.input_size)
+                pose = np.zeros(entry.input_size, dtype=real_dtype())
                 entry.actor.get_articulated_pose(pose)
                 self.control[
                     entry.input_offset : entry.input_offset + entry.input_size, 0
@@ -420,7 +420,7 @@ class GradientCheckCase:
         for entry in self.entries:
             if entry.input_size > 0:
                 entry.actor.set_articulated_target_velocity(
-                    np.zeros(entry.input_size)
+                    np.zeros(entry.input_size, dtype=real_dtype())
                 )
         for i in range(self.num_steps):
             for entry in self.entries:
@@ -481,14 +481,14 @@ class GradientCheckCase:
             minres_fallbacks += step_stats.num_minres_fallbacks
             for entry in self.entries:
                 if entry.input_size > 0:
-                    g = np.zeros(entry.input_size)
+                    g = np.zeros(entry.input_size, dtype=real_dtype())
                     diffsim.set_articulated_target_pose_backward(entry.actor, g)
                     grad_control[
                         entry.input_offset : entry.input_offset + entry.input_size,
                         i - 1,
                     ] = g
                 if entry.force_dofs:
-                    g = np.zeros(len(entry.force_dofs))
+                    g = np.zeros(len(entry.force_dofs), dtype=real_dtype())
                     diffsim.set_external_forces_on_dofs_backward(
                         entry.actor, np.asarray(entry.force_dofs, dtype=np.int32), g
                     )
@@ -499,9 +499,9 @@ class GradientCheckCase:
         grad_init_vel = np.zeros(self.total_dofs)
         for entry in self.entries:
             if entry.articulated:
-                gp = np.zeros(entry.dofs_size)
+                gp = np.zeros(entry.dofs_size, dtype=real_dtype())
                 diffsim.set_articulated_pose_from_joints_backward(entry.actor, gp)
-                gv = np.zeros(entry.dofs_size)
+                gv = np.zeros(entry.dofs_size, dtype=real_dtype())
                 diffsim.set_articulated_joint_velocities_backward(entry.actor, gv)
                 grad_init_pose[
                     entry.pose_offset : entry.pose_offset + entry.pose_size
@@ -510,10 +510,10 @@ class GradientCheckCase:
                     entry.dofs_offset : entry.dofs_offset + entry.dofs_size
                 ] = gv
             else:
-                gs = np.zeros(RIGID_POSE_SIZE)
+                gs = np.zeros(RIGID_POSE_SIZE, dtype=real_dtype())
                 diffsim.set_center_of_mass_transform_backward(entry.actor, gs)
-                gl = np.zeros(3)
-                ga = np.zeros(3)
+                gl = np.zeros(3, dtype=real_dtype())
+                ga = np.zeros(3, dtype=real_dtype())
                 diffsim.set_velocity_backward(entry.actor, gl, ga)
                 grad_init_pose[
                     entry.pose_offset : entry.pose_offset + entry.pose_size
@@ -548,7 +548,7 @@ class GradientCheckCase:
         return (loss_p - loss_m) / (2.0 * self.fd_eps)
 
     def fd_init_pose(self) -> np.ndarray:
-        out = np.zeros(self.total_pose)
+        out = np.zeros(self.total_pose, dtype=real_dtype())
         for entry in self.entries:
             for j in range(entry.pose_size):
                 out[entry.pose_offset + j] = self._fd_pair(
@@ -557,7 +557,7 @@ class GradientCheckCase:
         return out
 
     def fd_init_vel(self) -> np.ndarray:
-        out = np.zeros(self.total_dofs)
+        out = np.zeros(self.total_dofs, dtype=real_dtype())
         for entry in self.entries:
             for j in range(entry.dofs_size):
                 out[entry.dofs_offset + j] = self._fd_pair(
@@ -566,7 +566,7 @@ class GradientCheckCase:
         return out
 
     def fd_control_step(self, step: int) -> np.ndarray:
-        out = np.zeros(self.total_input)
+        out = np.zeros(self.total_input, dtype=real_dtype())
         ref = self.control[:, step].copy()
 
         for entry in self.entries:
@@ -587,7 +587,7 @@ class GradientCheckCase:
             for entry in self.entries
             for dof in entry.force_dofs
         ]
-        out = np.zeros(len(indices))
+        out = np.zeros(len(indices), dtype=real_dtype())
         ref = self.forces[:, step].copy()
         for k, idx in enumerate(indices):
 
