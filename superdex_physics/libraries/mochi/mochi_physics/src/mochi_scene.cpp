@@ -1421,17 +1421,24 @@ void SceneImpl::BackPropagate(Error& error) {
           if (!error.IsOK() || other == deformable) {
             return;
           }
-          // The deformable as the collider of the other actor's samples.
+          // The deformable as the collider of the other actor's samples. A soft actor's SDF
+          // collider (its rest-space grid SDF mapped through the deformation) provides the
+          // stage-start and current SDF Hessians, but the adjoint does not differentiate the
+          // stage-start contact Jacobians of a deforming collider (the map's dependence on the
+          // collider's stage-start nodal positions: measured 1e-3 relative against finite
+          // differences for a rigid box resting on a soft cube, 2026-09-05), and the colliding
+          // Jacobians of deformable samples at the stage start assume one shared collider
+          // Jacobian; point-cloud colliders (shells, rods) have no SDF Hessians at all.
           MOCHI_ERROR_IF(
               colliderType(deformable) != ColliderType::None &&
                   _registry.all_of<TagUseContact>(other) && contactEnabled(other, deformable),
               error,
               "Deformable contact adjoints cover the deformable's own samples against SDF "
               "colliders only: a differentiable soft or rod actor is a collider of a dynamic "
-              "actor of its island (its mapped / point-cloud collider has no stage-start SDF "
-              "Hessian). Set the deformable's collider type to NONE (its own samples still "
-              "detect contact) or disable contact between them with contact layers or "
-              "enable_actor_contact.");
+              "actor of its island (the stage-start contact Jacobians of a deforming collider "
+              "are not differentiated). Set the deformable's collider type to NONE (its own "
+              "samples still detect contact) or disable contact between them with contact "
+              "layers or enable_actor_contact.");
           // The other actor as the collider of the deformable's samples.
           auto const otherType = colliderType(other);
           if (otherType == ColliderType::None || !contactEnabled(deformable, other)) {
@@ -1441,10 +1448,10 @@ void SceneImpl::BackPropagate(Error& error) {
               isDeformable(other) || otherType == ColliderType::PointCloud,
               error,
               "Deformable contact adjoints against a dynamic collider need its stage-start SDF "
-              "Hessians (sphere, box, plane and grid-SDF colliders): a differentiable soft or "
-              "rod actor may contact a deformable or point-cloud collider of its island. Use an "
-              "SDF collider or disable contact between them with contact layers or "
-              "enable_actor_contact.");
+              "Hessians and contact Jacobians (sphere, box, plane and grid-SDF colliders): a "
+              "differentiable soft or rod actor may contact a deformable or point-cloud "
+              "collider of its island. Use an SDF collider or disable contact between them "
+              "with contact layers or enable_actor_contact.");
         });
       });
     });

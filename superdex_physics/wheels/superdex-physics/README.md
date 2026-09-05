@@ -198,8 +198,10 @@ the same way, and the adjoint operator carries the moving-chart term of external
 rigid bodies, so torque gradients are exact to 1.6e-7 at 0.3 N m and 3e-5 at 1.2 N m on a 0.2 m
 cube; the contact-force query adjoint is exact against static and moving colliders alike,
 checked against the kinematic identity of a free body); the
-stiffness damping of soft materials, a deformable actor acting as a collider, and mesh colliders
-are not differentiable; a soft body pressed and dragged by a link can trap the forward Newton solve at
+stiffness damping of soft materials, a deformable actor acting as a collider (its stage-start
+contact Jacobians are not differentiated: 1e-3 relative error against finite differences for a
+rigid box on a soft cube, so such scenes are rejected), and mesh colliders (no SDF Hessians) are
+not differentiable; a soft body pressed and dragged by a link can trap the forward Newton solve at
 isolated steps, which the driver's substepping resolves (see the examples' docstrings). Losses
 through frictional contact are piecewise smooth: at steps where the forward Newton solve is
 nearly degenerate (100+ iterations to a 1e-9 residual, an arm pushing a cube over the ground)

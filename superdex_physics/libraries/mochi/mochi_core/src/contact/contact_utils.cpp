@@ -885,10 +885,10 @@ void mochi::FindPointContactsMapped(
     int* outNDofs,
     DynamicArray<VMatrix3x3r>* outMapJac,
     DynamicArray<ColliderJacDofs>* outDofsJac) {
-  MOCHI_ASSERT(
-      !params.computeSdfHessian,
-      "SDF Hessians (needed by the adjoint of a differentiable scene) are not implemented for "
-      "mapped colliders.");
+  // SDF Hessians (ContactDetectionParams::computeSdfHessian) come from the rest-space grid query
+  // below, like the distances and gradients: the contact response is evaluated in the SDF's rest
+  // space and mapped to the world through the per-contact Jacobian (outMapJac), and the mapping
+  // is affine within a tetrahedron, so the rest-space Hessian is the one the response needs.
   // Cull points based on collider bounds. The culled points are in collider space.
   auto const colliderFromPoints = Invert(pointsFromCollider);
   DynamicArray<Real3> pointsCulled(points.size());

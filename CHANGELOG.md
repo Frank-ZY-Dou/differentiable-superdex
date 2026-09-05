@@ -48,7 +48,12 @@ releases on that base; these distributions are built from this repository, not f
   current-state Hessians; a grid SDF's interpolated gradient turns near edges, where the forward
   solve's quasi-Newton Jacobian leaves the term out), and against a dynamic collider the forces
   turn with it (`d(R_B f)/d delta = delta x R_B f`). All cases now agree with the kinematic
-  identity of a free body to 1e-6 (`EngineContactForceAdjointTest`).
+  identity of a free body to 1e-6 (`EngineContactForceAdjointTest`). The adjoint of a force
+  query on an actor touching a deformable collider is refused with an explicit error (it used to
+  drop the collider's nodal dependence silently), and mapped (soft-body) SDF colliders now provide
+  SDF Hessians; deformable colliders stay rejected in differentiable scenes because the
+  stage-start contact Jacobians of a deforming collider are not differentiated (measured 1e-3
+  relative against finite differences for a rigid box resting on a soft cube).
 - Examples: `example_diffsim_robot_video.py` (reach, push, soft push, two-cube push, push with a
   feedback policy trained on top of an optimized open-loop plan on three cube starts against an
   open-loop baseline, gripper grasp, soft grasp, five-finger hand grasp, tendon finger, cable haul).

@@ -2713,9 +2713,9 @@ static void AccumulateContactForceWorldAdjoints(
   MOCHI_ASSERT_VERBOSE(
       numContacts == isize(collisionResult.forcePerUnitArea),
       "Expected prepared force adjoints for every contact point.");
-  MOCHI_ASSERT_VERBOSE(
+  MOCHI_ASSERT(
       collisionResult.jacColliderFromWorld.size() == 1,
-      "Deformable colliders not supported in differentiability");
+      "Contact-force adjoints against a deformable collider are refused by the caller.");
 
   // Transform to collider space
   gradForce = DotMatVec3x3(collisionResult.jacColliderFromWorld[0], gradForce);
@@ -2749,10 +2749,23 @@ static void GetContactForceWorldBackwardImpl(
   MOCHI_ERROR_RETURN(error);
 
   Vec4r const gradForceWorld = Load<RigidSize::kDTrans, Vec4r>(gradOutput.data());
+  // The force adjoints of a deformable (mapped) collider would have to reach its nodal degrees
+  // of freedom through the per-contact mapping Jacobians, which the contact-force adjoint
+  // accumulation does not do (it treats every collider as rigid): refuse rather than drop them.
+  auto const isDeformableCollider = [](ContactDetectionResult const& result) {
+    return !result.posColliding.empty() && result.jacColliderFromWorld.size() != 1;
+  };
   if (auto* collisionsAsync =
           reg.try_get<CActiveCollisions<ContactType::Async, TimeStep::Current>>(e)) {
     for (auto& collision : *collisionsAsync) {
       if (exclusiveEntity == entt::null || collision.colliderEntity == exclusiveEntity) {
+        MOCHI_ERROR_IF(
+            isDeformableCollider(collision.collisionResult),
+            error,
+            "Contact-force adjoints against a deformable collider are not supported: the "
+            "queried force depends on the collider's nodal positions. Query the force on the "
+            "deformable actor's own samples instead, or disable that contact.");
+        MOCHI_ERROR_RETURN(error);
         AccumulateContactForceWorldAdjoints(reg, e, collision.collisionResult, gradForceWorld);
       }
     }
@@ -2761,6 +2774,13 @@ static void GetContactForceWorldBackwardImpl(
           reg.try_get<CActiveCollisions<ContactType::Sync, TimeStep::Current>>(e)) {
     for (auto& collision : *collisionsSync) {
       if (exclusiveEntity == entt::null || collision.colliderEntity == exclusiveEntity) {
+        MOCHI_ERROR_IF(
+            isDeformableCollider(collision.collisionResult),
+            error,
+            "Contact-force adjoints against a deformable collider are not supported: the "
+            "queried force depends on the collider's nodal positions. Query the force on the "
+            "deformable actor's own samples instead, or disable that contact.");
+        MOCHI_ERROR_RETURN(error);
         AccumulateContactForceWorldAdjoints(reg, e, collision.collisionResult, gradForceWorld);
       }
     }

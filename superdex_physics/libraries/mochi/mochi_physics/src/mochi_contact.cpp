@@ -1104,11 +1104,10 @@ static void EvalStageStartContactWithSingleCollider(
   // If needed, fill any missing results.
   if (outIndices.size() != outResult.sampleIndices.size()) {
     MOCHI_ASSERT_VERBOSE(outResult.ndofs > 0, "Only mapped colliders may miss results");
-    // Mapped colliders do not provide SDF Hessians (their query asserts when they are requested),
-    // so the stage-start data merged here never carries them.
+    bool const withHessians = outResult.sdfInfoStageStart.hasHessian;
     MOCHI_ASSERT(
-        !outResult.sdfInfoStageStart.hasHessian,
-        "Missing stage-start results cannot be filled for contact data with SDF Hessians.");
+        !withHessians || outResult.sdfInfo.hasHessian,
+        "Stage-start SDF Hessians cannot be filled for contacts without current Hessians.");
     MOCHI_ASSERT_VERBOSE(
         outResult.posCollidingStageStart.size() == outIndices.size(),
         "Positions and indices size mismatch");
@@ -1128,11 +1127,15 @@ static void EvalStageStartContactWithSingleCollider(
     DynamicArray<real> sdfValTemp(&allocator);
     DynamicArray<Real3> sdfGradTemp(&allocator);
     DynamicArray<VMatrix3x3r> jacColliderFromWorldTemp(&allocator);
+    DynamicArray<Matrix3x3r> sdfHessTemp(&allocator);
     posCollidingTemp.resize_noinit(outResult.sampleIndices.size());
     if (explicitNormals) {
       sdfValTemp.resize_noinit(outResult.sampleIndices.size());
       sdfGradTemp.resize_noinit(outResult.sampleIndices.size());
       jacColliderFromWorldTemp.resize_noinit(outResult.sampleIndices.size());
+      if (withHessians) {
+        sdfHessTemp.resize_noinit(outResult.sampleIndices.size());
+      }
     }
     for (int i = 0, j = 0; i < outResult.sampleIndices.size(); ++i) {
       if (j < isize(outIndices) && outIndices[j] == i) {
@@ -1142,6 +1145,9 @@ static void EvalStageStartContactWithSingleCollider(
           sdfValTemp[i] = outResult.sdfInfoStageStart.val[j];
           sdfGradTemp[i] = outResult.sdfInfoStageStart.grad[j];
           jacColliderFromWorldTemp[i] = outResult.jacColliderFromWorldStageStart[j];
+          if (withHessians) {
+            sdfHessTemp[i] = outResult.sdfInfoStageStart.hess[j];
+          }
         }
         j++;
       } else {
@@ -1152,6 +1158,9 @@ static void EvalStageStartContactWithSingleCollider(
           sdfValTemp[i] = kInf;
           sdfGradTemp[i] = outResult.sdfInfo.grad[i];
           jacColliderFromWorldTemp[i] = outResult.jacColliderFromWorld[i];
+          if (withHessians) {
+            sdfHessTemp[i] = outResult.sdfInfo.hess[i];
+          }
         }
       }
     }
@@ -1160,6 +1169,9 @@ static void EvalStageStartContactWithSingleCollider(
       outResult.sdfInfoStageStart.val = sdfValTemp;
       outResult.sdfInfoStageStart.grad = sdfGradTemp;
       outResult.jacColliderFromWorldStageStart = jacColliderFromWorldTemp;
+      if (withHessians) {
+        outResult.sdfInfoStageStart.hess = sdfHessTemp;
+      }
     }
   }
   outResult.culledIndicesBuffer.clear(); // = outIndices
