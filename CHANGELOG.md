@@ -14,7 +14,7 @@ releases on that base; these distributions are built from this repository, not f
   and articulated colliders included) and node-to-rigid constraints, with gradients for initial
   states, per-step controller targets and external forces, gravity, contact materials, densities
   and soft material parameters; every path is checked against independent finite differences in
-  `superdex_physics/wheels/superdex-physics/test/diffsim` (118 tests) and the C++ suites.
+  `superdex_physics/wheels/superdex-physics/test/diffsim` (133 tests) and the C++ suites.
 - Adjoint correctness fixes: rod and soft residual sizing across assemblies, inner-solver
   convergence norm, relative outer tolerance with the true residual reported, stage-start contact
   Jacobians for deformable-vs-dynamic contact, exact adjoints across steps of different sizes
@@ -29,11 +29,17 @@ releases on that base; these distributions are built from this repository, not f
   the engine's contact samples (deepest sample per actor pair after each step, a report and an
   assertion); the diffsim demos' replays report it and bound it for the rigid tasks.
 - `superdex.physics.diffsim_torch.PolicyRollout`: closed-loop rollouts with a torch policy in
-  the loop (joint poses, rigid positions and orientations and soft-body centroids as
-  observations;
-  pose-controller targets and/or external forces such as joint torques as the policy
-  output); the policy parameters receive the loss gradient through the simulator, feedback
-  path included (analytic policy gradients).
+  the loop (joint poses, rigid positions and orientations, soft-body centroids and contact
+  forces - `ContactForceObservation`, the total contact force on a free rigid body as a tactile
+  signal - as observations; pose-controller targets and/or external forces such as joint
+  torques as the policy output); the policy parameters receive the loss gradient through the
+  simulator, feedback path included (analytic policy gradients). The contact-force observation
+  is differentiated through the motion of the observed body (`m dv/dt - m g - f_ext`, exact
+  position adjoints; the rollout checks that balance at every step), because the engine's
+  contact-force query adjoint, `diffsim.get_contact_force_world_backward`, is exact against
+  static colliders only and off by tens of percent against moving ones (pinned by
+  `EngineContactForceAdjointTest`; the force Jacobian w.r.t. the contact position is right,
+  its mapping onto the moving collider's degrees of freedom is not).
 - Examples: `example_diffsim_robot_video.py` (reach, push, soft push, two-cube push, push with a
   feedback policy trained on top of an optimized open-loop plan on three cube starts against an
   open-loop baseline, gripper grasp, soft grasp, five-finger hand grasp, tendon finger, cable haul).

@@ -97,6 +97,19 @@ percent (absolute error stayed below 1e-9 in all probes). Linear-force,
 control, gravity, contact-parameter and density gradients pass
 ``torch.autograd.gradcheck`` exactly.
 
+Known engine limitation (measured 2026-09-05, pinned by
+``EngineContactForceAdjointTest``): the contact-force query adjoint,
+``diffsim.get_contact_force_world_backward``, is exact when the force comes
+from contact with a static collider and wrong by tens of percent (15% for a
+tilting rigid pusher, 26% for a controlled chain with Coulomb friction) when
+the collider moves. The force's Jacobian with respect to the contact position
+is right (a finite-difference Jacobian in its place changes nothing); the
+mapping of that Jacobian onto the moving collider's degrees of freedom is
+not. ``ContactForceObservation`` therefore differentiates through the motion
+of the observed body (``m dv/dt - m g - f_ext``, exact position adjoints)
+instead of the query adjoint, and refuses bodies whose balance holds other
+forces (links, constrained actors).
+
 Example::
 
     tr = TorchRollout(
@@ -158,6 +171,7 @@ SOFT_MATERIAL_FIELDS = (
 
 __all__ = [
     "ArticulatedPoseObservation",
+    "ContactForceObservation",
     "OrientationObservation",
     "SoftCentroidObservation",
     "CONTACT_PARAM_FIELDS",
@@ -209,6 +223,14 @@ def _as_numpy(name: str, value: torch.Tensor, shape: tuple[int, ...]) -> np.ndar
     if tuple(value.shape) != shape:
         raise ValueError(f"{name} must have shape {shape}, got {tuple(value.shape)}")
     return value.detach().contiguous().numpy()
+
+
+# A kinematic observation (``ContactForceObservation``) is checked against the balance of
+# the actor it observes at every step. For a free rigid body the discrepancy is that actor's
+# part of the step's dynamics residual (it is below the solver's residual norm at every step,
+# converged or not), plus rounding in the difference quotient of the velocities; a link or a
+# constrained actor violates the balance by the joint or constraint force.
+_BALANCE_ROUNDING = 1e-9 if physics.uses_double_precision() else 1e-4
 
 
 @dataclasses.dataclass
@@ -649,6 +671,70 @@ class OrientationObservation:
         diffsim.get_center_of_mass_transform_backward(self.actor, full)
 
 
+class ContactForceObservation:
+    """The total world contact force on a free rigid actor as an observation (a tactile
+    signal), differentiated through the actor's motion.
+
+    The value is the engine's ``TOTAL_CONTACT_FORCE`` query, registered here (so construct the
+    observation before the scene's first step): after step ``k`` it is the contact force of
+    that step. The query has no value before any step, so the observation of the initial
+    state is the force of a probe step taken from the initial state under the controls
+    standing before the policy acts (:meth:`PolicyRollout.probe_initial_observations`, which
+    restores the initial state afterwards): for a scene starting at rest that is the resting
+    contact force, and in general the force a sensor would read during the first control
+    interval. The initial observation is a constant of the rollout (it carries no gradient),
+    like every other observation of the initial state.
+
+    The gradient does not use the engine's contact-force adjoint
+    (:func:`superdex.physics.diffsim.get_contact_force_world_backward`): that adjoint is exact
+    for contact against static colliders but off by up to tens of percent against moving ones
+    (pinned by ``EngineContactForceAdjointTest`` in ``test/diffsim/test_diffsim_torch.py``). For a
+    free rigid body the contact force is fixed by the motion instead. The engine integrates
+    ``m (v_k - v_{k-1}) / dt_k = F_contact + m g + f_ext`` with the backward-difference
+    velocity ``v_k = (x_k - x_{k-1}) / dt_k``, an identity the query satisfies to 1e-10, so
+    :class:`PolicyRollout` injects the loss gradient of ``F_contact`` into the center-of-mass
+    positions of the three states that expression involves (the exact position adjoint) and
+    into the actor's external forces when they are a policy output. The rollout checks the
+    identity at every observation and raises if it does not hold: the actor must be a free
+    rigid body - not static, not an articulated link, not tied to another actor by a
+    constraint - since joint and constraint forces would enter the balance.
+    """
+
+    size = 3
+    requires_probe_step = True
+    kinematic = True
+
+    def __init__(self, actor):
+        if actor.get_type() != physics.ActorType.RIGID:
+            raise ValueError(f"{actor.get_name()!r} is not a rigid actor")
+        if actor.is_static():
+            raise ValueError(f"{actor.get_name()!r} is static: it takes no contact force")
+        self.actor = actor
+        self.mass = float(actor.get_mass())
+        self.query = actor.register_query(physics.QueryType.TOTAL_CONTACT_FORCE)
+
+    def value(self) -> np.ndarray:
+        return np.asarray(self.actor.get_contact_force_world(), dtype=np.float64)
+
+    def balance(self, gravity: np.ndarray, v_prev: np.ndarray, dt: float) -> np.ndarray:
+        """``m (v - v_prev) / dt - m g - f_ext``: the contact force implied by the motion of
+        the last (sub)step, from the actor's current velocity and external forces."""
+        f_ext = np.zeros(self.actor.get_num_dofs(), dtype=_real_dtype())
+        self.actor.get_external_forces(f_ext)
+        v = np.asarray(self.actor.get_linear_velocity(), dtype=np.float64)
+        return (
+            self.mass * (v - np.asarray(v_prev, dtype=np.float64)) / dt
+            - self.mass * np.asarray(gravity, dtype=np.float64)
+            - f_ext[:3].astype(np.float64)
+        )
+
+    def accumulate_output_grad(self, grad: np.ndarray) -> None:
+        raise NotImplementedError(
+            "ContactForceObservation has no local adjoint: PolicyRollout injects its gradient "
+            "through the actor's motion (see the class documentation)"
+        )
+
+
 class SoftCentroidObservation:
     """The mean nodal displacement of a soft actor (the displacement of its node centroid, in
     the world frame) as an observation."""
@@ -727,7 +813,10 @@ class PolicyRollout:
     gradient receives ``.grad`` from ``loss.backward()``. Observations are the ``value()`` /
     ``accumulate_output_grad(grad)`` objects above, taken from the pre-step state (the
     initial state for the first step, whose observation is treated as a constant: only
-    the states produced by the rollout carry the feedback gradient). Losses follow the
+    the states produced by the rollout carry the feedback gradient); a kinematic observation
+    (:class:`ContactForceObservation`) gets its gradient from the rollout itself, through the
+    motion of its actor and that actor's external forces when they are a policy output, and
+    the rollout checks the balance it relies on at every step. Losses follow the
     ``diffsim_rollout`` protocol. With ``time_feature`` the normalized step index
     ``step / num_steps`` is appended to the policy input (after the observation history),
     so a policy can carry a time-dependent baseline; it contributes no gradient. As in
@@ -799,6 +888,21 @@ class PolicyRollout:
         self.control_size = self.target_size + self.force_size
         self.observation_size = sum(o.size for o in self.observations)
         self.input_size = history * self.observation_size + (1 if self.time_feature else 0)
+        # Kinematic observations (``ContactForceObservation``): their gradient goes through the
+        # motion of their actor, and through the actor's external forces when those are a
+        # policy output - the control-vector slots of the actor's linear force DoFs.
+        self._kinematic = [o for o in self.observations if getattr(o, "kinematic", False)]
+        self._kinematic_force_slots: dict[int, list[tuple[int, int]]] = {}
+        for o in self._kinematic:
+            slots = []
+            offset = self.target_size
+            for entry in self._force_entries:
+                if entry.name == o.actor.get_name():
+                    for axis in range(3):
+                        if axis in entry.force_dofs:
+                            slots.append((offset + list(entry.force_dofs).index(axis), axis))
+                offset += len(entry.force_dofs)
+            self._kinematic_force_slots[id(o)] = slots
         self._params = [p for p in policy.parameters() if p.requires_grad] if hasattr(policy, "parameters") else []
         self._state_init = scene.capture_state()
         self.last_result: PolicyRolloutResult | None = None
@@ -826,11 +930,75 @@ class PolicyRollout:
     def _observe(self) -> np.ndarray:
         return np.concatenate([np.asarray(o.value(), dtype=np.float64).reshape(-1) for o in self.observations])
 
-    def _inject_observation_grad(self, grad: np.ndarray) -> None:
+    @property
+    def needs_probe_step(self) -> bool:
+        """Whether an observation reads a per-step engine query (a contact force), which has
+        no value at the initial state until a probe step is taken."""
+        return any(getattr(o, "requires_probe_step", False) for o in self.observations)
+
+    def probe_initial_observations(self) -> None:
+        """Fills the per-step queries at the initial state: one step from the initial state
+        under the controls standing in the scene, then the initial state is restored (the
+        queries keep the probe's values). Call it after ``scene.restore_state(initial_state)``
+        and before reading the observations of the initial state, as :meth:`__call__` does;
+        a no-op without such observations."""
+        if self._state_init is None:
+            raise RuntimeError("PolicyRollout is closed")
+        if not self.needs_probe_step:
+            return
+        self.scene.step(self.dt)
+        self.scene.restore_state(self._state_init, False)
+
+    def _inject_observation_grad(
+        self, grad: np.ndarray, i: int, records: list, pending_motion: dict, pending_force: dict
+    ) -> None:
+        """Injects the gradient of the observation taken at the state after record ``i``.
+
+        A local observation accumulates it at the prepared (post) state. A kinematic one
+        observes ``F = m (v_{i+1} - v_i) / dt_i - m g - f_ext`` with ``v_{i+1} = (x_{i+1} -
+        x_i) / dt_i`` and ``v_i = (x_i - x_{i-1}) / dt_{i-1}`` (``x_{i+1}`` the state after
+        record ``i``): its gradient is scheduled into the center-of-mass positions of records
+        ``i``, ``i - 1`` and ``i - 2`` (the initial state and its velocity are constants) and,
+        for a force actor, subtracted from that step's external-force gradient.
+        """
         offset = 0
         for o in self.observations:
-            o.accumulate_output_grad(grad[offset : offset + o.size])
+            g = grad[offset : offset + o.size]
             offset += o.size
+            if not getattr(o, "kinematic", False):
+                o.accumulate_output_grad(g)
+                continue
+            m, dt_i = o.mass, records[i].dt
+            terms = [(i, m / dt_i**2)]
+            if i >= 1:
+                dt_p = records[i - 1].dt
+                terms.append((i - 1, -m / dt_i**2 - m / (dt_i * dt_p)))
+                if i >= 2:
+                    terms.append((i - 2, m / (dt_i * dt_p)))
+            for j, c in terms:
+                pending_motion.setdefault(j, []).append((o.actor, c * g))
+            slots = self._kinematic_force_slots[id(o)]
+            if slots:
+                inc = pending_force.setdefault(records[i].step, np.zeros(self.control_size))
+                for slot, axis in slots:
+                    inc[slot] -= g[axis]
+
+    def _check_balance(self, gravity: np.ndarray, v_prev: list, dt: float, step: int) -> None:
+        """The kinematic observations against the motion of their actors over the last
+        (sub)step: a violation beyond the solver's residual means the actor is not a free
+        rigid body."""
+        residual = float(self.scene.get_solver_stats().residual_norm)
+        for o, v0 in zip(self._kinematic, v_prev):
+            implied = o.balance(gravity, v0, dt)
+            observed = o.value()
+            scale = np.linalg.norm(observed) + np.linalg.norm(implied) + o.mass * np.linalg.norm(gravity)
+            if np.linalg.norm(observed - implied) > 2.0 * residual + _BALANCE_ROUNDING * scale:
+                raise ValueError(
+                    f"the contact force on {o.actor.get_name()!r} after step {step} is "
+                    f"{observed}, but its motion implies {implied} (solver residual "
+                    f"{residual:.2e}): the actor is not a free rigid body (a link or a "
+                    "constrained actor), so ContactForceObservation cannot differentiate it"
+                )
 
     def _apply_controls(self, controls: np.ndarray) -> None:
         offset = 0
@@ -876,6 +1044,9 @@ class PolicyRollout:
         scene = self.scene
         driver = self._driver
         scene.restore_state(self._state_init, False)
+        self.probe_initial_observations()
+        kinematic = self._kinematic
+        gravity = np.asarray(scene.get_gravity(), dtype=np.float64)
         # Forward: policy in the loop; keep each step's torch graph for the reverse sweep.
         obs_history = [self._observe()] * self.history  # newest first
         graphs = []  # (obs_tensor, control_tensor) per step
@@ -895,21 +1066,36 @@ class PolicyRollout:
                     )
                 graphs.append((obs_t, u_t))
                 self._apply_controls(u_t.detach().numpy())
+                # The balance check of the kinematic observations needs the velocities at
+                # the start of the last (sub)step and its dt.
+                velocities = lambda: [  # noqa: E731
+                    np.asarray(o.actor.get_linear_velocity(), dtype=np.float64) for o in kinematic
+                ]
+                before, after, last_dt = velocities(), None, self.dt
                 if driver.max_substep_levels == 0:
                     pre = scene.capture_state()
                     scene.step(self.dt)
                     records.append(_StepRecord(step, self.dt, pre, scene.capture_state()))
                 else:
+
+                    def on_substep(pre, post, sub_dt, step=step):
+                        # Called at the post state of a converged substep, which is where
+                        # the next substep starts.
+                        nonlocal before, after, last_dt
+                        records.append(_StepRecord(step, sub_dt, pre, post))
+                        before = before if after is None else after
+                        after, last_dt = velocities(), sub_dt
+
                     step_with_substeps(
                         scene,
                         self.dt,
                         driver.max_substep_levels,
                         driver.substep_residual_tolerance,
                         step=step,
-                        on_substep=lambda pre, post, sub_dt, step=step: records.append(
-                            _StepRecord(step, sub_dt, pre, post)
-                        ),
+                        on_substep=on_substep,
                     )
+                if kinematic:
+                    self._check_balance(gravity, before, last_dt, step)
                 obs_history.insert(0, self._observe())
         except BaseException:
             driver._release(records)
@@ -918,8 +1104,13 @@ class PolicyRollout:
 
         # Reverse sweep. pending[k] is the gradient to inject at the state after step k
         # (the observation the policy used for later steps); the initial state (k = -1) is
-        # a constant.
+        # a constant. pending_motion[i] holds center-of-mass position gradients scheduled at
+        # the state after record i, pending_force[k] a control-gradient increment of step k
+        # (both from the kinematic observations).
         pending: dict[int, np.ndarray] = {}
+        pending_motion: dict[int, list] = {}
+        pending_force: dict[int, np.ndarray] = {}
+        real = _real_dtype()
         param_grads = [np.zeros(p.shape) for p in params]
         fd_valid = True
         max_residual = 0.0
@@ -940,7 +1131,13 @@ class PolicyRollout:
                         loss_value += loss.value()
                         loss.accumulate_output_grad()
                 if record.step in pending:
-                    self._inject_observation_grad(pending.pop(record.step))
+                    self._inject_observation_grad(
+                        pending.pop(record.step), i, records, pending_motion, pending_force
+                    )
+            for actor, g in pending_motion.pop(i, ()):
+                diffsim.get_center_of_mass_transform_backward(
+                    actor, np.ascontiguousarray(np.concatenate([g, np.zeros(4)]), dtype=real)
+                )
             diffsim.back_propagate(scene)
             steps_swept += 1
             stats = diffsim.get_back_propagation_scene_stats(scene)
@@ -948,6 +1145,8 @@ class PolicyRollout:
             max_residual = max(max_residual, stats.residual_norm)
             if last_of_step:
                 lambda_u = np.zeros(self.control_size)
+                if record.step in pending_force:
+                    lambda_u += pending_force.pop(record.step)
             self._accumulate_force_grad(lambda_u)
             if first_of_step:
                 self._read_target_grad(lambda_u)

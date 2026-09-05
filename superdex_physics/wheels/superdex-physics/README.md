@@ -45,11 +45,14 @@ contact included. Three layers build on each other:
 - `superdex.physics.diffsim_torch.TorchRollout` - a `torch.autograd.Function` around the
   driver: controls, external forces, gravity, contact materials, densities, soft initial states
   and soft material parameters as differentiable tensors; `PolicyRollout` closes the loop: a
-  torch policy maps the observed joint poses, rigid positions and orientations and soft-body
-  centroids to the
-  controller targets and/or the external forces (joint torques) at every step and its
-  parameters receive the loss gradient through the simulator, feedback included (analytic
-  policy gradients).
+  torch policy maps the observed joint poses, rigid positions and orientations, soft-body
+  centroids and contact forces (`ContactForceObservation`, a tactile signal: the total contact
+  force on a free rigid body) to the controller targets and/or the external forces (joint
+  torques) at every step and its parameters receive the loss gradient through the simulator,
+  feedback included (analytic policy gradients). The contact-force observation is differentiated
+  through the motion of the body it observes - the engine's own contact-force adjoint
+  (`diffsim.get_contact_force_world_backward`) is exact against static colliders only, see the
+  limitations below - and the rollout checks that balance at every step.
 
 Supported: rigid, articulated (with pose controllers), soft (tetrahedral FEM) and rod actors;
 contact between them and against static colliders (a soft or rod actor collides with rigid and
@@ -196,9 +199,12 @@ different sizes (at a step-size change the engine re-expresses the previous fini
 angular velocities for the new size, keeping the angular rate; `get_step_jacobian` handles it
 the same way); rotational gradients of rigid bodies under external torques carry a
 small approximation proportional to the torque (2e-4 relative at 0.3 N m on a 0.2 m cube, exact
-without torques; pinned by a test); the stiffness damping of
-soft materials, a deformable actor acting as a collider, and mesh colliders are not
-differentiable; a soft body pressed and dragged by a link can trap the forward Newton solve at
+without torques; pinned by a test); the engine's contact-force query adjoint
+(`diffsim.get_contact_force_world_backward`) is exact against static colliders and off by tens
+of percent against moving ones (pinned by a test; `ContactForceObservation` differentiates
+through the motion of the observed body instead, which restricts it to free rigid bodies); the
+stiffness damping of soft materials, a deformable actor acting as a collider, and mesh colliders
+are not differentiable; a soft body pressed and dragged by a link can trap the forward Newton solve at
 isolated steps, which the driver's substepping resolves (see the examples' docstrings). Losses
 through frictional contact are piecewise smooth: at steps where the forward Newton solve is
 nearly degenerate (100+ iterations to a 1e-9 residual, an arm pushing a cube over the ground)
