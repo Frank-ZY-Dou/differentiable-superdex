@@ -970,9 +970,12 @@ static void DetectCollisionsWithSingleCollider(
   detectionParams.tolerance =
       colliderContactParams.GetPenaltyThresholdDist(addPadding) + farSdfDistance;
   // The adjoint of a differentiable scene differentiates the explicit (stage-start) contact
-  // normal w.r.t. the stage-start position, which needs the stage-start SDF Hessians.
-  detectionParams.computeSdfHessian =
-      (kTimeStep == TimeStep::StageStart) && (reg.try_ctx<TagDifferentiableScene>() != nullptr);
+  // normal w.r.t. the stage-start position, which needs the stage-start SDF Hessians; its
+  // contact-force adjoints differentiate the penalty force through the current SDF gradient,
+  // which needs the current ones (computed only for the detection PrepareBackPropagation runs).
+  detectionParams.computeSdfHessian = (reg.try_ctx<TagDifferentiableScene>() != nullptr) &&
+      ((kTimeStep == TimeStep::StageStart) ||
+       (reg.try_ctx<TagAdjointContactDetection>() != nullptr));
 
   // Initialize outResult.jacColliderFromWorld assuming a rigid collider. This will be overwritten
   // for deformable colliders.

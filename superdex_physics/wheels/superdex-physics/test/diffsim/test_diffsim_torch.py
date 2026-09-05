@@ -756,13 +756,12 @@ class PolicyRolloutTest(unittest.TestCase):
         pose and the time drives the chain pushing the cube; the loss is the cube's final
         position. The initial observation is the probe step's force (a constant); after that
         the force of step k is a function of the controls up to k, and the loss gradient
-        reaches the policy through it (the kinematic adjoint of the observation, with the
-        chain a moving collider where the engine's contact-force adjoint is wrong). The force
-        feedback gain is small enough for a smooth push - every forward step must converge -
-        and the force columns of the weight carry gradient. Directional FD along the gradient
-        at eps 1e-6 / 1e-7 (the force feedback makes the piecewise-smooth contact loss rough
-        at 1e-5), plus the largest weight entries where FD is smooth; the replay reproduces
-        the probe."""
+        reaches the policy through it (the engine's contact-force adjoint, with the chain a
+        moving collider). The force feedback gain is small enough for a smooth push - every
+        forward step must converge - and the force columns of the weight carry gradient.
+        Directional FD along the gradient at eps 1e-6 / 1e-7 (the force feedback makes the
+        piecewise-smooth contact loss rough at 1e-5), plus the largest weight entries where FD
+        is smooth; the replay reproduces the probe."""
         diffsim_torch = _make_bridge_module()
         scene, chain, cube = scenes.chain_pushing_cube()
         self.addCleanup(physics.destroy_scene, scene)
@@ -891,10 +890,9 @@ class PolicyRolloutTest(unittest.TestCase):
 
     def test_contact_force_observation_on_a_force_actor_vs_fd(self) -> None:
         """A cube sliding on the ground is both observed (its contact force) and driven (the
-        policy's output is the external force on it): the observation's gradient then also
-        enters the force output of the step it was taken after (F = m dv/dt - m g - f_ext).
-        No torques. Directional FD along
-        the gradient at eps 1e-6 / 1e-7, plus the largest weight entries where FD is smooth."""
+        policy's output is the external force on it, which shapes the normal force it
+        observes). No torques. Directional FD along the gradient at eps 1e-6 / 1e-7, plus the
+        largest weight entries where FD is smooth."""
         diffsim_torch = _make_bridge_module()
         scene, cube = scenes.rigid_on_plane("coulomb", initial_velocity=(0.5, 0.0, 0.0))
         self.addCleanup(physics.destroy_scene, scene)
@@ -981,11 +979,11 @@ class PolicyRolloutTest(unittest.TestCase):
         self.assertLessEqual(max(rel_errors.values()), 1e-4, (rel_errors, skipped))
 
     def test_contact_force_observation_with_substeps_vs_fd(self) -> None:
-        """The kinematic adjoint over split steps. The driver's failure-adaptive substepping
-        is replaced by a deterministic split of every step into two half steps, so the
-        records carry dt / 2, the observation after a step is the force of its last half step
-        and that half step starts at the velocity the first one produced; the gradient must
-        match the directional FD (eps 1e-6 / 1e-7) of a replay taking the same half steps."""
+        """The tactile observation over split steps. The driver's failure-adaptive
+        substepping is replaced by a deterministic split of every step into two half steps,
+        so the records carry dt / 2 and the observation after a step is the force of its last
+        half step; the gradient must match the directional FD (eps 1e-6 / 1e-7) of a replay
+        taking the same half steps."""
         diffsim_torch = _make_bridge_module()
         scene, chain, cube = scenes.chain_pushing_cube()
         self.addCleanup(physics.destroy_scene, scene)
@@ -1067,11 +1065,13 @@ class PolicyRolloutTest(unittest.TestCase):
         self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), 1e-4, f"rough directional FD {fds}")
         self.assertLessEqual(abs(grad_norm - fds[0]) / abs(fds[0]), 1e-4, (grad_norm, fds))
 
-    def test_contact_force_observation_rejects_actors_that_are_not_free_rigid_bodies(self) -> None:
-        """A static actor is refused at construction. An articulated link is a rigid actor
-        and passes construction, but the joint force enters its momentum balance, so the
-        rollout's balance check refuses it at the first step (even a link hanging at rest:
-        its motion implies a contact force of -m g while the query reads zero)."""
+    def test_contact_force_observation_on_a_link_vs_fd(self) -> None:
+        """A static actor is refused at construction; an articulated link is observed like a
+        standalone body. The policy is fed the contact force on the chain's lower link (the
+        force the pushed cube exerts on the pusher, a tactile fingertip) and the chain pose;
+        the loss is the cube's final position. Directional FD at eps 1e-7 / 1e-8: the
+        difference quotient of this loss is converged from 1e-7 on (0.52758 at 1e-7 and 1e-8,
+        0.52766 at 1e-6, 0.503 at 1e-5), the analytic gradient 0.5275772."""
         diffsim_torch = _make_bridge_module()
         scene, chain, cube = scenes.chain_pushing_cube()
         self.addCleanup(physics.destroy_scene, scene)
@@ -1084,19 +1084,71 @@ class PolicyRolloutTest(unittest.TestCase):
             diffsim_torch.ContactForceObservation(chain)
         link = actors["chain/l1"]
         self.assertEqual(link.get_type(), physics.ActorType.RIGID)
-        observation = diffsim_torch.ContactForceObservation(link)
         n = chain.get_num_dofs()
-        policy = torch.nn.Linear(3, n).double()
+        observations = [
+            diffsim_torch.ContactForceObservation(link),
+            diffsim_torch.ArticulatedPoseObservation(chain),
+        ]
+        obs_size = sum(o.size for o in observations)
+        num_steps = 30
+        start = np.asarray(cube.get_center_of_mass_transform().translation, dtype=np.float64)
+        terminal = TranslationErrorLoss(cube, ref=start + np.array([0.08, 0.0, 0.0]))
+        policy = torch.nn.Linear(obs_size + 1, n).double()
         with torch.no_grad():
-            policy.weight.zero_()
+            policy.weight.copy_(
+                torch.tensor(0.3 * np.cos(np.arange(n * (obs_size + 1), dtype=np.float64)).reshape(n, obs_size + 1))
+            )
+            policy.weight[:, :3] *= 1e-3
+            policy.weight[0, -1] = -1.2
+            policy.weight[1, -1] = 0.0
             policy.bias.zero_()
         rollout = diffsim_torch.PolicyRollout(
-            scene, dt=DT, num_steps=3, policy=policy, observations=[observation],
-            control_actors=[chain], terminal_losses=[TranslationErrorLoss(cube)],
+            scene, dt=DT, num_steps=num_steps, policy=policy, observations=observations,
+            control_actors=[chain], time_feature=True, terminal_losses=[terminal],
         )
         self.addCleanup(rollout.close)
-        with self.assertRaisesRegex(ValueError, "not a free rigid body"):
-            rollout()
+        loss = rollout()
+        loss.backward()
+        self.assertTrue(rollout.last_result.fd_valid)
+        params = list(policy.parameters())
+        analytic = [p.grad.detach().numpy().copy() for p in params]
+        values = [p.detach().numpy().copy() for p in params]
+        state_init = rollout.initial_state
+        self.assertGreater(float(np.abs(analytic[0][:, :3]).max()), 0.0, "the link's force must carry gradient")
+
+        def objective() -> float:
+            with torch.no_grad():
+                for p, v in zip(params, values):
+                    p.copy_(torch.tensor(v, dtype=torch.float64))
+            scene.restore_state(state_init, False)
+            rollout.probe_initial_observations()
+            for step in range(num_steps):
+                obs = np.concatenate([o.value() for o in observations] + [[step / num_steps]])
+                with torch.no_grad():
+                    targets = policy(torch.tensor(obs, dtype=torch.float64)).numpy()
+                chain.set_articulated_target_pose(np.ascontiguousarray(targets))
+                scene.step(DT)
+                _assert_step_converged(self, scene, step)
+            return terminal.value()
+
+        self.assertAlmostEqual(objective(), float(loss.detach()), delta=1e-12)
+        self.assertGreater(float(np.linalg.norm(observations[0].value())), 1.0, "the link must be in contact")
+        grad_norm = float(np.sqrt(sum(float((g * g).sum()) for g in analytic)))
+        direction = [g / grad_norm for g in analytic]
+
+        def directional_fd(eps: float) -> float:
+            pair = []
+            for sign in (+1.0, -1.0):
+                for v, d in zip(values, direction):
+                    v += sign * eps * d
+                pair.append(objective())
+                for v, d in zip(values, direction):
+                    v -= sign * eps * d
+            return (pair[0] - pair[1]) / (2.0 * eps)
+
+        fds = [directional_fd(eps) for eps in (1e-7, 1e-8)]
+        self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), 1e-4, f"rough directional FD {fds}")
+        self.assertLessEqual(abs(grad_norm - fds[0]) / abs(fds[0]), 1e-4, (grad_norm, fds))
 
     def test_orientation_observation_policy_vs_fd(self) -> None:
         """A policy fed the pushed cube's orientation quaternion (and the chain pose and time)
@@ -1346,16 +1398,16 @@ class PolicyRolloutTest(unittest.TestCase):
 
 
 class EngineContactForceAdjointTest(unittest.TestCase):
-    """Pins the engine's contact-force adjoint, ``get_contact_force_world_backward``, against
-    the kinematic reference: for a free rigid body the contact force is ``m (v_k - v_{k-1})
-    / dt - m g - f_ext`` (an identity of the integrator), whose gradient uses only the exact
-    center-of-mass position adjoint. The engine adjoint is exact when the force comes from
-    contact with a static collider, and wrong - by tens of percent - when the collider moves
-    (the Jacobian of the force with respect to the contact position is right: substituting
-    a finite-difference Jacobian for it changes nothing; the mapping of that Jacobian onto
-    the moving collider's degrees of freedom is not). That is why
-    ``ContactForceObservation`` differentiates through the motion instead. If the moving
-    collider assertion starts failing, the engine adjoint was fixed."""
+    """The engine's contact-force adjoint, ``get_contact_force_world_backward``, against the
+    kinematic reference: for a free rigid body the contact force is ``m (v_k - v_{k-1}) / dt -
+    m g - f_ext`` (an identity of the integrator), whose gradient uses only the exact
+    center-of-mass position adjoint. Exact for contact with static colliders and moving ones
+    alike since 2026-09-05, when two terms were added to the adjoint: the current-state SDF
+    Hessian in the derivative of the penalty force (``d(N(d) g)/dp = N' g g^T + N H``; a grid
+    SDF's interpolated gradient turns near edges, a plane's does not) and, for a dynamic
+    collider, the rotation of the forces with the collider (``d(R_B f)/d delta = delta x R_B f``).
+    Before: 3.7% against a static grid-SDF cube, 15% for a tilting rigid pusher and 26% for the
+    controlled chain with Coulomb friction, all exact against a static plane."""
 
     NUM_STEPS = 20
     F_REF = np.array([5.0, 0.0, 30.0])
@@ -1465,7 +1517,7 @@ class EngineContactForceAdjointTest(unittest.TestCase):
         return scene, pusher, target
 
     def test_static_collider_is_exact(self) -> None:
-        """A cube sliding on the static ground, driven by external forces on itself."""
+        """A cube sliding on the static ground (a plane), driven by external forces on itself."""
         def build():
             scene, cube = scenes.rigid_on_plane("coulomb", initial_velocity=(0.5, 0.0, 0.0))
             configure_for_differentiability(scene)
@@ -1480,20 +1532,50 @@ class EngineContactForceAdjointTest(unittest.TestCase):
         )
         self.assertLessEqual(rel, 1e-6, rel)
 
-    def test_moving_collider_is_wrong(self) -> None:
-        """A rigid pusher (pushed and tilted by external forces, friction none) against the
-        target cube: the engine adjoint is off by more than 3% (measured 15% on 2026-09-05,
-        12% once the adjoint operator carried the torque chart term); the controlled chain
-        pushing the cube with Coulomb friction, by more than 10% (measured 26%)."""
+    def test_static_grid_sdf_collider_is_exact(self) -> None:
+        """A flying cube (pushed and tilted by external forces) hitting a static cube: the
+        contact meets the collider's grid SDF near its edges, where the interpolated gradient
+        turns (measured 3.7% before the Hessian term, 3e-7 / 1e-8 after)."""
+        def build(friction):
+            contact = scenes.contact_params(friction)
+            scene = physics.create_scene("wall")
+            scene.set_gravity([0.0, 0.0, -9.81])
+            half = float(np.abs(scenes.CUBE_COORDS).max())
+            scene.create_rigid_actor(
+                name="wall", shape=scenes.cube_shape(), is_static=True, contact=contact,
+                world_from_local=physics.TransformRT([2 * half + 0.004, 0.0, 0.0]),
+            )
+            cube = scene.create_rigid_actor(name="cube", shape=scenes.cube_shape(), density=1000.0, contact=contact)
+            configure_for_differentiability(scene)
+            cube.register_query(physics.QueryType.TOTAL_CONTACT_FORCE)
+            return scene, cube, cube
+
         dofs = np.arange(6, dtype=np.int32)
-        forces = np.zeros((self.NUM_STEPS, 6))
-        forces[:, 0] = 80.0
-        forces[:, 4] = 15.0
-        rel_pusher = self._engine_vs_kinematic(
-            lambda: self._pusher("none"), "pusher",
-            lambda a, u: a.set_external_forces_on_dofs(dofs, np.ascontiguousarray(u)), forces, False,
-        )
-        self.assertGreater(rel_pusher, 0.03, rel_pusher)
+        for friction in ("none", "coulomb"):
+            forces = np.zeros((self.NUM_STEPS, 6))
+            forces[:, 0] = 60.0
+            forces[:, 4] = 3.0
+            rel = self._engine_vs_kinematic(
+                lambda friction=friction: build(friction), "cube",
+                lambda a, u: a.set_external_forces_on_dofs(dofs, np.ascontiguousarray(u)), forces, True,
+            )
+            self.assertLessEqual(rel, 1e-6, (friction, rel))
+
+    def test_moving_collider_is_exact(self) -> None:
+        """A rigid pusher (pushed and tilted by external forces) against the target cube, with
+        and without Coulomb friction (measured 12-15% before the rotation term, 5e-8 to 3e-7
+        after); the controlled chain pushing the cube with Coulomb friction (26% before,
+        2e-6 after)."""
+        dofs = np.arange(6, dtype=np.int32)
+        for friction in ("none", "coulomb"):
+            forces = np.zeros((self.NUM_STEPS, 6))
+            forces[:, 0] = 80.0
+            forces[:, 4] = 15.0
+            rel = self._engine_vs_kinematic(
+                lambda friction=friction: self._pusher(friction), "pusher",
+                lambda a, u: a.set_external_forces_on_dofs(dofs, np.ascontiguousarray(u)), forces, False,
+            )
+            self.assertLessEqual(rel, 1e-5, (friction, rel))
 
         def build_chain():
             scene, chain, cube = scenes.chain_pushing_cube("coulomb")
@@ -1505,4 +1587,4 @@ class EngineContactForceAdjointTest(unittest.TestCase):
         rel_chain = self._engine_vs_kinematic(
             build_chain, "chain", lambda a, u: a.set_articulated_target_pose(np.ascontiguousarray(u)), targets, False
         )
-        self.assertGreater(rel_chain, 0.1, rel_chain)
+        self.assertLessEqual(rel_chain, 1e-5, rel_chain)

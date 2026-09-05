@@ -858,6 +858,9 @@ static void PrepareBackPropagationIslandAsync(
 void mochi::PrepareBackPropagation(entt::registry& reg) {
   MOCHI_PROFILE_SCOPE();
 
+  // The contact detection of the prepared state computes the current SDF Hessians for the
+  // contact-force adjoints (see TagAdjointContactDetection).
+  reg.set<TagAdjointContactDetection>();
   TaskSemaphore eachTask;
   reg.view<CIslandDescendants const>().each(
       [&](entt::entity island, CIslandDescendants const& descendants) {
@@ -866,6 +869,7 @@ void mochi::PrepareBackPropagation(entt::registry& reg) {
         });
       });
   eachTask.Wait();
+  reg.unset<TagAdjointContactDetection>();
 
   ecs::InvokeForEachGlobal(&PrepareContactForceAdjoints, reg);
 }

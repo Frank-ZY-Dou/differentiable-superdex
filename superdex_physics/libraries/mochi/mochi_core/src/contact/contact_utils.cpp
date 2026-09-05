@@ -100,6 +100,8 @@ void mochi::ComputeCollisionResponseRange(
       assemDForce ? MakeSpan(outResponse.dforce).subspan(s, N) : Span<VMatrix3x3r>{},          \
       MakeConstSpan(sdfInfoImplicit.val).subspan(s, N),                                        \
       MakeConstSpan(sdfInfoImplicit.grad).subspan(s, N),                                       \
+      sdfInfoImplicit.hasHessian ? MakeConstSpan(sdfInfoImplicit.hess).subspan(s, N)           \
+                                 : Span<Matrix3x3r const>{},                                   \
       config.explicitNormals ? MakeConstSpan(sdfInfoExplicit.val).subspan(s, N)                \
                              : Span<real const>{},                                             \
       config.explicitNormals ? MakeConstSpan(sdfInfoExplicit.grad).subspan(s, N)               \

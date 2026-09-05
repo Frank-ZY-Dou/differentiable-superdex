@@ -512,7 +512,8 @@ MOCHI_FORCE_INLINE void ComputeBatchContactPenaltyForceDForce(
     bool assemEnergy,
     bool assemForce,
     bool assemDForce,
-    bool assemForceNorm) {
+    bool assemForceNorm,
+    BatchReal3x3<kBatchSize> const* sdfHess = nullptr) {
   static_assert(
       kCollResponseMaxBatchSize == 8,
       "Please update batched contact functions if the max batch size changes");
@@ -569,6 +570,20 @@ MOCHI_FORCE_INLINE void ComputeBatchContactPenaltyForceDForce(
     outDForce[3] = auxDForce[0] * sdfGrad[1]; // xy
     outDForce[4] = auxDForce[0] * sdfGrad[2]; // xz
     outDForce[5] = auxDForce[1] * sdfGrad[2]; // yz
+    // The force N(d) g(p) also changes through the gradient of the signed distance:
+    // d(N g)/dp = N' g g^T + N H, with H the SDF Hessian (zero for a plane, nonzero for a grid SDF
+    // near edges and corners, where the interpolated gradient turns). The forward Newton solve
+    // leaves the N H term out (a quasi-Newton Jacobian; the converged step does not depend on
+    // it); the adjoint's contact-force derivatives, whose query provides the Hessians, need it.
+    if (sdfHess) {
+      V const forceNorm = penaltyCoeff * penalty * dPenalty;
+      outDForce[0] += forceNorm * (*sdfHess)[0][0]; // xx
+      outDForce[1] += forceNorm * (*sdfHess)[1][1]; // yy
+      outDForce[2] += forceNorm * (*sdfHess)[2][2]; // zz
+      outDForce[3] += forceNorm * (*sdfHess)[0][1]; // xy
+      outDForce[4] += forceNorm * (*sdfHess)[0][2]; // xz
+      outDForce[5] += forceNorm * (*sdfHess)[1][2]; // yz
+    }
   }
 }
 
@@ -1055,6 +1070,10 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
  * assemDForce)
  * @param[in] distance Signed distances at contact points (negative = penetration)
  * @param[in] distanceGrad Gradient of signed distance at current state
+ * @param[in] distanceHess Hessian of signed distance at the current state (used only with
+ *            GradTarget::Current and assemDForce, where the penalty force N(d) g then also
+ *            differentiates through the gradient; may be empty, and is empty in the forward
+ *            solve, whose Newton Jacobian leaves that term out)
  * @param[in] distanceStageStart Signed distances at stage start (used only with explicit normals)
  * @param[in] distanceHessStageStart Hessian of signed distance at stage start (used only with
  *            explicit normals and GradTarget::Previous, where the dissipative terms differentiate
@@ -1088,6 +1107,7 @@ MOCHI_FORCE_INLINE
         Span<VMatrix3x3r> outDForce,
         Span<real const> distance,
         Span<Real3 const> distanceGrad,
+        Span<Matrix3x3r const> distanceHess,
         Span<real const> distanceStageStart,
         Span<Real3 const> distanceGradStageStart,
         Span<Matrix3x3r const> distanceHessStageStart,
@@ -1189,6 +1209,25 @@ MOCHI_FORCE_INLINE
   bool const useImplicitNormalForceForDissipation =
       config.implicitNormalForceForDissipation && hasDissipation;
   if constexpr (kAssemPenalty) {
+    // The current-state SDF Hessians, when the query provided them (see distanceHess).
+    BatchReal3x3<kBatchSize> hess MOCHI_NO_INIT;
+    BatchReal3x3<kBatchSize> const* hessPtr = nullptr;
+    if (assemDForce && isize(distanceHess) == kBatchSize) {
+      alignas(V) real hessTmp[3][3][V::kSize] = {};
+      for (int i = 0; i < kBatchSize; ++i) {
+        for (int r = 0; r < 3; ++r) {
+          for (int c = 0; c < 3; ++c) {
+            hessTmp[r][c][i] = distanceHess[i][r][c];
+          }
+        }
+      }
+      for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+          hess[r][c] = Load<V>(&hessTmp[r][c][0]);
+        }
+      }
+      hessPtr = &hess;
+    }
     ComputeBatchContactPenaltyForceDForce<kBatchSize>(
         energy,
         force,
@@ -1203,7 +1242,8 @@ MOCHI_FORCE_INLINE
         assemEnergy,
         assemForce,
         assemDForce,
-        useImplicitNormalForceForDissipation);
+        useImplicitNormalForceForDissipation,
+        hessPtr);
   } else {
     // Ensure containers are initialized for GradTarget::Previous
     if (assemEnergy) {

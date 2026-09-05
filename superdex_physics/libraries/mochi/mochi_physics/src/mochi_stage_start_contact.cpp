@@ -261,6 +261,15 @@ static void AddPerCollisionMissingStageStartContacts(
   current.posColliding.reserve(newSize);
   current.sdfInfo.val.reserve(newSize);
   current.sdfInfo.grad.reserve(newSize);
+  // The current Hessians (computed for the contact-force adjoints of a prepared
+  // back-propagation, see TagAdjointContactDetection) get the stage-start ones for the appended
+  // contacts, whose penalty force (and so the Hessian's contribution) is zero.
+  MOCHI_ASSERT(
+      !current.sdfInfo.hasHessian || stageStart.sdfInfo.hasHessian,
+      "Current contact data with SDF Hessians needs stage-start Hessians to fill missing contacts.");
+  if (current.sdfInfo.hasHessian) {
+    current.sdfInfo.hess.reserve(newSize);
+  }
   current.posCollidingStageStart.reserve(newSize);
   current.sdfInfoStageStart.val.reserve(newSize);
   current.sdfInfoStageStart.grad.reserve(newSize);
@@ -308,6 +317,9 @@ static void AddPerCollisionMissingStageStartContacts(
     current.posColliding.push_back(posCollidingMissing[i]);
     current.sdfInfo.val.push_back(distanceTolerance);
     current.sdfInfo.grad.push_back(stageStart.sdfInfo.grad[contactIdx]);
+    if (current.sdfInfo.hasHessian) {
+      current.sdfInfo.hess.push_back(stageStart.sdfInfo.hess[contactIdx]);
+    }
     current.posCollidingStageStart.push_back(stageStart.posColliding[contactIdx]);
     current.sdfInfoStageStart.val.push_back(stageStart.sdfInfo.val[contactIdx]);
     current.sdfInfoStageStart.grad.push_back(stageStart.sdfInfo.grad[contactIdx]);

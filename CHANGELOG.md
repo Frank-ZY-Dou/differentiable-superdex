@@ -39,13 +39,16 @@ releases on that base; these distributions are built from this repository, not f
   forces - `ContactForceObservation`, the total contact force on a free rigid body as a tactile
   signal - as observations; pose-controller targets and/or external forces such as joint
   torques as the policy output); the policy parameters receive the loss gradient through the
-  simulator, feedback path included (analytic policy gradients). The contact-force observation
-  is differentiated through the motion of the observed body (`m dv/dt - m g - f_ext`, exact
-  position adjoints; the rollout checks that balance at every step), because the engine's
-  contact-force query adjoint, `diffsim.get_contact_force_world_backward`, is exact against
-  static colliders only and off by tens of percent against moving ones (pinned by
-  `EngineContactForceAdjointTest`; the force Jacobian w.r.t. the contact position is right,
-  its mapping onto the moving collider's degrees of freedom is not).
+  simulator, feedback path included (analytic policy gradients).
+- Contact-force query adjoint (`diffsim.get_contact_force_world_backward`, the gradient of a
+  tactile observation): two missing terms made it exact against a static plane only - 3.7% off
+  against a static grid-SDF cube, 15% for a tilting rigid pusher, 26% for the controlled chain
+  with Coulomb friction. The derivative of the penalty force `N(d) g(p)` now carries the SDF
+  Hessian, `N' g g^T + N H` (the contact detection of a prepared back-propagation computes the
+  current-state Hessians; a grid SDF's interpolated gradient turns near edges, where the forward
+  solve's quasi-Newton Jacobian leaves the term out), and against a dynamic collider the forces
+  turn with it (`d(R_B f)/d delta = delta x R_B f`). All cases now agree with the kinematic
+  identity of a free body to 1e-6 (`EngineContactForceAdjointTest`).
 - Examples: `example_diffsim_robot_video.py` (reach, push, soft push, two-cube push, push with a
   feedback policy trained on top of an optimized open-loop plan on three cube starts against an
   open-loop baseline, gripper grasp, soft grasp, five-finger hand grasp, tendon finger, cable haul).

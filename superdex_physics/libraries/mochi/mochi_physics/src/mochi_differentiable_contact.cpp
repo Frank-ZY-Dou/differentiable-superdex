@@ -187,8 +187,10 @@ static void AccumulateAllSyncRigidContactForceAdjoints(
         continue;
       }
 
-      // Compute the Jacobians of contact forces wrt contact positions.
+      // Compute the Jacobians of contact forces wrt contact positions (and, for the current
+      // state, the forces themselves: see rotForceTerm).
       auto const contactParams = GetContactPairParams(reg, e, e2);
+      bool constexpr kAssemForce = kGradTarget == GradTarget::Current;
       response.ResizeNoInit(numContacts, false, true, true);
       ComputeCollisionResponseRange<kGradTarget>(
           {0, numContacts},
@@ -197,9 +199,22 @@ static void AccumulateAllSyncRigidContactForceAdjoints(
           configPair,
           dtStage,
           false,
-          false,
+          kAssemForce,
           true,
           response);
+      // The queried world force is Sum_s w_s R_B f_s. With a dynamic collider B, the rotation
+      // of B also turns the forces: for the left rotation increment delta of B's chart,
+      // d(R_B f_s)/d delta = delta x R_B f_s, so the adjoint of lambda . F w.r.t. delta carries
+      // Sum_s (R_B f_s) x (w_s lambda) = R_B Sum_s f_s x lambda_s, with lambda_s the weighted
+      // collider-space adjoint held in forcePerUnitArea. The position derivatives below
+      // (through p_s = R_B^T (x_s - t_B)) do not contain it. Accumulate it before `force` is
+      // reused.
+      Vec4r rotForceTerm = {};
+      if constexpr (kAssemForce) {
+        for (int s = 0; s < numContacts; ++s) {
+          rotForceTerm += Cross3(ToSimd(response.force[s]), ToSimd(query.forcePerUnitArea[s]));
+        }
+      }
 
       // Compute the gradient wrt contact positions. Reuse `force` for storage.
       for (int i = 0; i < numContacts; ++i) {
@@ -226,6 +241,7 @@ static void AccumulateAllSyncRigidContactForceAdjoints(
       }
       res = DotVecMat3x3(res, rotBT);
       skPRes = DotVecMat3x3(skPRes, rotBT);
+      rotForceTerm = DotVecMat3x3(rotForceTerm, rotBT);
 
       // Target component for the collider actor
       auto outGradB = AsView(reg.get<CDiffContactGrad<kGradTarget>>(e2));
@@ -235,7 +251,7 @@ static void AccumulateAllSyncRigidContactForceAdjoints(
       Store(gradA.data(), res);
       Store<RigidSize::kDRot>(gradA.data() + RigidSize::kDTrans, skPRes - Cross3(comA - comB, res));
       Store(gradB.data(), -res);
-      Store<RigidSize::kDRot>(gradB.data() + RigidSize::kDTrans, -skPRes);
+      Store<RigidSize::kDRot>(gradB.data() + RigidSize::kDTrans, -skPRes + rotForceTerm);
 
       outGradA += gradA;
       outGradB += gradB;

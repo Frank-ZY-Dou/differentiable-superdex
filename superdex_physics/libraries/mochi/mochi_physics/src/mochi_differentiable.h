@@ -44,6 +44,12 @@ struct TagDifferentiableScene {};
 // Tag set by PrepareBackPropagate and cleared by BackPropagate.
 struct TagBackPropagationPrepared {};
 
+// Set while PrepareBackPropagation runs the contact detection of the prepared state: that
+// detection also computes the current-state SDF Hessians, which the contact-force adjoints
+// (AccumulateContactForceAdjoints) need to differentiate the penalty force through the SDF
+// gradient. The forward solve never computes them.
+struct TagAdjointContactDetection {};
+
 // Stores the state pair restored by PrepareBackPropagate.
 struct CStatePair {
   StateHandle stateNew;

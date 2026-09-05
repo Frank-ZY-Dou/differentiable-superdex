@@ -73,6 +73,7 @@ static void ComputeBatchCollisionForceDForce(benchmark::State& state) {
           outDForce,
           MakeConstSpan(sdfInfo.val),
           MakeConstSpan(sdfInfo.grad),
+          {} /* distanceHess */,
           MakeConstSpan(sdfInfoStageStart.val),
           MakeConstSpan(sdfInfoStageStart.grad),
           {} /* distanceHessStageStart */,
