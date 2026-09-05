@@ -37,8 +37,10 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 using namespace mochi;
 using namespace mochi::test;
@@ -1428,7 +1430,7 @@ TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ExportContactFilter_RoundTripsSel
 TEST_IF(
     MOCHI_HDF5_AND_INTERNAL,
     PrefabExport,
-    ExportContactFilter_AvoidsTopLevelNestedNameCollision) {
+    ExportContactConfiguration_AvoidsTopLevelNestedNameCollision) {
   auto* context = CreateContext(0);
   MOCHI_DEFER(DestroyContext(context));
   auto* scene = context->CreateScene("contact_filter_top_level_nested_collision");
@@ -1461,6 +1463,10 @@ TEST_IF(
       /*enable*/ false,
       IncludeNestedActors::No,
       ExpectOK{});
+  ContactPairParamsOverride paramsOverride;
+  paramsOverride.penaltyCoefficient = 7_r;
+  scene->SetContactPairParamsOverride(
+      topLevelActor->GetHandle(), links[0], paramsOverride, ExpectOK{});
 
   auto tempDir =
       CreateTempDirectory("export_contact_filter_top_level_nested_collision", ExpectOK{});
@@ -1497,6 +1503,17 @@ TEST_IF(
   }
   EXPECT_TRUE(foundFilter);
 
+  ASSERT_TRUE(exportedPrefab.contactPairParamsOverrides.has_value());
+  ASSERT_EQ(1, isize(*exportedPrefab.contactPairParamsOverrides));
+  auto const& paramsOverrideEntry = (*exportedPrefab.contactPairParamsOverrides)[0];
+  ASSERT_EQ(2, isize(paramsOverrideEntry.actors));
+  EXPECT_TRUE(
+      (paramsOverrideEntry.actors[0] == rigidName &&
+       paramsOverrideEntry.actors[1] == nestedLinkName) ||
+      (paramsOverrideEntry.actors[0] == nestedLinkName &&
+       paramsOverrideEntry.actors[1] == rigidName));
+  EXPECT_EQ(std::optional<real>{7_r}, paramsOverrideEntry.paramsOverride.penaltyCoefficient);
+
   auto reloaded =
       prefab::LoadFromFile(prefabFile.string(), tempDir.Path().string(), context, ExpectOK{});
   auto* newScene = context->CreateScene("roundtrip_collision");
@@ -1520,6 +1537,12 @@ TEST_IF(
   auto const* sceneImpl = static_cast<SceneImpl const*>(newScene);
   EXPECT_FALSE(sceneImpl->IsActorContactEnabled(
       rigidActor->GetHandle(), linkActor->GetHandle(), ExpectOK{}));
+  EXPECT_EQ(
+      std::optional<real>{7_r},
+      newScene
+          ->GetContactPairParamsOverride(
+              rigidActor->GetHandle(), linkActor->GetHandle(), ExpectOK{})
+          .penaltyCoefficient);
 }
 
 TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ExportContactFilter_DropsUnsupportedActorTypes) {
@@ -1751,4 +1774,225 @@ TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ExportContactFilter_AsymmetricLay
 
   EXPECT_FALSE(newScene->IsLayerContactEnabled("LayerX", "LayerY"));
   EXPECT_TRUE(newScene->IsLayerContactEnabled("LayerY", "LayerX"));
+}
+
+TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ContactFiltersAreDeterministic) {
+  auto* context = CreateContext(0);
+  MOCHI_DEFER(DestroyContext(context));
+  auto tempDirA = CreateTempDirectory("contact_filter_order_a", ExpectOK{});
+  auto tempDirB = CreateTempDirectory("contact_filter_order_b", ExpectOK{});
+  auto const shape = context->LoadShapeFromFile(
+      GetAssetPath("cube/cube_minimal.mochi.json"),
+      Real3{0.1_r, 0.1_r, 0.1_r},
+      TransformRT{},
+      ExpectOK{});
+
+  constexpr int kNumPairs = 24;
+  using NamePair = std::pair<std::string, std::string>;
+  DynamicArray<NamePair> expectedActorAsymmetric;
+  DynamicArray<NamePair> expectedActorSymmetric;
+  DynamicArray<NamePair> expectedLayerAsymmetric;
+  DynamicArray<NamePair> expectedLayerSymmetric;
+  for (int i = 0; i < kNumPairs; ++i) {
+    std::string const actorName = "Actor" + std::to_string(i);
+    std::string const layerName = "Layer" + std::to_string(i);
+    expectedActorAsymmetric.push_back({actorName, "AsymmetricAnchor"});
+    expectedActorSymmetric.push_back({actorName, "SymmetricAnchor"});
+    expectedLayerAsymmetric.push_back({layerName, "AsymmetricLayer"});
+    expectedLayerSymmetric.push_back({layerName, "SymmetricLayer"});
+  }
+  std::sort(expectedActorAsymmetric.begin(), expectedActorAsymmetric.end());
+  std::sort(expectedActorSymmetric.begin(), expectedActorSymmetric.end());
+  std::sort(expectedLayerAsymmetric.begin(), expectedLayerAsymmetric.end());
+  std::sort(expectedLayerSymmetric.begin(), expectedLayerSymmetric.end());
+
+  auto actorPairs = [](DynamicArray<prefab::ActorContactEntry> const& entries) {
+    DynamicArray<NamePair> pairs;
+    pairs.reserve(entries.size());
+    for (auto const& entry : entries) {
+      pairs.push_back({std::string(entry.actors[0]), std::string(entry.actors[1])});
+    }
+    return pairs;
+  };
+  auto layerPairs = [](DynamicArray<prefab::LayerContactEntry> const& entries) {
+    DynamicArray<NamePair> pairs;
+    pairs.reserve(entries.size());
+    for (auto const& entry : entries) {
+      pairs.push_back({std::string(entry.layers[0]), std::string(entry.layers[1])});
+    }
+    return pairs;
+  };
+
+  auto exportWithOrder =
+      [&](std::filesystem::path const& outputDir, bool reverse, std::string& json) {
+        auto* scene = context->CreateScene("contact_filter_determinism");
+        MOCHI_DEFER(context->DestroyScene(scene));
+
+        auto makeActor = [&](char const* name, char const* layer) {
+          RigidActorParams params;
+          params.name = name;
+          params.layer = layer;
+          params.shape = shape;
+          params.colliderType = ColliderType::Box;
+          return scene->CreateRigidActor(params, ExpectOK{});
+        };
+        Actor* const symmetricAnchor = makeActor("SymmetricAnchor", "SymmetricLayer");
+        Actor* const asymmetricAnchor = makeActor("AsymmetricAnchor", "AsymmetricLayer");
+
+        DynamicArray<Actor*> actors;
+        DynamicArray<std::string> layerNames;
+        for (int i = 0; i < kNumPairs; ++i) {
+          std::string const actorName = "Actor" + std::to_string(i);
+          layerNames.push_back("Layer" + std::to_string(i));
+          actors.push_back(makeActor(actorName.c_str(), layerNames.back().c_str()));
+        }
+
+        for (int n = 0; n < kNumPairs; ++n) {
+          int const i = reverse ? kNumPairs - 1 - n : n;
+          scene->EnableActorContactSymmetric(
+              actors[i]->GetHandle(),
+              symmetricAnchor->GetHandle(),
+              false,
+              IncludeNestedActors::No,
+              ExpectOK{});
+          scene->EnableActorContactAsymmetric(
+              actors[i]->GetHandle(),
+              asymmetricAnchor->GetHandle(),
+              false,
+              IncludeNestedActors::No,
+              ExpectOK{});
+          scene->EnableLayerContactSymmetric(layerNames[i], "SymmetricLayer", false, ExpectOK{});
+          scene->EnableLayerContactAsymmetric(layerNames[i], "AsymmetricLayer", false, ExpectOK{});
+        }
+
+        auto const prefabFile = ExportScene(scene, "contact_filter", outputDir);
+        ReadFile(prefabFile, json, ExpectOK{});
+        auto const exported = prefab::ShallowLoadFromFile(prefabFile.string(), ExpectOK{});
+        ASSERT_TRUE(exported.contactFilter.has_value());
+        auto const& filter = *exported.contactFilter;
+        ASSERT_TRUE(filter.actorContactAsymmetric.has_value());
+        ASSERT_TRUE(filter.actorContactSymmetric.has_value());
+        ASSERT_TRUE(filter.layerContactAsymmetric.has_value());
+        ASSERT_TRUE(filter.layerContactSymmetric.has_value());
+        EXPECT_EQ(expectedActorAsymmetric, actorPairs(*filter.actorContactAsymmetric));
+        EXPECT_EQ(expectedActorSymmetric, actorPairs(*filter.actorContactSymmetric));
+        EXPECT_EQ(expectedLayerAsymmetric, layerPairs(*filter.layerContactAsymmetric));
+        EXPECT_EQ(expectedLayerSymmetric, layerPairs(*filter.layerContactSymmetric));
+      };
+
+  std::string jsonA;
+  std::string jsonB;
+  exportWithOrder(tempDirA.Path(), false, jsonA);
+  exportWithOrder(tempDirB.Path(), true, jsonB);
+  EXPECT_EQ(jsonA, jsonB);
+}
+
+TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ContactPairOverridesAreDeterministic) {
+  auto* context = CreateContext(0);
+  MOCHI_DEFER(DestroyContext(context));
+  auto tempDirA = CreateTempDirectory("contact_pair_override_order_a", ExpectOK{});
+  auto tempDirB = CreateTempDirectory("contact_pair_override_order_b", ExpectOK{});
+
+  constexpr int kNumPairs = 24;
+  DynamicArray<std::pair<std::string, real>> expectedEntries;
+  for (int i = 0; i < kNumPairs; ++i) {
+    expectedEntries.push_back({"Actor" + std::to_string(i), static_cast<real>(i) * 0.01_r});
+  }
+  std::sort(expectedEntries.begin(), expectedEntries.end());
+
+  auto exportWithOrder = [&](std::filesystem::path const& outputDir,
+                             bool reverse,
+                             std::string& json) {
+    auto* scene = context->CreateScene("pair_override_determinism");
+    MOCHI_DEFER(context->DestroyScene(scene));
+    Actor* const anchor = CreateRigidCubeActor(context, scene, "Anchor");
+    DynamicArray<Actor*> actors;
+    for (int i = 0; i < kNumPairs; ++i) {
+      actors.push_back(CreateRigidCubeActor(context, scene, ("Actor" + std::to_string(i)).c_str()));
+    }
+
+    for (int n = 0; n < kNumPairs; ++n) {
+      int const i = reverse ? kNumPairs - 1 - n : n;
+      ContactPairParamsOverride params;
+      params.coulombFrictionCoefficient = static_cast<real>(i) * 0.01_r;
+      scene->SetContactPairParamsOverride(
+          actors[i]->GetHandle(), anchor->GetHandle(), params, ExpectOK{});
+    }
+
+    auto const prefabFile = ExportScene(scene, "pair_overrides", outputDir);
+    ReadFile(prefabFile, json, ExpectOK{});
+    auto const exported = prefab::ShallowLoadFromFile(prefabFile.string(), ExpectOK{});
+    ASSERT_TRUE(exported.contactPairParamsOverrides.has_value());
+    ASSERT_EQ(kNumPairs, isize(*exported.contactPairParamsOverrides));
+    for (int i = 0; i < kNumPairs; ++i) {
+      auto const& entry = (*exported.contactPairParamsOverrides)[i];
+      ASSERT_EQ(2, isize(entry.actors));
+      EXPECT_STREQ(expectedEntries[i].first.c_str(), entry.actors[0].c_str());
+      EXPECT_STREQ("Anchor", entry.actors[1].c_str());
+      EXPECT_EQ(
+          std::optional<real>{expectedEntries[i].second},
+          entry.paramsOverride.coulombFrictionCoefficient);
+    }
+  };
+
+  std::string jsonA;
+  std::string jsonB;
+  exportWithOrder(tempDirA.Path(), false, jsonA);
+  exportWithOrder(tempDirB.Path(), true, jsonB);
+  EXPECT_EQ(jsonA, jsonB);
+}
+
+TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ContactPairOverridesExcludeAndRoundTrip) {
+  auto* context = CreateContext(0);
+  MOCHI_DEFER(DestroyContext(context));
+  auto* scene = context->CreateScene("pair_override_exclusion");
+  MOCHI_DEFER(context->DestroyScene(scene));
+  Actor* const actorA = CreateRigidCubeActor(context, scene, "ActorA");
+  Actor* const actorB = CreateRigidCubeActor(context, scene, "ActorB");
+  Actor* const actorC = CreateRigidCubeActor(context, scene, "ActorC");
+
+  auto setOverride = [&](Actor* first, Actor* second, real value) {
+    ContactPairParamsOverride params;
+    params.penaltyCoefficient = value;
+    scene->SetContactPairParamsOverride(
+        first->GetHandle(), second->GetHandle(), params, ExpectOK{});
+  };
+  setOverride(actorA, actorB, 1_r);
+  setOverride(actorA, actorC, 2_r);
+  setOverride(actorB, actorC, 3_r);
+
+  auto tempDir = CreateTempDirectory("contact_pair_override_exclusion", ExpectOK{});
+  DynamicArray<ActorHandle> excluded{actorB->GetHandle()};
+  prefab::ExportSceneExcluding(
+      scene, "pair_overrides", tempDir.Path().string(), excluded, ExpectOK{});
+  auto const prefabFile = tempDir.Path() / "pair_overrides" / "pair_overrides.mochi_scene";
+  auto exported = prefab::ShallowLoadFromFile(prefabFile.string(), ExpectOK{});
+  ASSERT_TRUE(exported.contactPairParamsOverrides.has_value());
+  ASSERT_EQ(1, isize(*exported.contactPairParamsOverrides));
+  auto const& entry = (*exported.contactPairParamsOverrides)[0];
+  ASSERT_EQ(2, isize(entry.actors));
+  EXPECT_STREQ("ActorA", entry.actors[0].c_str());
+  EXPECT_STREQ("ActorC", entry.actors[1].c_str());
+  EXPECT_EQ(std::optional<real>{2_r}, entry.paramsOverride.penaltyCoefficient);
+
+  auto loaded =
+      prefab::LoadFromFile(prefabFile.string(), tempDir.Path().string(), context, ExpectOK{});
+  auto* roundTripScene = context->CreateScene("roundtrip");
+  MOCHI_DEFER(context->DestroyScene(roundTripScene));
+  prefab::AddToScene(loaded, roundTripScene, {}, ExpectOK{});
+  ActorHandle roundTripA;
+  ActorHandle roundTripC;
+  roundTripScene->ForEachActor([&](Actor const* actor) {
+    if (std::string_view(actor->GetName()) == "ActorA") {
+      roundTripA = actor->GetHandle();
+    } else if (std::string_view(actor->GetName()) == "ActorC") {
+      roundTripC = actor->GetHandle();
+    }
+  });
+  ASSERT_TRUE(roundTripA.IsValid());
+  ASSERT_TRUE(roundTripC.IsValid());
+  EXPECT_EQ(
+      std::optional<real>{2_r},
+      roundTripScene->GetContactPairParamsOverride(roundTripA, roundTripC, ExpectOK{})
+          .penaltyCoefficient);
 }

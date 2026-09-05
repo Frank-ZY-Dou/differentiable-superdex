@@ -71,12 +71,13 @@ int GetNumParallelWorkers(MatType const& A) {
  * @param[in] verbosity Verbosity level for logging output.
  * @param[in] usePolakRibiere Boolean to use the Polak-Ribiere formula for beta (if true) or the
  * Fletcher-Reeves formula (if false). Default is true.
+ * @param[in] initialGuessHint Indicates whether @p x is known to be zero. The zero hint skips the
+ * initial matrix-vector product and requires @p x to be exactly zero.
  * @param[in] dot The dot operator.
  * @param[in] vectorFactory Factory to create vectors of a given type.
  *
- * @return Linear solver status. Contains the number of iterations and the achieved absolute and
- * relative residuals. "maxIter+1" is used to indicate that the maximum number of iterations was
- * reached without convergence.
+ * @return Linear solver status. Contains the convergence status, number of iterations, and achieved
+ * absolute and relative residuals.
  *
  * @note The preconditioner must implement a 'ConcurrentSolve' method.
  * @note The input matrix must be a supported matrix or linear operator type. Matrix application
@@ -110,6 +111,7 @@ LinearSolverStatus ParallelPCG(
     bool abortIfNotSpd = false,
     VerbosityLevel verbosity = VerbosityLevel::Warning,
     bool usePolakRibiere = true,
+    InitialGuessHint initialGuessHint = InitialGuessHint::Unknown,
     Dot dot = {},
     VectorFactory vectorFactory = {}) {
   MOCHI_PROFILE_SCOPE();
@@ -126,6 +128,9 @@ LinearSolverStatus ParallelPCG(
       std::is_same_v<StopCriterion, StatusResidualPreconditionerInduced<Dot, NonConstScalar>>;
   constexpr bool kCheckStatusComputesRTz =
       std::is_same_v<StopCriterion, StatusResidualPreconditionerInduced<Dot, NonConstScalar>>;
+  MOCHI_ASSERT_VERBOSE(
+      initialGuessHint != InitialGuessHint::Zero || dot(x, x) == 0,
+      "InitialGuessHint::Zero requires an exactly zero initial guess.");
 
   auto* scheduler = TaskScheduler::TryGet();
   auto const numTargetWorkers = parallel_pcg::GetNumParallelWorkers(A);
@@ -240,12 +245,17 @@ LinearSolverStatus ParallelPCG(
         // 'r' from being modified before the solve is complete.
       };
 
-      // Pre- and post-ApplyToRange barriers not needed: 'x' is up-to-date and the next 'Dot'
-      // prevents 'x' from being modified before the product is complete.
-      ApplyToRange(A, x, Ap, rowBegin, rowEnd);
-      rWorker -= ApWorker;
+      if (initialGuessHint != InitialGuessHint::Zero) {
+        // Pre- and post-ApplyToRange barriers not needed: 'x' is up-to-date and the next 'Dot'
+        // prevents 'x' from being modified before the product is complete.
+        ApplyToRange(A, x, Ap, rowBegin, rowEnd);
+        rWorker -= ApWorker;
+      }
 
       if constexpr (kNeedPrecResidual) {
+        // Even with x_0 = 0, do not reuse z from SetScaling(): it was computed with Solve(),
+        // whereas ParallelPCG uses ConcurrentSolve(). Reuse could therefore give iteration 0 a
+        // different effective preconditioner from subsequent iterations.
         computeBetaAndPrecResidual();
         iterStatus = workerStatusCheck.ParallelCheckStatus(
             iter, r, z, {}, {}, rowBegin, rowEnd, workerIdx, workerParDot);
@@ -262,7 +272,8 @@ LinearSolverStatus ParallelPCG(
               .numIterDone = iter,
               .residualNorm = workerStatusCheck.GetLatestResidualNorm(),
               .relativeResidualNorm = workerStatusCheck.GetLatestRelativeResidualNorm(),
-              .converged = IsConverged(iterStatus)};
+              .convergence = IsConverged(iterStatus) ? LinearSolverConvergenceStatus::Converged
+                                                     : LinearSolverConvergenceStatus::Diverged};
         }
         return;
       }
@@ -299,7 +310,7 @@ LinearSolverStatus ParallelPCG(
                     .residualNorm = static_cast<double>(workerStatusCheck.GetLatestResidualNorm()),
                     .relativeResidualNorm =
                         static_cast<double>(workerStatusCheck.GetLatestRelativeResidualNorm()),
-                    .converged = false};
+                    .convergence = LinearSolverConvergenceStatus::Diverged};
               }
               return;
             }
@@ -328,7 +339,8 @@ LinearSolverStatus ParallelPCG(
                 .residualNorm = static_cast<double>(workerStatusCheck.GetLatestResidualNorm()),
                 .relativeResidualNorm =
                     static_cast<double>(workerStatusCheck.GetLatestRelativeResidualNorm()),
-                .converged = IsConverged(iterStatus)};
+                .convergence = IsConverged(iterStatus) ? LinearSolverConvergenceStatus::Converged
+                                                       : LinearSolverConvergenceStatus::Diverged};
           }
           return;
         }
@@ -352,7 +364,7 @@ LinearSolverStatus ParallelPCG(
                   .residualNorm = static_cast<double>(workerStatusCheck.GetLatestResidualNorm()),
                   .relativeResidualNorm =
                       static_cast<double>(workerStatusCheck.GetLatestRelativeResidualNorm()),
-                  .converged = false};
+                  .convergence = LinearSolverConvergenceStatus::Diverged};
             }
             return;
           }
@@ -363,11 +375,11 @@ LinearSolverStatus ParallelPCG(
 
       if (isMaster) {
         solverStatus = {
-            .numIterDone = maxIter + 1,
+            .numIterDone = maxIter,
             .residualNorm = static_cast<double>(workerStatusCheck.GetLatestResidualNorm()),
             .relativeResidualNorm =
                 static_cast<double>(workerStatusCheck.GetLatestRelativeResidualNorm()),
-            .converged = false};
+            .convergence = LinearSolverConvergenceStatus::Stopped};
       }
     };
 
@@ -408,6 +420,7 @@ LinearSolverStatus ParallelPCG(
             abortIfNotSpd,
             verbosity,
             usePolakRibiere,
+            initialGuessHint,
             dot,
             vectorFactory);
   }

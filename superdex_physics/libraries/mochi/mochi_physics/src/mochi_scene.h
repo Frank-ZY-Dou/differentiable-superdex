@@ -25,6 +25,7 @@
 #include <mochi_physics/mochi_physics.h>
 #include <mochi_physics/mochi_physics_experimental.h>
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
@@ -159,8 +160,7 @@ class SceneImpl final : public Scene {
       std::string_view layerB,
       bool enable,
       Error& error) override;
-  MOCHI_API bool IsLayerContactEnabled(std::string_view layerA, std::string_view layerB)
-      const override;
+  bool IsLayerContactEnabled(std::string_view layerA, std::string_view layerB) const override;
   int GetNumContactLayers() const override;
   void EnumerateContactLayerNames(
       std::function<void(std::string_view name)> const& callback) const override;
@@ -176,6 +176,17 @@ class SceneImpl final : public Scene {
       bool enable,
       IncludeNestedActors includeNestedActors,
       Error& error) override;
+  void SetContactPairParamsOverride(
+      ActorHandle actorA,
+      ActorHandle actorB,
+      ContactPairParamsOverride const& paramsOverride,
+      Error& error) override;
+  void ClearContactPairParamsOverride(ActorHandle actorA, ActorHandle actorB, Error& error)
+      override;
+  bool HasContactPairParamsOverride(ActorHandle actorA, ActorHandle actorB, Error& error)
+      const override;
+  ContactPairParamsOverride
+  GetContactPairParamsOverride(ActorHandle actorA, ActorHandle actorB, Error& error) const override;
   CallbackHandle RegisterPreStepCallback(
       std::string_view debugName,
       std::function<void(StepInfo const&)> callback,
@@ -188,6 +199,7 @@ class SceneImpl final : public Scene {
   void UpdateDebugger() override;
 
   // For internal use only:
+  [[nodiscard]] bool TryClaimOwnership();
   void SetThreadAffinity();
   QueryHandle NewQueryHandle(QueryType type); // thread-safe
   void RegisterActorQuery(
@@ -263,7 +275,7 @@ class SceneImpl final : public Scene {
    *
    * @see EnableActorContactAsymmetric, EnableActorContactSymmetric
    */
-  [[nodiscard]] MOCHI_API bool
+  [[nodiscard]] bool
   IsActorContactEnabled(ActorHandle colliding, ActorHandle collider, Error& error) const;
 
   Actor* CreateSoftActorImpl(
@@ -283,13 +295,14 @@ class SceneImpl final : public Scene {
   void SetDebugger(std::shared_ptr<dbg::SceneDebugger> debugger);
 
   // Return a shared_ptr to the current debugger (if any). For unit tests. Thread-safe.
-  MOCHI_API std::shared_ptr<dbg::SceneDebugger> GetDebugger() const;
+  std::shared_ptr<dbg::SceneDebugger> GetDebugger() const;
 
  private:
   // Private Members:
   ContextImpl* const _context;
   std::string const _name;
   uint64_t const _sceneId;
+  std::atomic<bool> _ownershipClaimed = false;
   entt::registry _registry;
   PerformanceStats _lastPerformanceStats;
   SolverStats _lastSolverStats;

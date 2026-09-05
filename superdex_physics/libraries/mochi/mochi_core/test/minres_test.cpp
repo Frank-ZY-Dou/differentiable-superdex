@@ -71,6 +71,7 @@ static void TestMinRes(bool singleThreadedMode) {
         maxIter,
         StopCriterion{relativeTol, kAbsTol, kRelDivTol},
         VerbosityLevel::Warning,
+        InitialGuessHint::Zero,
         dot);
 
     EXPECT_LT(info.numIterDone, maxIter);
@@ -93,6 +94,7 @@ static void TestMinRes(bool singleThreadedMode) {
         maxIter,
         StopCriterion{relativeTol, kAbsTol, kRelDivTol},
         VerbosityLevel::Warning,
+        InitialGuessHint::Unknown,
         dot);
 
     EXPECT_LT(info.numIterDone, 1);
@@ -110,6 +112,7 @@ static void TestMinRes(bool singleThreadedMode) {
         maxIter,
         StopCriterion{relativeTol, kAbsTol, kRelDivTol},
         VerbosityLevel::Warning,
+        InitialGuessHint::Unknown,
         dot);
 
     EXPECT_LT(info.numIterDone, maxIter);
@@ -152,9 +155,11 @@ TEST(KrylovSolver, MinRes_LuckyBreakdown) {
       x,
       prec,
       kSize,
-      krylov::StatusImplicitResidualNorm<real>{real(1e-30), real(1e-30), real(1e10)});
+      krylov::StatusImplicitResidualNorm<real>{real(1e-30), real(1e-30), real(1e10)},
+      VerbosityLevel::Warning,
+      InitialGuessHint::Zero);
 
-  EXPECT_TRUE(info.converged);
+  EXPECT_EQ(info.convergence, LinearSolverConvergenceStatus::Converged);
   EXPECT_EQ(info.numIterDone, 1);
   EXPECT_NEAR(info.residualNorm, 0.0, 1e-12);
 
@@ -162,6 +167,53 @@ TEST(KrylovSolver, MinRes_LuckyBreakdown) {
   error = b - x;
   krylov::UsualDot dot{};
   EXPECT_LT(dot.Norm(error), real(1e-12));
+}
+
+TEST(KrylovSolver, MinRes_InitialGuessHint) {
+  constexpr int kSize = 4;
+  using Vector = ColumnVector<real>;
+
+  auto b = Vector::Zero(kSize);
+  b(0) = 1_r;
+  auto x = Vector::Zero(kSize);
+
+  int operatorApplications = 0;
+  auto opA = [&](auto const& input, auto& output) {
+    ++operatorApplications;
+    output = input;
+  };
+  int preconditionerApplications = 0;
+  auto opP = [&](auto const& input, auto& output) {
+    ++preconditionerApplications;
+    output = input;
+  };
+
+  auto runSolve = [&](InitialGuessHint initialGuessHint) {
+    x.SetZero();
+    operatorApplications = 0;
+    preconditionerApplications = 0;
+    auto const status = krylov::MinRes(
+        opA,
+        b,
+        x,
+        opP,
+        kSize,
+        krylov::StatusImplicitResidualNorm<real>{1e-12_r, 1e-12_r, 1e10_r},
+        VerbosityLevel::Silent,
+        initialGuessHint);
+
+    EXPECT_EQ(status.convergence, LinearSolverConvergenceStatus::Converged);
+    ColumnVector<real> error = b - x;
+    EXPECT_NEAR_TOL(error.Norm(), 0_r, 1e-12_r);
+  };
+
+  runSolve(InitialGuessHint::Unknown);
+  int const generalOperatorApplications = operatorApplications;
+  int const generalPreconditionerApplications = preconditionerApplications;
+  runSolve(InitialGuessHint::Zero);
+
+  EXPECT_EQ(generalOperatorApplications, operatorApplications + 1);
+  EXPECT_EQ(generalPreconditionerApplications, preconditionerApplications + 1);
 }
 
 TEST(KrylovSolver, MinRes_NonSpdPreconditioner) {
@@ -194,7 +246,7 @@ TEST(KrylovSolver, MinRes_NonSpdPreconditioner) {
       krylov::StatusImplicitResidualNorm<real>{real(1e-12), real(1e-12), real(1e10)},
       VerbosityLevel::Silent);
 
-  EXPECT_FALSE(info.converged);
+  EXPECT_EQ(info.convergence, LinearSolverConvergenceStatus::Diverged);
   EXPECT_EQ(info.numIterDone, 0);
 }
 
@@ -238,7 +290,7 @@ TEST_P(MinResNonFinite, PreLoopNonFinitePreconditioner) {
       krylov::StatusImplicitResidualNorm<real>{real(1e-12), real(1e-12), real(1e10)},
       VerbosityLevel::Silent);
 
-  EXPECT_FALSE(info.converged);
+  EXPECT_EQ(info.convergence, LinearSolverConvergenceStatus::Diverged);
   EXPECT_EQ(info.numIterDone, 0);
   EXPECT_TRUE(IsFinite(x.GetConstSpan()));
 }
@@ -271,8 +323,9 @@ TEST_P(MinResNonFinite, InLoopNonFiniteOperator) {
       prec,
       kSize,
       krylov::StatusImplicitResidualNorm<real>{real(1e-30), real(1e-30), real(1e10)},
-      VerbosityLevel::Silent);
+      VerbosityLevel::Silent,
+      InitialGuessHint::Zero);
 
-  EXPECT_FALSE(info.converged);
+  EXPECT_EQ(info.convergence, LinearSolverConvergenceStatus::Diverged);
   EXPECT_TRUE(IsFinite(x.GetConstSpan()));
 }

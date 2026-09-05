@@ -18,16 +18,19 @@
 
 #include <mochi_core/geometry/aabb.h>
 #include <mochi_core/geometry/any_shape.h>
+#include <mochi_core/geometry/batch_sphere.h>
 #include <mochi_core/geometry/capsule.h>
 #include <mochi_core/geometry/obb.h>
 #include <mochi_core/geometry/plane.h>
 #include <mochi_core/geometry/sphere.h>
 #include <mochi_core/mochi_platform.h>
-
+#include <mochi_core/utils/batch_types.h>
 #include <mochi_core/utils/math_utils.h>
 #include <mochi_core/utils/matrix_utils.h>
+#include <mochi_core/utils/reflection.h>
 #include <mochi_core/utils/transform_rt.h>
 #include <mochi_core/utils/transform_srt.h>
+#include <mochi_core/utils/vmatrix.h>
 
 #include <limits>
 #include <variant>
@@ -179,9 +182,15 @@ TransformShape(TransformRT const& transform, AnyShape const& any) {
 // Compute an Aabb that contains all the coordinates
 [[nodiscard]] Aabb CalcAabb(Span<Real3 const> coordinates);
 
-// Compute an Aabb that contains the (coordinates + displacements) specified by index.
+// Compute an Aabb that contains the coordinates specified by index.
 // WARNING: The indices must be strictly increasing.
 [[nodiscard]] Aabb CalcAabbWithSortedIndices(
+    Span<Real3 const> coordinates,
+    Span<int const> sortedIndices);
+
+// Compute an Aabb that contains the (coordinates + displacements) specified by index.
+// WARNING: The indices must be strictly increasing.
+[[nodiscard]] Aabb CalcAabbWithDisplacementsAndSortedIndices(
     Span<Real3 const> coordinates,
     Span<Real3 const> displacement,
     Span<int const> sortedIndices);
@@ -290,6 +299,55 @@ TransformShape(TransformRT const& transform, AnyShape const& any) {
 /**************************************************************************************************
   Bounding Spheres
 */
+
+/** @brief Selects the tradeoff between bounding-sphere tightness and computation cost. */
+enum class BoundingSphereAlgorithm {
+  Fastest, ///< Sphere may be larger than necessary. Very fast to compute.
+  Fast, ///< Sphere is typically 5-10% smaller than @ref Fastest. Still quite fast.
+  Best, ///< Smallest sphere within floating-point precision; typically O(N) but slower.
+  Count ///< Number of algorithms; not a valid selection.
+};
+
+} // namespace mochi
+
+MOCHI_ENUM_BEGIN(mochi::BoundingSphereAlgorithm)
+MOCHI_ENUM_ITEM(Fastest)
+MOCHI_ENUM_ITEM(Fast)
+MOCHI_ENUM_ITEM(Best)
+MOCHI_ENUM_COUNT(Count)
+MOCHI_ENUM_END()
+
+namespace mochi {
+
+/**
+ * @brief Compute a bounding sphere containing all the coordinates.
+ *
+ * @param coordinates 3D coordinates
+ * @param algorithm Algorithm to use for computing the bounding sphere (size vs speed tradeoff)
+ * @return Sphere containing all the coordinates
+ *
+ * @see CalcBoundingSphereIndexed
+ */
+[[nodiscard]] Sphere CalcBoundingSphere(
+    Span<Real3 const> coordinates,
+    BoundingSphereAlgorithm algorithm);
+
+/**
+ * @brief Compute a bounding sphere containing all the coordinates, referenced by index.
+ *
+ * @param coordinates 3D coordinates
+ * @param indices Indices into the @p coordinates array.
+ * @param algorithm Algorithm to use for computing the bounding sphere (size vs speed tradeoff)
+ * @return Bounding sphere
+ *
+ * @pre Every element of @p indices is a valid index into @p coordinates.
+ *
+ * @see CalcBoundingSphere
+ */
+[[nodiscard]] Sphere CalcBoundingSphereIndexed(
+    Span<Real3 const> coordinates,
+    Span<int const> indices,
+    BoundingSphereAlgorithm algorithm);
 
 // Return the same sphere (just so GetBoundingSphere works with any shape)
 [[nodiscard]] MOCHI_FORCE_INLINE Sphere const& GetBoundingSphere(Sphere const& passthru) {
@@ -655,6 +713,21 @@ template <class ShapeT, MOCHI_CONCEPT(IsPrimitiveShape<ShapeT>)>
   return NormSqr(a.GetCenter() - b.GetCenter()) <= Sqr(a.GetRadius() + b.GetRadius());
 }
 
+/**
+ * @brief Test overlap between a sphere and each of a batch of spheres.
+ *
+ * @param a The first sphere.
+ * @param b The batch of spheres.
+ * @return A per-lane SIMD mask; each sphere's lane is set if overlap was detected.
+ */
+template <int kBatchSize>
+[[nodiscard]] MOCHI_FORCE_INLINE BatchReal<kBatchSize> HasOverlap(
+    Sphere const& a,
+    BatchSphere<kBatchSize> const& b) {
+  auto const aCenter = BroadcastEach<BatchReal<kBatchSize>>(a.GetCenter());
+  return NormSqr(aCenter - b.center) <= Sqr(a.GetRadius() + b.radius);
+}
+
 [[nodiscard]] MOCHI_FORCE_INLINE bool HasOverlap(Plane const& a, Plane const& b) {
   return (a.GetNormal() != -b.GetNormal()) ||
       (a.GetDistanceFromOrigin() >= -b.GetDistanceFromOrigin());
@@ -682,6 +755,28 @@ template <class ShapeT, MOCHI_CONCEPT(IsPrimitiveShape<ShapeT>)>
 
 [[nodiscard]] MOCHI_FORCE_INLINE bool HasOverlap(Aabb const& aabb, Sphere const& s) {
   return HasOverlap(s, aabb);
+}
+
+/**
+ * @brief Test overlap between an @ref Aabb and each of a batch of spheres.
+ *
+ * @param aabb The axis-aligned bounding box.
+ * @param sphere The batch of spheres.
+ * @return A per-lane SIMD mask; each sphere's lane is set if overlap was detected.
+ */
+template <int kBatchSize>
+[[nodiscard]] MOCHI_FORCE_INLINE BatchReal<kBatchSize> HasOverlap(
+    Aabb const& aabb,
+    BatchSphere<kBatchSize> const& sphere) {
+  using V = BatchReal<kBatchSize>;
+
+  // Closest point on the AABB to sphere center.
+  auto const aabbMin = BroadcastEach<V>(aabb.GetMin());
+  auto const aabbMax = BroadcastEach<V>(aabb.GetMax());
+  auto const closestPoint = Clamp(sphere.center, aabbMin, aabbMax);
+
+  // Check if distance from sphere center to closest point is less than radius.
+  return NormSqr(closestPoint - sphere.center) <= Sqr(sphere.radius);
 }
 
 // For this purpose, everything under the plane counts as overlap
@@ -718,6 +813,25 @@ template <class ShapeT, MOCHI_CONCEPT(IsPrimitiveShape<ShapeT>)>
   return Dot(normalAndDist, Set<3>(centerAndRadius, -1_r)) <= Get<3>(centerAndRadius);
 }
 
+/**
+ * @brief Test overlap between an @ref Plane and each of a batch of spheres.
+ *
+ * @note All volume behind the plane counts as overlap.
+ *
+ * @param plane The plane.
+ * @param sphere The batch of spheres.
+ * @return A per-lane SIMD mask; each sphere's lane is set if overlap was detected.
+ */
+template <int kBatchSize>
+[[nodiscard]] MOCHI_FORCE_INLINE BatchReal<kBatchSize> HasOverlap(
+    Plane const& plane,
+    BatchSphere<kBatchSize> const& sphere) {
+  using V = BatchReal<kBatchSize>;
+  auto const planeNormal = BroadcastEach<V>(plane.GetNormal());
+  auto const planeDist = plane.GetDistanceFromOrigin();
+  return Dot(planeNormal, sphere.center) - planeDist <= sphere.radius;
+}
+
 [[nodiscard]] MOCHI_FORCE_INLINE bool HasOverlap(Sphere const& s, Plane const& p) {
   return HasOverlap(p, s);
 }
@@ -734,6 +848,27 @@ template <class ShapeT, MOCHI_CONCEPT(IsPrimitiveShape<ShapeT>)>
 
 [[nodiscard]] MOCHI_FORCE_INLINE bool HasOverlap(Obb const& oobb, Sphere const& s) {
   return HasOverlap(s, oobb);
+}
+
+/**
+ * @brief Test overlap between an @ref Obb and each of a batch of spheres.
+ *
+ * @param obb The oriented bounding box.
+ * @param sphere The batch of spheres.
+ * @return A per-lane SIMD mask; each sphere's lane is set if overlap was detected.
+ */
+template <int kBatchSize>
+[[nodiscard]] MOCHI_FORCE_INLINE BatchReal<kBatchSize> HasOverlap(
+    Obb const& obb,
+    BatchSphere<kBatchSize> const& sphere) {
+  using V = BatchReal<kBatchSize>;
+  auto const obbRot = Broadcast3x3<V>(obb.VGetRotation());
+  auto const obbCenter = Broadcast3<V>(obb.VGetCenter());
+  auto const obbHalfExt = Broadcast3<V>(obb.VGetHalfExtents());
+  // Transform the sphere centers into the OBB's local frame: R^T * (center - obbCenter).
+  auto const sphereCenterInObb = DotVecMat(sphere.center - obbCenter, obbRot);
+  auto const sphereCenterInObbClamped = Clamp(sphereCenterInObb, -obbHalfExt, obbHalfExt);
+  return NormSqr(sphereCenterInObbClamped - sphereCenterInObb) <= Sqr(sphere.radius);
 }
 
 template <typename ShapeT, MOCHI_CONCEPT(IsPrimitiveShape<ShapeT>)>

@@ -145,12 +145,13 @@ namespace mochi::krylov {
  * @param[in] statusCheck A functor called at each iteration to check the stop criteria.
  * @param[in] restartSize Size of Krylov space triggering a restart (default = no restart)
  * @param[in] verbosity Verbosity level for logging output.
+ * @param[in] initialGuessHint Indicates whether @p x is known to be zero. The zero hint skips the
+ * initial matrix-vector product and requires @p x to be exactly zero.
  * @param[in] dot The dot operator. Must also handle a matrix-vector operation.
  * @param[in] vectorFactory Factory to create vectors of a given type.
  *
- * @return Linear solver status. Contains the number of iterations and the achieved absolute and
- * relative residuals. "iterMax+1" is used to indicate that the maximum number of iterations was
- * reached without convergence.
+ * @return Linear solver status. Contains the convergence status, number of iterations, and achieved
+ * absolute and relative residuals.
  *
  * @note It uses right preconditioning.
  * @note The norm used in the stop criteria is specified by the object 'statusCheck'.
@@ -173,6 +174,7 @@ LinearSolverStatus GMRes(
     StopCriterion statusCheck = {},
     int restartSize = 0,
     VerbosityLevel verbosity = VerbosityLevel::Warning,
+    InitialGuessHint initialGuessHint = InitialGuessHint::Unknown,
     Dot dot = {},
     VectorFactory vectorFactory = {}) {
   using namespace details;
@@ -185,6 +187,9 @@ LinearSolverStatus GMRes(
 
   int n = static_cast<int>(NumRows(x));
   MOCHI_ASSERT_VERBOSE(NumRows(x) == NumRows(rhs));
+  MOCHI_ASSERT_VERBOSE(
+      initialGuessHint != InitialGuessHint::Zero || dot(x, x) == 0,
+      "InitialGuessHint::Zero requires an exactly zero initial guess.");
 
   restartSize = Min(n, (restartSize <= 0) ? iterMax : restartSize, iterMax);
 
@@ -198,12 +203,17 @@ LinearSolverStatus GMRes(
   if (bNorm == 0) {
     SetZero(x);
     return LinearSolverStatus{
-        .numIterDone = 0, .residualNorm = 0.0, .relativeResidualNorm = 0.0, .converged = true};
+        .numIterDone = 0,
+        .residualNorm = 0.0,
+        .relativeResidualNorm = 0.0,
+        .convergence = LinearSolverConvergenceStatus::Converged};
   }
   statusCheck.SetScaling(bNorm);
 
-  Apply(A, x, Ap);
-  residual -= Ap;
+  if (initialGuessHint != InitialGuessHint::Zero) {
+    Apply(A, x, Ap);
+    residual -= Ap;
+  }
 
   auto resNorm = dot.Norm(residual);
   //--- when iter = 0, z and Ap are ignored
@@ -213,7 +223,8 @@ LinearSolverStatus GMRes(
         .numIterDone = 0,
         .residualNorm = static_cast<double>(resNorm),
         .relativeResidualNorm = static_cast<double>(resNorm / bNorm),
-        .converged = IsConverged(myStatus)};
+        .convergence = IsConverged(myStatus) ? LinearSolverConvergenceStatus::Converged
+                                             : LinearSolverConvergenceStatus::Diverged};
   }
 
   // Note that the vector `b` will be stored on the CPU
@@ -270,7 +281,8 @@ LinearSolverStatus GMRes(
           .numIterDone = totalIter,
           .residualNorm = statusCheck.GetLatestResidualNorm(),
           .relativeResidualNorm = statusCheck.GetLatestRelativeResidualNorm(),
-          .converged = IsConverged(myStatus)};
+          .convergence = IsConverged(myStatus) ? LinearSolverConvergenceStatus::Converged
+                                               : LinearSolverConvergenceStatus::Diverged};
     }
 
     if (normQ == 0)
@@ -285,7 +297,7 @@ LinearSolverStatus GMRes(
             .numIterDone = totalIter,
             .residualNorm = statusCheck.GetLatestResidualNorm(),
             .relativeResidualNorm = statusCheck.GetLatestRelativeResidualNorm(),
-            .converged = false};
+            .convergence = LinearSolverConvergenceStatus::Diverged};
       }
 
     Col(Q, iter) *= Scalar(1) / normQ;
@@ -311,10 +323,10 @@ LinearSolverStatus GMRes(
 
   details::SolveHessenbergSystem(iter - 1, H, b, prec, Q, z, Ap, x, vectorFactory);
   return LinearSolverStatus{
-      .numIterDone = iterMax + 1,
+      .numIterDone = iterMax,
       .residualNorm = Abs(b(iter - 1)),
       .relativeResidualNorm = Abs(b(iter - 1)) / bNorm,
-      .converged = false};
+      .convergence = LinearSolverConvergenceStatus::Stopped};
 }
 
 } // namespace mochi::krylov

@@ -3226,21 +3226,25 @@ class ContactParams:
     """Parameters for contact mechanics simulation.
 
     Note:
-        In contact between a colliding actor and a collider, the collider's contact
-        parameters (not the colliding actor's) are used. The exceptions are: - For
-        friction and dissipation coefficients (viscousFrictionCoefficient,
-        coulombFrictionCoefficient, normalViscousDampingCoefficient), the geometric
-        mean of the colliding and collider's coefficients is used. This disables
-        friction/dissipation if either of them does. - For penalty coefficient
-        (penaltyCoefficient) and friction velocity threshold (frictionFalloffVel),
-        the geometric mean of the colliding and collider's values is used, except if
-        the collider is static in which case the colliding's values are used.
+        For each field without an actor-pair override, contact between a colliding
+        actor and a collider uses the collider's contact parameter (not the
+        colliding actor's). The exceptions are: - For friction and dissipation
+        coefficients (viscousFrictionCoefficient, coulombFrictionCoefficient,
+        normalViscousDampingCoefficient), the geometric mean of the colliding and
+        collider's coefficients is used. This disables friction/dissipation if
+        either of them does. - For penalty coefficient (penaltyCoefficient) and
+        friction velocity threshold (frictionFalloffVel), the geometric mean of the
+        colliding and collider's values is used, except if the collider is static in
+        which case the colliding's values are used.
+
+    See Also:
+        :meth:`~superdex.physics.Scene.set_contact_pair_params_override`
     """
     penalty_coefficient: float
     """Stiffness of the contact penalty force [Pa/m].
 
     Note:
-        Must be strictly positive.
+        Must be finite and strictly positive.
 
     Note:
         Higher penalties create stiffer contacts and reduce penetration.
@@ -3254,9 +3258,10 @@ class ContactParams:
         coefficient may need to be increased/decreased accordingly.
 
     Note:
-        The penalty coefficient used in a collision is the geometric mean of the
-        colliding and collider's coefficients. The exception is if the collider is
-        static, in which case the colliding's penalty is used.
+        Without an actor-pair override for this field, the value used in a collision
+        is the geometric mean of the colliding and collider's coefficients. The
+        exception is if the collider is static, in which case the colliding's
+        penalty is used.
 
     Note:
         The penalty coefficient is additionally scaled by length-scale corrections
@@ -3272,7 +3277,7 @@ class ContactParams:
     :attr:`~superdex.physics.ContactParams.penalty_smoothing_half_distance`).
 
     Note:
-        Must not be negative.
+        Must be finite and not negative.
 
     Note:
         Larger smoothing distances improve stability but may increase penetration.
@@ -3289,7 +3294,7 @@ class ContactParams:
     :attr:`~superdex.physics.ContactParams.penalty_smoothing_half_distance`).
 
     Note:
-        Negative values are legal.
+        Must be finite. Negative values are legal.
 
     Note:
         If the colliding actor has :class:`NONE <superdex.physics.ColliderType>` or
@@ -3308,7 +3313,7 @@ class ContactParams:
     :class:`POINT_CLOUD <superdex.physics.ColliderType>`.
 
     Note:
-        Must not be negative.
+        Must be finite and not negative.
 
     Note:
         Extra padding is useful to avoid tunneling through thin actors when the
@@ -3336,8 +3341,8 @@ class ContactParams:
     collider when penetration is large.
 
     Note:
-        Valid range is [-1, 1]. -1 allows contact only for perfectly opposing
-        normals, 1 allows all contacts.
+        Must be in [-1, 1]. -1 allows contact only for perfectly opposing normals, 1
+        allows all contacts.
 
     Note:
         For co-dimensional colliding actors with ambiguous normals, contact is not
@@ -3351,7 +3356,7 @@ class ContactParams:
         Friction force is proportional to contact force and tangential velocity.
 
     Note:
-        Must not be negative.
+        Must be finite and not negative.
 
     Note:
         Both viscousFrictionCoefficient and
@@ -3359,24 +3364,24 @@ class ContactParams:
         >0.
 
     Note:
-        The viscous friction coefficient used in a collision is the geometric mean
-        of the colliding and collider's coefficients. This disables viscous friction
-        if either of them does.
+        Without an actor-pair override for this field, the value used in a collision
+        is the geometric mean of the colliding and collider's coefficients. This
+        disables viscous friction if either of them does.
     """
     coulomb_friction_coefficient: float
     """Coulomb friction coefficient (dimensionless).
 
     Note:
-        Must not be negative.
+        Must be finite and not negative.
 
     Note:
         Both :attr:`~superdex.physics.ContactParams.viscous_friction_coefficient`
         and coulombFrictionCoefficient can be >0.
 
     Note:
-        The Coulomb friction coefficient used in a collision is the geometric mean
-        of the colliding and collider's coefficients. This disables Coulomb friction
-        if either of them does.
+        Without an actor-pair override for this field, the value used in a collision
+        is the geometric mean of the colliding and collider's coefficients. This
+        disables Coulomb friction if either of them does.
     """
     friction_falloff_vel: float
     """Velocity threshold for Coulomb friction smoothing [m/s].
@@ -3388,17 +3393,18 @@ class ContactParams:
     regularization scale.
 
     Note:
-        Must not be negative. For CinfRegularized, a value of zero is clamped
-        internally to avoid numerical issues.
+        Must be finite and not negative. For CinfRegularized, a value of zero is
+        clamped internally to avoid numerical issues.
 
     Note:
         Smaller velocity thresholds improve physical accuracy but may degrade
         stability.
 
     Note:
-        The velocity threshold used in a collision is the geometric mean of the
-        colliding and collider's thresholds. The exception is if the collider is
-        static, in which case the colliding's threshold is used.
+        Without an actor-pair override for this field, the value used in a collision
+        is the geometric mean of the colliding and collider's thresholds. The
+        exception is if the collider is static, in which case the colliding's
+        threshold is used.
 
     Note:
         Soft bodies: the regularized stick stiffness per contact sample, ``2 mu N /
@@ -3418,12 +3424,12 @@ class ContactParams:
     in the normal direction instead of tangentially.
 
     Note:
-        Must not be negative.
+        Must be finite and not negative.
 
     Note:
-        The normal viscous damping coefficient used in a collision is the geometric
-        mean of the colliding and collider's coefficients. This disables normal
-        damping if either of them does.
+        Without an actor-pair override for this field, the value used in a collision
+        is the geometric mean of the colliding and collider's coefficients. This
+        disables normal damping if either of them does.
 
     Note:
         The resulting coefficient of restitution (CoR) is velocity-dependent. For a
@@ -3448,6 +3454,9 @@ class ContactParams:
     culling.
 
     Note:
+        Must be finite.
+
+    Note:
         Useful, for example, with approximate SDFs (e.g., deep flow map) to
         compensate for potentially overestimating the true distance.
 
@@ -3459,6 +3468,9 @@ class ContactParams:
     """[Experimental] Object scale relative to default size (dimensionless). Used by
     deep flow only.
 
+    Note:
+        Must be finite and strictly positive.
+
     Warning:
         Deep flow is an experimental feature. It may be changed or removed in the
         future. Use at your own risk.
@@ -3469,6 +3481,9 @@ class ContactParams:
     manifold, such as a rod or point mass. E.g., the penalty is scaled by this value
     if the colliding body lumps contact tractions on a line, or this value squared
     if lumping contact forces on a point.
+
+    Note:
+        Must be finite and strictly positive.
 
     Note:
         This value is not used in the most common case, where contact traction is
@@ -4964,6 +4979,61 @@ class BoundarySubsamplingParams:
         self,
         subsampling_density: float = ...,
         strategy: BoundarySubsamplingStrategy | int = ...,
+    ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
+
+class ContactPairParamsOverride:
+    """Optional contact-response parameter replacements for an unordered actor pair.
+
+    Each present field replaces the value normally combined from the two actors. An
+    absent field retains the existing combination rule.
+
+    Note:
+        Present fields have the same validity requirements as the corresponding
+        :class:`~superdex.physics.ContactParams` fields. A present zero is a value
+        subject to those requirements, not an absent field.
+    """
+    penalty_coefficient: Optional[float]
+    """Pair penalty coefficient [Pa/m] before role-dependent dimensional corrections.
+
+    See Also:
+        :attr:`~superdex.physics.ContactParams.penalty_coefficient`
+    """
+    friction_falloff_vel: Optional[float]
+    """Friction falloff velocity [m/s].
+
+    See Also:
+        :attr:`~superdex.physics.ContactParams.friction_falloff_vel`
+    """
+    viscous_friction_coefficient: Optional[float]
+    """Pair viscous friction coefficient [s/m].
+
+    See Also:
+        :attr:`~superdex.physics.ContactParams.viscous_friction_coefficient`
+    """
+    coulomb_friction_coefficient: Optional[float]
+    """Pair Coulomb friction coefficient.
+
+    See Also:
+        :attr:`~superdex.physics.ContactParams.coulomb_friction_coefficient`
+    """
+    normal_viscous_damping_coefficient: Optional[float]
+    """Pair normal viscous damping coefficient [s/m].
+
+    See Also:
+        :attr:`~superdex.physics.ContactParams.normal_viscous_damping_coefficient`
+    """
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(
+        self,
+        penalty_coefficient: Optional[float] = ...,
+        friction_falloff_vel: Optional[float] = ...,
+        viscous_friction_coefficient: Optional[float] = ...,
+        coulomb_friction_coefficient: Optional[float] = ...,
+        normal_viscous_damping_coefficient: Optional[float] = ...,
     ) -> None: ...
     def __eq__(self, other: object) -> bool: ...
     def __ne__(self, other: object) -> bool: ...
@@ -9134,6 +9204,9 @@ class Actor:
 
         Raises:
             :class:`~superdex.physics.Error`: If an error occurs.
+
+        Note:
+            Reports an error if the actor has no contact parameters.
         """
     def set_contact_params(self, params: ContactParams) -> None:
         """Set the contact parameters of the actor.
@@ -11046,6 +11119,11 @@ class Actor:
         Note:
             Only applicable to articulated actors.
 
+        Note:
+            These constraints are owned by the articulated actor and cannot be destroyed
+            directly with :meth:`~superdex.physics.Scene.destroy_constraint`. They are
+            destroyed with the actor.
+
         See Also:
             :meth:`~superdex.physics.Actor.get_articulated_dof_limits`
         """
@@ -11619,6 +11697,13 @@ class Actor:
 
         Note:
             Only applicable to articulated actors with a pose controller.
+
+        Note:
+            These constraints are owned by the pose controller and cannot be destroyed
+            individually with :meth:`~superdex.physics.Scene.destroy_constraint`.
+            Removing the pose controller with
+            :meth:`~superdex.physics.Actor.remove_articulated_pose_controller` destroys
+            all of its constraints.
 
         See Also:
             :class:`~superdex.physics.PoseConstraintInfo`,
@@ -13475,6 +13560,13 @@ class Scene:
             If ``constraint`` is None, this function has no effect.
 
         Note:
+            Use this function to destroy constraints created through the scene's
+            constraint-creation APIs. It has no effect on constraints created
+            automatically while creating or configuring an actor, such as joint-limit,
+            cycle-joint, or pose-controller constraints. To remove such a constraint,
+            remove the corresponding actor feature, if supported, or destroy the actor.
+
+        Note:
             After the constraint is destroyed, do not use the pointer or its handle.
 
         Warning:
@@ -13497,6 +13589,13 @@ class Scene:
         Note:
             An invalid handle or one that does not currently identify a constraint in
             the scene has no effect.
+
+        Note:
+            Use this function to destroy constraints created through the scene's
+            constraint-creation APIs. It has no effect on constraints created
+            automatically while creating or configuring an actor, such as joint-limit,
+            cycle-joint, or pose-controller constraints. To remove such a constraint,
+            remove the corresponding actor feature, if supported, or destroy the actor.
 
         Note:
             After the constraint is destroyed, do not use its handle.
@@ -13816,6 +13915,100 @@ class Scene:
         See Also:
             :meth:`~superdex.physics.Scene.enable_actor_contact_asymmetric`,
             :meth:`~superdex.physics.Scene.enable_layer_contact_symmetric`
+        """
+    def set_contact_pair_params_override(
+        self,
+        actor_a: ActorHandle,
+        actor_b: ActorHandle,
+        params_override: ContactPairParamsOverride,
+    ) -> None:
+        """Set contact parameter overrides for an unordered actor pair.
+
+        Args:
+            actor_a (ActorHandle): Handle of the first actor.
+            actor_b (ActorHandle): Handle of the second actor.
+            params_override (ContactPairParamsOverride): Parameter override with at
+                least one present field. This replaces any existing override for the
+                pair; absent fields use the normal actor-parameter combination.
+
+        Raises:
+            :class:`~superdex.physics.Error`: If an error occurs.
+
+        Note:
+            Both actors must have contact parameters.
+
+        Note:
+            The exact actors are used; nested actors are not included automatically.
+
+        See Also:
+            :meth:`~superdex.physics.Scene.clear_contact_pair_params_override`,
+            :meth:`~superdex.physics.Scene.has_contact_pair_params_override`,
+            :meth:`~superdex.physics.Scene.get_contact_pair_params_override`
+        """
+    def clear_contact_pair_params_override(
+        self,
+        actor_a: ActorHandle,
+        actor_b: ActorHandle,
+    ) -> None:
+        """Clear contact parameter overrides for an unordered actor pair.
+
+        Args:
+            actor_a (ActorHandle): Handle of the first actor.
+            actor_b (ActorHandle): Handle of the second actor.
+
+        Raises:
+            :class:`~superdex.physics.Error`: If an error occurs.
+
+        Note:
+            Clearing a valid pair without an override succeeds without changing the
+            scene.
+
+        See Also:
+            :meth:`~superdex.physics.Scene.set_contact_pair_params_override`
+        """
+    def has_contact_pair_params_override(
+        self,
+        actor_a: ActorHandle,
+        actor_b: ActorHandle,
+    ) -> bool:
+        """Check whether the exact unordered actor pair has a parameter override.
+
+        Args:
+            actor_a (ActorHandle): Handle of the first actor.
+            actor_b (ActorHandle): Handle of the second actor.
+
+        Returns:
+            True if the exact pair has a stored override.
+
+        Raises:
+            :class:`~superdex.physics.Error`: If an error occurs.
+
+        See Also:
+            :meth:`~superdex.physics.Scene.get_contact_pair_params_override`
+        """
+    def get_contact_pair_params_override(
+        self,
+        actor_a: ActorHandle,
+        actor_b: ActorHandle,
+    ) -> ContactPairParamsOverride:
+        """Get the parameter override for the exact unordered actor pair.
+
+        Args:
+            actor_a (ActorHandle): Handle of the first actor.
+            actor_b (ActorHandle): Handle of the second actor.
+
+        Returns:
+            The complete stored override.
+
+        Raises:
+            :class:`~superdex.physics.Error`: If an error occurs.
+
+        Note:
+            Reports an error when a valid pair has no stored override.
+
+        See Also:
+            :meth:`~superdex.physics.Scene.set_contact_pair_params_override`,
+            :meth:`~superdex.physics.Scene.has_contact_pair_params_override`
         """
     def register_pre_step_callback(
         self,
@@ -14509,7 +14702,7 @@ constraints.
     ...
 def uses_double_precision() -> bool:
     '''Return whether the loaded native library uses double-precision floating-point
-values.'''
+(FP64) values.'''
     ...
 def uses_hdf5() -> bool:
     '''Return whether the loaded native library includes HDF5 support.'''

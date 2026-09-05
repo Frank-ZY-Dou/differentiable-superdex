@@ -1159,7 +1159,7 @@ void mochi::soft::UpdateSoftMass(
   deformable::ComputeLumpedMassMatrix(sparsity, outMassMatrix, outLumpedMass);
 }
 
-MOCHI_API void mochi::soft::RecenterSolutionUsingRigidTransformEval(
+void mochi::soft::RecenterSolutionUsingRigidTransformEval(
     ecs::RequiredTag<TagSoftActor>,
     ecs::Excluded<TagRomActor>,
     CRecenteringParams const& params,
@@ -1628,7 +1628,7 @@ void mochi::soft::ComputeTransformAtEvalPoint(
   }
 }
 
-MOCHI_API void soft::UpdateRigidVelocity(
+void soft::UpdateRigidVelocity(
     ecs::Included<TagSoftActor>,
     ecs::Excluded<TagRomActor>,
     ecs::CtxGlobal<CSceneTime const> time,

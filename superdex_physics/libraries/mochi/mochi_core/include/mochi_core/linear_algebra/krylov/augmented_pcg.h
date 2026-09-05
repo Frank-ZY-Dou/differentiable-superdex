@@ -57,6 +57,9 @@ namespace mochi::krylov {
  * @param[in] abortIfNotSpd Boolean to abort the solve if the matrix is detected not to be symmetric
  * positive definite. Default is false.
  * @param[in] verbosity Verbosity level for logging output.
+ * @param[in] initialGuessHint Indicates whether @p x is known to be zero. The zero hint skips the
+ * initial matrix-vector product when no recycling subspace is available and requires @p x to be
+ * exactly zero.
  * @param[in] projectEveryIteration Controls the projection strategy in the augmented
  * preconditioner. When true, projects the residual at every iteration, maintaining consistent
  * preconditioner behavior. When false, alternates between projecting and not projecting
@@ -66,9 +69,8 @@ namespace mochi::krylov {
  * @param[in] dot The dot operator. Must also handle matrix-vector operations.
  * @param[in] vectorFactory Factory to create vectors of a given type.
  *
- * @return Linear solver status. Contains the number of iterations and the achieved absolute and
- * relative residuals. "maxIter+1" is used to indicate that the maximum number of iterations was
- * reached without convergence.
+ * @return Linear solver status. Contains the convergence status, number of iterations, and achieved
+ * absolute and relative residuals.
  *
  * @details It implements Algorithm 3.6 in Y. Saad, M. Yeung, J. Erhel, and F. Guyomarc'H, "A
  * deflated version of the conjugate gradient algorithm", SISC, 21(5), pp. 1909-1926 (2000).
@@ -104,6 +106,7 @@ LinearSolverStatus AugmentedPCG(
     RecyclingStatusType& recyclingStatus,
     bool abortIfNotSpd = false,
     VerbosityLevel verbosity = VerbosityLevel::Warning,
+    InitialGuessHint initialGuessHint = InitialGuessHint::Unknown,
     bool projectEveryIteration = true,
     Dot dot = {},
     VectorFactory vectorFactory = {}) {
@@ -139,9 +142,13 @@ LinearSolverStatus AugmentedPCG(
             abortIfNotSpd,
             verbosity,
             /*usePolakRibiere*/ true,
+            initialGuessHint,
             dot,
             vectorFactory);
   } else {
+    MOCHI_ASSERT_VERBOSE(
+        initialGuessHint != InitialGuessHint::Zero || dot(x, x) == 0,
+        "InitialGuessHint::Zero requires an exactly zero initial guess.");
     MOCHI_ASSERT_VERBOSE(
         (recyclingStatus.V.Rows() == A.Cols()) && (recyclingStatus.AV.Rows() == A.Rows()) &&
         (recyclingStatus.V.Cols() >= recyclingSubspaceSize) &&
@@ -190,7 +197,9 @@ LinearSolverStatus AugmentedPCG(
     //--- Update the initial guess.
     ColumnVector<Scalar> Qdot(Qn.Cols(), 1);
     Qdot = (Qn.Transpose() * b);
-    Qdot -= (AQn.Transpose() * x);
+    if (initialGuessHint != InitialGuessHint::Zero) {
+      Qdot -= (AQn.Transpose() * x);
+    }
     invQtAQ.LeftSolveInPlace(Qdot);
     x += Qn * Qdot;
     //--- Invert QntQn.
@@ -217,7 +226,6 @@ LinearSolverStatus AugmentedPCG(
       //--- Update Px.
       Px -= Qn * Qdot;
     };
-    //--- Solve with PCG and the augmented preconditioner.
     status =
         PCG(A,
             b,
@@ -228,6 +236,8 @@ LinearSolverStatus AugmentedPCG(
             abortIfNotSpd,
             verbosity,
             /*usePolakRibiere*/ true,
+            // Projection can make x nonzero even if it was initially zero.
+            InitialGuessHint::Unknown,
             dot,
             vectorFactory);
   }

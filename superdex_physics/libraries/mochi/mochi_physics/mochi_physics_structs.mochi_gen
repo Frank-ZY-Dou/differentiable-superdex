@@ -1,3 +1,17 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 // @brief Simulation solver configuration parameters.
 struct SolverParams [equality] {
 
@@ -61,6 +75,41 @@ struct BoundarySubsamplingParams [equality] {
 
   // @brief Strategy for determining which sample points to use.
   BoundarySubsamplingStrategy strategy = UniformProbability;
+}
+
+// @brief Optional contact-response parameter replacements for an unordered actor pair.
+//
+// @details Each present field replaces the value normally combined from the two actors. An absent
+// field retains the existing combination rule.
+//
+// @note Present fields have the same validity requirements as the corresponding @ref ContactParams
+// fields. A present zero is a value subject to those requirements, not an absent field.
+struct ContactPairParamsOverride [equality] {
+
+  // @brief Pair penalty coefficient [Pa/m] before role-dependent dimensional corrections.
+  //
+  // @see ContactParams::penaltyCoefficient
+  Optional<real> penaltyCoefficient [units(Pa/m)];
+
+  // @brief Friction falloff velocity [m/s].
+  //
+  // @see ContactParams::frictionFalloffVel
+  Optional<real> frictionFalloffVel [units(m/s)];
+
+  // @brief Pair viscous friction coefficient [s/m].
+  //
+  // @see ContactParams::viscousFrictionCoefficient
+  Optional<real> viscousFrictionCoefficient [units(s/m)];
+
+  // @brief Pair Coulomb friction coefficient.
+  //
+  // @see ContactParams::coulombFrictionCoefficient
+  Optional<real> coulombFrictionCoefficient;
+
+  // @brief Pair normal viscous damping coefficient [s/m].
+  //
+  // @see ContactParams::normalViscousDampingCoefficient
+  Optional<real> normalViscousDampingCoefficient [units(s/m)];
 }
 
 // @brief Information describing an articulated shape's kinematic structure.

@@ -15,25 +15,31 @@
  */
 
 #include <mochi_core/geometry/geometry_utils.h>
+#include <mochi_core/geometry/grid_sdf.h>
+#include <mochi_core/geometry/sdf_bv.h>
+#include <mochi_core/geometry/tetrahedral_mesh.h>
+#include <mochi_core/geometry/triangular_mesh.h>
 #include <mochi_core/test/mochi_test_helpers.h>
 #include <mochi_core/utils/basic_utils.h>
+#include <mochi_core/utils/dynamic_array.h>
 #include <mochi_core/utils/nd_array.h>
+#include <mochi_core/utils/rand_utils.h>
 #include <mochi_core/utils/simd.h>
 #include <mochi_core/utils/span.h>
 #include <mochi_core/utils/vmatrix.h>
 
-#include <mochi_core/geometry/grid_sdf.h>
-#include <mochi_core/geometry/tetrahedral_mesh.h>
-#include <mochi_core/geometry/triangular_mesh.h>
-#include <mochi_core/utils/rand_utils.h>
-
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <limits>
+#include <memory>
+#include <numeric>
 #include <tuple>
+#include <type_traits>
 #include <variant>
 
 #include "data/obb_test_data.h"
@@ -129,6 +135,15 @@ static void ExpectSphere(Real3 const& expectedCenter, real expectedRadius, Spher
   EXPECT_NEAR_EQ(ToSimd(expectedCenter, 1_r), actual.VGetCenter());
   EXPECT_NEAR_EQ(expectedRadius, actual.GetRadius());
   EXPECT_NEAR_EQ(Sphere(expectedCenter, expectedRadius), actual);
+}
+
+static void ExpectSphereContainsPoints(Sphere const& sphere, Span<Real3 const> points) {
+  for (size_t i = 0; i < points.size(); ++i) {
+    Real3 const delta = points[i] - sphere.GetCenter();
+    real const distSqr = NormSqr(delta);
+    EXPECT_LE(distSqr, Sqr(sphere.GetRadius())) << "Point index: " << i;
+    EXPECT_LE(Sqrt(distSqr), sphere.GetRadius()) << "Point index: " << i;
+  }
 }
 
 static void ExpectPlane(Real3 const& expectedNorm, real expectedDist, Plane const& actual) {
@@ -245,9 +260,11 @@ TEST(Aabb, CalcAabb) {
 
   // Now test a larger number of points and vary the location of the min and max values.
   {
-    std::vector<Real3> coords(50);
+    DynamicArray<Real3> coords(50);
     auto coordsSpan = MakeConstSpan(coords);
     for (int sz = 2; sz < isize(coords); ++sz) {
+      DynamicArray<int> indices(sz);
+      std::iota(indices.begin(), indices.end(), 0);
       for (int i = 0; i < sz; ++i) {
         for (int j = 0; j < 3; ++j) {
           // Place the minimum value here
@@ -255,12 +272,16 @@ TEST(Aabb, CalcAabb) {
           Aabb result = CalcAabb(coordsSpan.subspan(0, (size_t)sz));
           EXPECT_EQ(coords[i], result.GetMin());
           EXPECT_EQ(Real3{}, result.GetMax());
+          EXPECT_EQ(
+              result, CalcAabbWithSortedIndices(coordsSpan, MakeConstSpan(indices))); // Equivalent
 
           // Place the maximum value here
           coords[i][j] = 1_r;
           result = CalcAabb(coordsSpan.subspan(0, (size_t)sz));
           EXPECT_EQ(Real3{}, result.GetMin());
           EXPECT_EQ(coords[i], result.GetMax());
+          EXPECT_EQ(
+              result, CalcAabbWithSortedIndices(coordsSpan, MakeConstSpan(indices))); // Equivalent
 
           // Reset
           coords[i][j] = 0_r;
@@ -268,6 +289,34 @@ TEST(Aabb, CalcAabb) {
       }
     }
   }
+}
+
+TEST(Aabb, CalcAabbWithSortedIndices) {
+  Real3 const coords[] = {
+      Real3{1.0_r, 2.0_r, 3.0_r},
+      Real3{1.1_r, 1.9_r, 3.1_r},
+      Real3{0.9_r, 2.1_r, 2.9_r},
+      Real3{1.2_r, 1.8_r, 3.2_r},
+  };
+
+  int const allIndices[] = {0, 1, 2, 3};
+  Aabb bounds = CalcAabbWithSortedIndices(MakeSpan(coords), Span(allIndices, 0_uz));
+  EXPECT_NEAR_EQ(Real3(0.0_r, 0.0_r, 0.0_r), bounds.GetMin());
+  EXPECT_NEAR_EQ(Real3(0.0_r, 0.0_r, 0.0_r), bounds.GetMax());
+
+  int const oneIndex[] = {2};
+  bounds = CalcAabbWithSortedIndices(MakeSpan(coords), MakeSpan(oneIndex));
+  EXPECT_NEAR_EQ(Real3(0.9_r, 2.1_r, 2.9_r), bounds.GetMin());
+  EXPECT_NEAR_EQ(Real3(0.9_r, 2.1_r, 2.9_r), bounds.GetMax());
+
+  int const twoIndices[] = {1, 3};
+  bounds = CalcAabbWithSortedIndices(MakeSpan(coords), MakeSpan(twoIndices));
+  EXPECT_NEAR_EQ(Real3(1.1_r, 1.8_r, 3.1_r), bounds.GetMin());
+  EXPECT_NEAR_EQ(Real3(1.2_r, 1.9_r, 3.2_r), bounds.GetMax());
+
+  bounds = CalcAabbWithSortedIndices(MakeSpan(coords), MakeSpan(allIndices));
+  EXPECT_NEAR_EQ(Real3(0.9_r, 1.8_r, 2.9_r), bounds.GetMin());
+  EXPECT_NEAR_EQ(Real3(1.2_r, 2.1_r, 3.2_r), bounds.GetMax());
 }
 
 TEST(Aabb, CalcAabbWithDisplacements) {
@@ -309,31 +358,17 @@ TEST(Aabb, CalcAabbWithDisplacements) {
     bounds = CalcAabbWithDisplacements(Span(coords, 4_uz), Span(displacements, 4_uz));
     EXPECT_NEAR_EQ(Real3(11.0_r, 22.0_r, 33.0_r), bounds.GetMin());
     EXPECT_NEAR_EQ(Real3(101.2_r, 201.8_r, 303.2_r), bounds.GetMax());
-
-    // CalcAabbWithSortedIndices (and displacements)
-    {
-      int indices[] = {0, 2};
-      bounds =
-          CalcAabbWithSortedIndices(MakeSpan(coords), MakeSpan(displacements), MakeSpan(indices));
-      EXPECT_NEAR_EQ(Real3(11.0_r, 22.0_r, 33.0_r), bounds.GetMin());
-      EXPECT_NEAR_EQ(Real3(70.9_r, 82.1_r, 92.9_r), bounds.GetMax());
-    }
-    {
-      int indices[] = {1, 3};
-      bounds =
-          CalcAabbWithSortedIndices(MakeSpan(coords), MakeSpan(displacements), MakeSpan(indices));
-      EXPECT_NEAR_EQ(Real3(41.1_r, 51.9_r, 63.1_r), bounds.GetMin());
-      EXPECT_NEAR_EQ(Real3(101.2_r, 201.8_r, 303.2_r), bounds.GetMax());
-    }
   }
 
   // Now test a larger number of points and vary the location of the min and max values.
   {
-    std::vector<Real3> coords(50);
-    std::vector<Real3> displacements(50);
+    DynamicArray<Real3> coords(50);
+    DynamicArray<Real3> displacements(50);
     auto coordsSpan = MakeConstSpan(coords);
     auto dispSpan = MakeConstSpan(displacements);
     for (int sz = 2; sz < isize(coords); ++sz) {
+      DynamicArray<int> indices(sz);
+      std::iota(indices.begin(), indices.end(), 0);
       for (int i = 0; i < sz; ++i) {
         for (int j = 0; j < 3; ++j) {
           // Place the minimum value here
@@ -343,6 +378,10 @@ TEST(Aabb, CalcAabbWithDisplacements) {
               coordsSpan.subspan(0, (size_t)sz), dispSpan.subspan(0, (size_t)sz));
           EXPECT_EQ(coords[i] + displacements[i], result.GetMin());
           EXPECT_EQ(Real3{}, result.GetMax());
+          EXPECT_EQ(
+              result,
+              CalcAabbWithDisplacementsAndSortedIndices(
+                  coordsSpan, MakeConstSpan(displacements), MakeConstSpan(indices))); // Equivalent
 
           // Place the maximum value here
           coords[i][j] = 1_r;
@@ -350,6 +389,10 @@ TEST(Aabb, CalcAabbWithDisplacements) {
               coordsSpan.subspan(0, (size_t)sz), dispSpan.subspan(0, (size_t)sz));
           EXPECT_EQ(Real3{}, result.GetMin());
           EXPECT_EQ(coords[i] + displacements[i], result.GetMax());
+          EXPECT_EQ(
+              result,
+              CalcAabbWithDisplacementsAndSortedIndices(
+                  coordsSpan, MakeConstSpan(displacements), MakeConstSpan(indices))); // Equivalent
 
           // Reset
           coords[i][j] = 0_r;
@@ -357,6 +400,37 @@ TEST(Aabb, CalcAabbWithDisplacements) {
         }
       }
     }
+  }
+}
+
+TEST(Aabb, CalcAabbWithDisplacementsAndSortedIndices) {
+  Real3 const coords[] = {
+      Real3{1.0_r, 2.0_r, 3.0_r},
+      Real3{1.1_r, 1.9_r, 3.1_r},
+      Real3{0.9_r, 2.1_r, 2.9_r},
+      Real3{1.2_r, 1.8_r, 3.2_r},
+  };
+  Real3 const displacements[] = {
+      Real3{10.0_r, 20.0_r, 30.0_r},
+      Real3{40.0_r, 50.0_r, 60.0_r},
+      Real3{70.0_r, 80.0_r, 90.0_r},
+      Real3{100.0_r, 200.0_r, 300.0_r},
+  };
+
+  {
+    int indices[] = {0, 2};
+    Aabb bounds = CalcAabbWithDisplacementsAndSortedIndices(
+        MakeSpan(coords), MakeSpan(displacements), MakeSpan(indices));
+    EXPECT_NEAR_EQ(Real3(11.0_r, 22.0_r, 33.0_r), bounds.GetMin());
+    EXPECT_NEAR_EQ(Real3(70.9_r, 82.1_r, 92.9_r), bounds.GetMax());
+  }
+
+  {
+    int indices[] = {1, 3};
+    Aabb bounds = CalcAabbWithDisplacementsAndSortedIndices(
+        MakeSpan(coords), MakeSpan(displacements), MakeSpan(indices));
+    EXPECT_NEAR_EQ(Real3(41.1_r, 51.9_r, 63.1_r), bounds.GetMin());
+    EXPECT_NEAR_EQ(Real3(101.2_r, 201.8_r, 303.2_r), bounds.GetMax());
   }
 }
 
@@ -1385,6 +1459,263 @@ TEST(Sphere, ContainsPoint) {
   }
 }
 
+TEST(GeometryUtils, CalcBoundingSpherePreservesExtremeSingletons) {
+  for (real coordinate :
+       {std::numeric_limits<real>::denorm_min(), std::numeric_limits<real>::max()}) {
+    std::array const points{Real3{coordinate, coordinate, 0_r}};
+    std::array const indices{0};
+    Sphere const expected{points[0], 0_r};
+
+    for (BoundingSphereAlgorithm algorithm :
+         {BoundingSphereAlgorithm::Fastest,
+          BoundingSphereAlgorithm::Fast,
+          BoundingSphereAlgorithm::Best}) {
+      SCOPED_TRACE(static_cast<int>(algorithm));
+      EXPECT_EQ(expected, CalcBoundingSphere(points, algorithm));
+      EXPECT_EQ(expected, CalcBoundingSphereIndexed(points, indices, algorithm));
+    }
+  }
+}
+
+TEST(GeometryUtils, CalcBoundingSphereFastestContainsAdjacentValues) {
+  real constexpr kLower = 1_r;
+  real const upper = std::nextafter(kLower, std::numeric_limits<real>::infinity());
+  // The computed midpoint rounds to kLower, leaving the upper endpoint a full ULP away.
+  std::array const points{Real3{kLower, 0_r, 0_r}, Real3{upper, 0_r, 0_r}};
+  std::array const indices{0, 1};
+
+  Sphere const sphere = CalcBoundingSphere(points, BoundingSphereAlgorithm::Fastest);
+  Sphere const indexedSphere =
+      CalcBoundingSphereIndexed(points, indices, BoundingSphereAlgorithm::Fastest);
+
+  ExpectSphereContainsPoints(sphere, points);
+  ExpectSphereContainsPoints(indexedSphere, points);
+}
+
+template <size_t Count>
+static void ExpectBestBoundingSphere(
+    std::array<Real3, Count> const& points,
+    Real3 const& expectedCenter,
+    real expectedRadius) {
+  Sphere const sphere = CalcBoundingSphere(
+      Span<Real3 const>{points.data(), points.size()}, BoundingSphereAlgorithm::Best);
+  real const tolerance = 256_r * std::numeric_limits<real>::epsilon() * Max(1_r, expectedRadius);
+  EXPECT_NEAR_TOL(expectedCenter, sphere.GetCenter(), tolerance);
+  EXPECT_NEAR_TOL(expectedRadius, sphere.GetRadius(), tolerance);
+  ExpectSphereContainsPoints(sphere, Span<Real3 const>{points.data(), points.size()});
+}
+
+TEST(GeometryUtils, CalcBoundingSphereBestKnownSolutions) {
+  ExpectBestBoundingSphere(std::array<Real3, 0>{}, Real3{}, 0_r);
+  ExpectBestBoundingSphere(
+      std::array{Real3{1_r, -2_r, 3_r}, Real3{1_r, -2_r, 3_r}}, Real3{1_r, -2_r, 3_r}, 0_r);
+  ExpectBestBoundingSphere(
+      std::array{Real3{1_r, -2_r, 3_r}, Real3{5_r, 2_r, -1_r}}, Real3{3_r, 0_r, 1_r}, Sqrt(12_r));
+
+  ExpectBestBoundingSphere(
+      std::array{
+          Real3{1_r, -2_r, 3_r},
+          Real3{5_r, -2_r, 3_r},
+          Real3{2_r, -2_r, 3_r},
+          Real3{4_r, -2_r, 3_r},
+          Real3{1_r, -2_r, 3_r}},
+      Real3{3_r, -2_r, 3_r},
+      2_r);
+
+  real const sqrt3 = Sqrt(3_r);
+  ExpectBestBoundingSphere(
+      std::array{Real3{2_r, 0_r, 0_r}, Real3{-1_r, sqrt3, 0_r}, Real3{-1_r, -sqrt3, 0_r}},
+      Real3{},
+      2_r);
+  ExpectBestBoundingSphere(
+      std::array{Real3{-2_r, 0_r, 0_r}, Real3{2_r, 0_r, 0_r}, Real3{0_r, 1_r, 0_r}}, Real3{}, 2_r);
+
+  ExpectBestBoundingSphere(
+      std::array{
+          Real3{1_r, -2_r, 4_r},
+          Real3{3_r, -2_r, 4_r},
+          Real3{3_r, 0_r, 4_r},
+          Real3{1_r, 0_r, 4_r},
+          Real3{2_r, -1_r, 4_r},
+          Real3{1_r, -2_r, 4_r}},
+      Real3{2_r, -1_r, 4_r},
+      Sqrt(2_r));
+
+  Real3 const tetrahedronCenter{2_r, -3_r, 5_r};
+  ExpectBestBoundingSphere(
+      std::array{
+          tetrahedronCenter + Real3{1_r, 1_r, 1_r},
+          tetrahedronCenter + Real3{1_r, -1_r, -1_r},
+          tetrahedronCenter + Real3{-1_r, 1_r, -1_r},
+          tetrahedronCenter + Real3{-1_r, -1_r, 1_r},
+          tetrahedronCenter},
+      tetrahedronCenter,
+      Sqrt(3_r));
+
+  {
+    SCOPED_TRACE("Asymmetric four-point support");
+    real const invSqrt14 = 1_r / Sqrt(14_r);
+    ExpectBestBoundingSphere(
+        std::array{
+            tetrahedronCenter + Real3{5_r, 0_r, 0_r},
+            tetrahedronCenter + Real3{0_r, 5_r, 0_r},
+            tetrahedronCenter + Real3{0_r, 0_r, 5_r},
+            tetrahedronCenter + Real3{-5_r, -10_r, -15_r} * invSqrt14},
+        tetrahedronCenter,
+        5_r);
+  }
+
+  {
+    SCOPED_TRACE("Nearly coplanar four-point support");
+    real constexpr kFlatness = 0.01_r;
+    ExpectBestBoundingSphere(
+        std::array{
+            Real3{1_r, 1_r, kFlatness},
+            Real3{1_r, -1_r, -kFlatness},
+            Real3{-1_r, 1_r, -kFlatness},
+            Real3{-1_r, -1_r, kFlatness}},
+        Real3{},
+        Sqrt(2_r + Sqr(kFlatness)));
+  }
+}
+
+TEST(GeometryUtils, CalcBoundingSphereIndexedBestUsesOnlySelectedPoints) {
+  Real3 const expectedCenter{2_r, -3_r, 5_r};
+  std::array const coordinates{
+      Real3{1000_r, 1000_r, 1000_r},
+      expectedCenter + Real3{1_r, 1_r, 1_r},
+      Real3{-1000_r, -1000_r, -1000_r},
+      expectedCenter + Real3{1_r, -1_r, -1_r},
+      Real3{500_r, -500_r, 500_r},
+      expectedCenter + Real3{-1_r, 1_r, -1_r},
+      expectedCenter + Real3{-1_r, -1_r, 1_r}};
+  std::array const indices{6, 3, 1, 5, 3};
+  Sphere const sphere = CalcBoundingSphereIndexed(
+      Span<Real3 const>{coordinates.data(), coordinates.size()},
+      Span<int const>{indices.data(), indices.size()},
+      BoundingSphereAlgorithm::Best);
+
+  real const tolerance = 256_r * std::numeric_limits<real>::epsilon();
+  EXPECT_NEAR_TOL(expectedCenter, sphere.GetCenter(), tolerance);
+  EXPECT_NEAR_TOL(Sqrt(3_r), sphere.GetRadius(), tolerance);
+
+  std::array<int, 0> const noIndices{};
+  EXPECT_EQ(
+      Sphere{},
+      CalcBoundingSphereIndexed(
+          Span<Real3 const>{coordinates.data(), coordinates.size()},
+          Span<int const>{noIndices.data(), noIndices.size()},
+          BoundingSphereAlgorithm::Best));
+}
+
+TEST(GeometryUtils, CalcBoundingSphereBestIsDeterministic) {
+  std::array const points{
+      Real3{-4_r, 2_r, 1_r},
+      Real3{3_r, -5_r, 7_r},
+      Real3{8_r, 1_r, -2_r},
+      Real3{-6_r, -3_r, 4_r},
+      Real3{2_r, 9_r, 5_r},
+      Real3{0_r, -1_r, -8_r}};
+
+  Span<Real3 const> const pointSpan{points.data(), points.size()};
+  Sphere const expected = CalcBoundingSphere(pointSpan, BoundingSphereAlgorithm::Best);
+  // A call with a different point count must not affect subsequent shuffles.
+  static_cast<void>(CalcBoundingSphere(
+      Span<Real3 const>{points.data(), points.size() - 1}, BoundingSphereAlgorithm::Best));
+  Sphere const actual = CalcBoundingSphere(pointSpan, BoundingSphereAlgorithm::Best);
+
+  EXPECT_EQ(expected, actual);
+}
+
+TEST(GeometryUtils, CalcBoundingSphereAllAlgorithmsContainPoints) {
+  int constexpr kMaxCount = 100;
+  auto constexpr kAlgorithmCount = static_cast<size_t>(BoundingSphereAlgorithm::Count);
+  auto constexpr kFastest = static_cast<size_t>(BoundingSphereAlgorithm::Fastest);
+  auto constexpr kFast = static_cast<size_t>(BoundingSphereAlgorithm::Fast);
+  auto constexpr kBest = static_cast<size_t>(BoundingSphereAlgorithm::Best);
+  auto rng = RandomGenerator(42);
+  DynamicArray<Real3> points;
+  DynamicArray<int> indices;
+
+  for (int count = 0; count < kMaxCount; ++count) {
+    for (real scale : {0.1_r, 1_r, 10_r, 100_r}) {
+      points.resize(count);
+      SetRandom(rng, -scale, scale, MakeSpan(points));
+      indices.resize(count);
+      std::iota(indices.begin(), indices.end(), 0);
+      std::ranges::reverse(indices);
+
+      Sphere const sphereFromAabb = GetBoundingSphere(CalcAabb(points));
+      real const radiusTolerance =
+          16_r * std::numeric_limits<real>::epsilon() * Max(1_r, sphereFromAabb.GetRadius());
+
+      std::array<Sphere, kAlgorithmCount> spheres;
+      std::array<Sphere, kAlgorithmCount> indexedSpheres;
+      for (int iAlgorithm = 0; iAlgorithm < static_cast<int>(BoundingSphereAlgorithm::Count);
+           ++iAlgorithm) {
+        auto const algorithm = static_cast<BoundingSphereAlgorithm>(iAlgorithm);
+        Sphere& sphere = spheres[static_cast<size_t>(iAlgorithm)];
+        Sphere& indexedSphere = indexedSpheres[static_cast<size_t>(iAlgorithm)];
+        sphere = CalcBoundingSphere(points, algorithm);
+        indexedSphere = CalcBoundingSphereIndexed(points, indices, algorithm);
+
+        ExpectSphereContainsPoints(sphere, points);
+        ExpectSphereContainsPoints(indexedSphere, points);
+        EXPECT_LE(sphere.GetRadius(), sphereFromAabb.GetRadius() + radiusTolerance);
+        EXPECT_LE(indexedSphere.GetRadius(), sphereFromAabb.GetRadius() + radiusTolerance);
+      }
+
+      real const fastTolerance =
+          32_r * std::numeric_limits<real>::epsilon() * Max(1_r, spheres[kFast].GetRadius());
+      real const fastestTolerance =
+          32_r * std::numeric_limits<real>::epsilon() * Max(1_r, spheres[kFastest].GetRadius());
+      EXPECT_LE(spheres[kBest].GetRadius(), spheres[kFast].GetRadius() + fastTolerance);
+      EXPECT_LE(spheres[kBest].GetRadius(), spheres[kFastest].GetRadius() + fastestTolerance);
+
+      real const indexedFastTolerance =
+          32_r * std::numeric_limits<real>::epsilon() * Max(1_r, indexedSpheres[kFast].GetRadius());
+      real const indexedFastestTolerance = 32_r * std::numeric_limits<real>::epsilon() *
+          Max(1_r, indexedSpheres[kFastest].GetRadius());
+      EXPECT_LE(
+          indexedSpheres[kBest].GetRadius(),
+          indexedSpheres[kFast].GetRadius() + indexedFastTolerance);
+      EXPECT_LE(
+          indexedSpheres[kBest].GetRadius(),
+          indexedSpheres[kFastest].GetRadius() + indexedFastestTolerance);
+    }
+  }
+}
+
+TEST(GeometryUtils, CalcBoundingSphereBestIsNoLargerThanOtherAlgorithms) {
+  std::array const points{
+      Real3{0_r, 0.5_r, 0_r}, Real3{10_r, 0.5_r, 0_r}, Real3{9_r, 0_r, 0_r}, Real3{9_r, 2_r, 0_r}};
+  std::array const indices{3, 1, 0, 2};
+
+  for (bool indexed : {false, true}) {
+    auto const calcSphere = [&](BoundingSphereAlgorithm algorithm) {
+      if (indexed) {
+        return CalcBoundingSphereIndexed(
+            Span<Real3 const>{points.data(), points.size()},
+            Span<int const>{indices.data(), indices.size()},
+            algorithm);
+      }
+      return CalcBoundingSphere(Span<Real3 const>{points.data(), points.size()}, algorithm);
+    };
+
+    Sphere const best = calcSphere(BoundingSphereAlgorithm::Best);
+    Sphere const fast = calcSphere(BoundingSphereAlgorithm::Fast);
+    Sphere const fastest = calcSphere(BoundingSphereAlgorithm::Fastest);
+    real const tolerance = 64_r * std::numeric_limits<real>::epsilon();
+    ExpectSphereContainsPoints(best, Span<Real3 const>{points.data(), points.size()});
+    EXPECT_NEAR_TOL(Real3(5_r, 0.5_r, 0_r), best.GetCenter(), tolerance);
+    EXPECT_NEAR_TOL(5_r, best.GetRadius(), tolerance);
+    EXPECT_NEAR_TOL(Sqrt(25.25_r), fast.GetRadius(), tolerance);
+    EXPECT_NEAR_TOL(Sqrt(26_r), fastest.GetRadius(), tolerance);
+    EXPECT_LT(best.GetRadius(), fast.GetRadius());
+    EXPECT_LT(best.GetRadius(), fastest.GetRadius());
+  }
+}
+
 static void TestOverlapSphereAabb(
     std::function<bool(Sphere const&, Aabb const&)> const& hasOverlap,
     real eps = 0_r) {
@@ -1492,6 +1823,173 @@ TEST(Sphere, HasOverlap_Obb) {
         return HasOverlap(sphere2, box2);
       },
       1e1_r * std::numeric_limits<real>::epsilon());
+}
+
+// Pack one Sphere per SIMD lane into a BatchSphere<kBatchSize>.
+template <int kBatchSize>
+static BatchSphere<kBatchSize> MakeBatchSphere(std::array<Sphere, kBatchSize> const& spheres) {
+  using V = BatchReal<kBatchSize>;
+  real radii[V::kSize] = {};
+  Real3 centers[V::kSize] = {};
+  for (int i = 0; i < kBatchSize; ++i) {
+    radii[i] = spheres[i].GetRadius();
+    centers[i] = spheres[i].GetCenter();
+  }
+  BatchSphere<kBatchSize> batch{};
+  batch.radius = Load<V>(radii);
+  LoadTransposed<V::kSize>(&centers[0][0], batch.center);
+  return batch;
+}
+
+// Verify that the batch HasOverlap overload matches its scalar counterpart for every sphere.
+template <int kBatchSize, typename Shape>
+static void TestOverlapShapeBatchSphere(Shape const& shape, Span<Sphere const> spheres) {
+  using V = BatchSphere<kBatchSize>;
+  using I = std::conditional_t<sizeof(real) == 4, int, int64_t>;
+  ASSERT_FALSE(spheres.empty());
+  bool sawOverlap = false;
+  bool sawNoOverlap = false;
+  for (size_t base = 0; base < spheres.size(); base += kBatchSize) {
+    std::array<Sphere, kBatchSize> lanes = {};
+    for (int i = 0; i < kBatchSize; ++i) {
+      lanes[i] = spheres[Min(base + static_cast<size_t>(i), spheres.size() - 1)];
+    }
+    auto const batchSphere = MakeBatchSphere<kBatchSize>(lanes);
+    auto const hasOverlap = ReinterpretCast<Simd<I, V::kSize>>(HasOverlap(shape, batchSphere));
+    for (int i = 0; i < kBatchSize; ++i) {
+      bool const expectedOverlap = HasOverlap(shape, lanes[i]);
+      EXPECT_EQ(!!hasOverlap[i], expectedOverlap);
+      sawOverlap |= expectedOverlap;
+      sawNoOverlap |= !expectedOverlap;
+    }
+  }
+  // The probe set must exercise both outcomes.
+  EXPECT_TRUE(sawOverlap);
+  EXPECT_TRUE(sawNoOverlap);
+}
+
+template <typename Shape>
+static void TestOverlapShapeBatchSphere(Shape const& shape, Span<Sphere const> spheres) {
+  TestOverlapShapeBatchSphere<4>(shape, spheres);
+  TestOverlapShapeBatchSphere<8>(shape, spheres);
+}
+
+TEST(BatchSphere, HasOverlap_Sphere) {
+  Sphere const a{Real3{0_r, 0_r, 0_r}, 1_r};
+  real constexpr kProbeRadius = 0.5_r;
+  real constexpr kTouch = 1_r + kProbeRadius; // center-to-center distance for exact contact
+  Sphere const probes[] = {
+      Sphere{Real3{0_r, 0_r, 0_r}, 0.1_r}, // fully inside a
+      Sphere{Real3{0_r, 0_r, 0_r}, 5_r}, // enclosing a
+      Sphere{Real3{1_r, 0_r, 0_r}, kProbeRadius}, // overlapping
+      Sphere{Real3{kTouch, 0_r, 0_r}, kProbeRadius}, // exactly touching
+      Sphere{Real3{std::nextafter(kTouch, 0_r), 0_r, 0_r}, kProbeRadius}, // just overlapping
+      Sphere{Real3{std::nextafter(kTouch, kInf), 0_r, 0_r}, kProbeRadius}, // just separated
+      Sphere{Real3{10_r, 0_r, 0_r}, kProbeRadius}, // far, separated
+  };
+  TestOverlapShapeBatchSphere(a, probes);
+}
+
+TEST(BatchSphere, HasOverlap_Aabb) {
+  Aabb const aabb{Real3{-1_r, -2_r, -3_r}, Real3{1_r, 2_r, 3_r}};
+  real constexpr kProbeRadius = 0.5_r;
+  real constexpr kTouch = 1_r + kProbeRadius; // x at which a probe grazes the +x face
+  Sphere const probes[] = {
+      Sphere{Real3{0_r, 0_r, 0_r}, 0.5_r}, // fully inside
+      Sphere{Real3{0_r, 0_r, 0_r}, 10_r}, // enclosing
+      Sphere{Real3{1_r, 0_r, 0_r}, kProbeRadius}, // straddling the +x face
+      Sphere{Real3{kTouch, 0_r, 0_r}, kProbeRadius}, // exactly touching the +x face
+      Sphere{Real3{std::nextafter(kTouch, 0_r), 0_r, 0_r}, kProbeRadius}, // just overlapping
+      Sphere{Real3{std::nextafter(kTouch, kInf), 0_r, 0_r}, kProbeRadius}, // just separated
+      Sphere{Real3{10_r, 0_r, 0_r}, kProbeRadius}, // far, separated
+  };
+  TestOverlapShapeBatchSphere(aabb, probes);
+}
+
+TEST(BatchSphere, HasOverlap_Plane) {
+  Plane const plane{Real3{0_r, 1_r, 0_r}, 2_r};
+  real constexpr kProbeRadius = 0.5_r;
+  real constexpr kTouch = 2_r + kProbeRadius; // center y at which the sphere just reaches the plane
+  Sphere const probes[] = {
+      Sphere{Real3{0_r, -5_r, 0_r}, 0.5_r}, // fully below the plane (deep in the half-space)
+      Sphere{Real3{0_r, 2_r, 0_r}, 1_r}, // straddling the plane
+      Sphere{Real3{0_r, kTouch, 0_r}, kProbeRadius}, // exactly touching from above
+      Sphere{Real3{0_r, std::nextafter(kTouch, 0_r), 0_r}, kProbeRadius}, // just overlapping
+      Sphere{Real3{0_r, std::nextafter(kTouch, kInf), 0_r}, kProbeRadius}, // just separated
+      Sphere{Real3{0_r, 10_r, 0_r}, kProbeRadius}, // far above, separated
+  };
+  TestOverlapShapeBatchSphere(plane, probes);
+}
+
+TEST(BatchSphere, HasOverlap_Obb) {
+  TransformRT const transform{
+      Quaternion::FromAxisAngle(Real3{0_r, 1_r, 0_r}, kPI / 5_r) *
+          Quaternion::FromAxisAngle(Real3{1_r, 0_r, 0_r}, kPI / 3_r),
+      Real3{1_r, 2_r, 3_r}};
+  Real3 const halfExtents{1_r, 2_r, 0.5_r};
+  Obb const obb{transform, halfExtents};
+  real constexpr kProbeRadius = 0.5_r;
+  real const touchX = halfExtents[0] + kProbeRadius; // local x at which a probe grazes the +x face
+  auto const world = [&](Real3 const& local) { return obb.GetTransform().TransformPoint(local); };
+
+  Sphere const probes[] = {
+      Sphere{obb.GetCenter(), 0.2_r}, // fully inside
+      Sphere{obb.GetCenter(), 10_r}, // enclosing
+      Sphere{world(Real3{halfExtents[0], 0_r, 0_r}), kProbeRadius}, // straddling the +x face
+      Sphere{world(Real3{touchX - 0.01_r, 0_r, 0_r}), kProbeRadius}, // just overlapping
+      Sphere{world(Real3{touchX + 0.01_r, 0_r, 0_r}), kProbeRadius}, // just separated
+      Sphere{world(Real3{halfExtents[0] + 5_r, 0_r, 0_r}), kProbeRadius}, // far, separated
+  };
+  TestOverlapShapeBatchSphere(obb, probes);
+
+  Obb const axisAlignedObb{TransformRT{Real3{1_r, 2_r, 3_r}}, halfExtents};
+  Sphere const exactTouchProbes[] = {
+      Sphere{Real3{2.5_r, 2_r, 3_r}, kProbeRadius}, // exactly touching the +x face
+      Sphere{Real3{2.51_r, 2_r, 3_r}, kProbeRadius}, // separated
+      Sphere{axisAlignedObb.GetCenter(), 0.2_r}, // fully inside
+  };
+  EXPECT_TRUE(HasOverlap(axisAlignedObb, exactTouchProbes[0]));
+  TestOverlapShapeBatchSphere(axisAlignedObb, exactTouchProbes);
+}
+
+TEST(BatchSphere, HasOverlap_SdfBv) {
+  // Build an SDF for a non-uniform box (AABB min=(0,0,0), max=(1,2,3)).
+  auto const mesh =
+      std::make_shared<TriangularMesh>(test::CreateMinimalTriMeshUnitCube(Real3{1_r, 2_r, 3_r}));
+  GridSdfParams const params;
+  GridSdf const sdf(mesh, params, test::ExpectOK{});
+
+  // Use actor space as the points space, i.e. gridFromPoints == gridFromActor.
+  SdfBv const sdfBv{
+      .gridSdf = &sdf,
+      .distanceThreshold = 0_r,
+      .gridFromPointsT = sdf.GetGridFromActorTranspose()};
+
+  Sphere const nearInside{Real3{0.9_r, 1_r, 1.5_r}, 0.05_r};
+  Sphere const nearOutside{Real3{1.2_r, 1_r, 1.5_r}, 0.05_r};
+  Sphere const probes[] = {
+      Sphere{Real3{0.5_r, 1_r, 1.5_r}, 0.2_r}, // deep inside the box
+      Sphere{Real3{0.5_r, 1_r, 1.5_r}, 5_r}, // enclosing the box
+      Sphere{Real3{1.2_r, 1_r, 1.5_r}, 0.5_r}, // just outside the +x face, overlapping
+      nearInside,
+      nearOutside,
+      Sphere{Real3{2_r, 1_r, 1.5_r}, 0.2_r}, // outside, separated
+      Sphere{Real3{10_r, 1_r, 1.5_r}, 0.2_r}, // far, separated
+  };
+
+  EXPECT_TRUE(HasOverlap(sdfBv, nearInside));
+  EXPECT_FALSE(HasOverlap(sdfBv, nearOutside));
+  TestOverlapShapeBatchSphere(sdfBv, probes);
+
+  SdfBv expandedSdfBv = sdfBv;
+  expandedSdfBv.distanceThreshold = 0.25_r;
+  EXPECT_TRUE(HasOverlap(expandedSdfBv, nearOutside));
+  TestOverlapShapeBatchSphere(expandedSdfBv, probes);
+
+  SdfBv contractedSdfBv = sdfBv;
+  contractedSdfBv.distanceThreshold = -0.25_r;
+  EXPECT_FALSE(HasOverlap(contractedSdfBv, nearInside));
+  TestOverlapShapeBatchSphere(contractedSdfBv, probes);
 }
 
 TEST(Sphere, ExpandShape) {

@@ -16,6 +16,7 @@
 
 #include "mochi_ik.h"
 #include "mochi_articulated_body.h"
+#include "mochi_contact_pair_params.h"
 #include "mochi_context.h"
 #include "mochi_scene.h"
 
@@ -23,12 +24,6 @@
 #include <mochi_core/utils/dynamic_array.h>
 
 using namespace mochi;
-
-namespace {
-struct IKSolverHandle {
-  IKSolverImpl* handle = nullptr;
-};
-} // namespace
 
 IKSolverImpl::IKSolverImpl(Scene* scene, Error& error) {
   MOCHI_ERROR_IF(scene == nullptr, error, "Cannot create an IKSolver without a Scene");
@@ -44,6 +39,10 @@ IKSolverImpl::IKSolverImpl(Scene* scene, Error& error) {
   });
   MOCHI_ERROR_RETURN(error);
 
+  // AsyncScene and IKSolver both destroy their owned Scene, so ownership must be exclusive.
+  MOCHI_ERROR_IF_NOT(sceneImpl->TryClaimOwnership(), error, "Scene is already owned.");
+  MOCHI_ERROR_RETURN(error);
+
   // Assign _scene only after error checks. ~IKSolverImpl destroys it.
   _scene = sceneImpl;
 
@@ -56,15 +55,14 @@ IKSolverImpl::IKSolverImpl(Scene* scene, Error& error) {
   // Force use single island, so that collisions in another island will not be missed.
   _scene->SetForceSingleIsland(true);
 
-  // Let the scene know that there is an IKSolver attached to it.
+  // Disable contact dissipation on all actors
   auto& reg = _scene->GetRegistry();
-  reg.set<IKSolverHandle>(this);
-
-  // Disable friction on all actors
   reg.view<ContactParams>().each([](ContactParams& params) {
     params.coulombFrictionCoefficient = 0_r;
     params.viscousFrictionCoefficient = 0_r;
+    params.normalViscousDampingCoefficient = 0_r;
   });
+  reg.ctx<CContactPairParamsOverrideTable>().DisableDissipation();
 
   // Disable joint friction and inertia by zeroing them via the setters. The components are
   // always present on articulated actors, so zeroing (rather than removing them) keeps that

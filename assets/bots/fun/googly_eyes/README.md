@@ -2,7 +2,7 @@
 
 ## Overview
 
-This package contains a googly-eye attachment for SuperDex Robotics. The SolidWorks CAD geometry and all derived digital assets in this directory are the original work of Meta Platforms, Inc. and affiliates. No third-party digital model or geometry was used.
+This package contains a googly-eye attachment for SuperDex Robotics. The CAD geometry and all derived digital assets in this directory are the original work of Meta Platforms, Inc. and affiliates. No third-party digital model or geometry was used.
 
 ## Derivations
 

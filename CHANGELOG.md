@@ -10,7 +10,7 @@ All notable changes to this repository will be documented here.
   and articulated colliders included) and node-to-rigid constraints, with gradients for initial
   states, per-step controller targets and external forces, gravity, contact materials, densities
   and soft material parameters; every path is checked against independent finite differences in
-  `superdex_python/test/diffsim` (118 tests) and the C++ suites.
+  `superdex_physics/wheels/superdex-physics/test/diffsim` (118 tests) and the C++ suites.
 - Adjoint correctness fixes: rod and soft residual sizing across assemblies, inner-solver
   convergence norm, relative outer tolerance with the true residual reported, stage-start contact
   Jacobians for deformable-vs-dynamic contact, exact adjoints across steps of different sizes
@@ -42,6 +42,8 @@ All notable changes to this repository will be documented here.
   and
   `example_diffsim_sysid.py --mode soft` (Young's modulus and Poisson's ratio identification).
 - CI: `diffsim-tests` workflow builds both physics wheels and runs the suite in both precisions.
+- Standardized precision names on `fp32` and `fp64`. The public
+  `PRECISION_NAME` value now reports the canonical `fp32` or `fp64` name.
 
 ## [2026-08-24]
 

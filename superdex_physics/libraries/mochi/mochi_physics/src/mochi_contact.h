@@ -21,6 +21,7 @@
 #include <mochi_physics/mochi_physics_experimental.h>
 
 #include "mochi_common_components.h"
+#include "mochi_contact_pair_params.h"
 #include "mochi_discretization_components.h"
 #include "mochi_ecs.h"
 #include "mochi_query.h"
@@ -754,44 +755,61 @@ struct CCollJacs : public std::vector<JacData>, NoCopy {
 
 inline void ValidateContactParams(ContactParams const& params, Error& error) {
   MOCHI_ERROR_IF_NOT(
-      params.penaltyCoefficient > 0_r,
+      IsFinite(params.penaltyCoefficient) && params.penaltyCoefficient > 0_r,
       error,
-      "Contact penalty coefficient (penaltyCoefficient) must be positive.");
+      "Contact penalty coefficient (penaltyCoefficient) must be finite and positive.");
   MOCHI_ERROR_IF_NOT(
-      params.penaltySmoothingHalfDistance >= 0_r,
+      IsFinite(params.penaltySmoothingHalfDistance) && params.penaltySmoothingHalfDistance >= 0_r,
       error,
-      "Contact penalty smoothing half-distance (penaltySmoothingHalfDistance) must not be negative.");
+      "Contact penalty smoothing half-distance (penaltySmoothingHalfDistance) must be finite and not "
+      "negative.");
   MOCHI_ERROR_IF_NOT(
-      params.penaltyThresholdExtraPadding >= 0_r,
+      IsFinite(params.penaltyThresholdDefault),
       error,
-      "Penalty threshold extra padding (penaltyThresholdExtraPadding) must not be negative.");
+      "Contact penalty threshold (penaltyThresholdDefault) must be finite.");
+  MOCHI_ERROR_IF_NOT(
+      IsFinite(params.penaltyThresholdExtraPadding) && params.penaltyThresholdExtraPadding >= 0_r,
+      error,
+      "Penalty threshold extra padding (penaltyThresholdExtraPadding) must be finite and not "
+      "negative.");
   MOCHI_ERROR_IF_NOT(
       params.maxAlignmentNormals >= -1_r && params.maxAlignmentNormals <= 1_r,
       error,
       "Maximum normal alignment (maxAlignmentNormals) must be in [-1, 1].");
   MOCHI_ERROR_IF_NOT(
-      params.coulombFrictionCoefficient >= 0_r,
+      IsFinite(params.coulombFrictionCoefficient) && params.coulombFrictionCoefficient >= 0_r,
       error,
-      "Coulomb friction coefficient (coulombFrictionCoefficient) must not be negative.");
+      "Coulomb friction coefficient (coulombFrictionCoefficient) must be finite and not negative.");
   MOCHI_ERROR_IF_NOT(
-      params.viscousFrictionCoefficient >= 0_r,
+      IsFinite(params.viscousFrictionCoefficient) && params.viscousFrictionCoefficient >= 0_r,
       error,
-      "Viscous friction coefficient (viscousFrictionCoefficient) must not be negative.");
+      "Viscous friction coefficient (viscousFrictionCoefficient) must be finite and not negative.");
   MOCHI_ERROR_IF_NOT(
-      params.frictionFalloffVel >= 0_r,
+      IsFinite(params.frictionFalloffVel) && params.frictionFalloffVel >= 0_r,
       error,
-      "Friction falloff velocity (frictionFalloffVel) must not be negative.");
+      "Friction falloff velocity (frictionFalloffVel) must be finite and not negative.");
   MOCHI_ERROR_IF_NOT(
-      params.normalViscousDampingCoefficient >= 0_r,
+      IsFinite(params.normalViscousDampingCoefficient) &&
+          params.normalViscousDampingCoefficient >= 0_r,
       error,
-      "Normal viscous damping coefficient (normalViscousDampingCoefficient) must not be negative.");
+      "Normal viscous damping coefficient (normalViscousDampingCoefficient) must be finite and not "
+      "negative.");
   MOCHI_ERROR_IF_NOT(
-      params.collidingPenaltyLengthScale > 0_r,
+      IsFinite(params.distanceErrorBound),
       error,
-      "Colliding penalty length scale (collidingPenaltyLengthScale) must be positive.");
+      "Contact distance error bound (distanceErrorBound) must be finite.");
+  MOCHI_ERROR_IF_NOT(
+      IsFinite(params.objScale) && params.objScale > 0_r,
+      error,
+      "Contact object scale (objScale) must be finite and strictly positive.");
+  MOCHI_ERROR_IF_NOT(
+      IsFinite(params.collidingPenaltyLengthScale) && params.collidingPenaltyLengthScale > 0_r,
+      error,
+      "Colliding penalty length scale (collidingPenaltyLengthScale) must be finite and positive.");
 }
 
 using ContactAssemblyReg = ecs::PartialRegistry<
+    CContactPairParamsOverrideTable const,
     CContactParams const,
     CPointCloudColliderParams const,
     CColliderInfo const,
@@ -854,6 +872,7 @@ using ContactAssemblyReg = ecs::PartialRegistry<
  *
  * @param collidingParams Contact parameters from the colliding actor.
  * @param colliderParams Contact parameters from the collider actor.
+ * @param paramsOverride Optional pair-specific parameter replacements.
  * @param isStaticCollider If true, use the colliding actor's penalty and falloff values directly
  * instead of taking the geometric mean.
  * @param collidingIntegralDim The dimension of the colliding-side contact integral (2 for surfaces,
@@ -867,21 +886,47 @@ using ContactAssemblyReg = ecs::PartialRegistry<
 inline ContactParams CombineContactParams(
     ContactParams const& collidingParams,
     ContactParams const& colliderParams,
+    ContactPairParamsOverride const* paramsOverride,
     bool isStaticCollider,
     int collidingIntegralDim,
     int colliderIntegralDim,
     real colliderPenaltyLengthScale) {
   ContactParams pairParams = colliderParams;
+  if (paramsOverride != nullptr) {
+    pairParams = ApplyContactPairParamsOverride(pairParams, *paramsOverride);
+  }
 
   // Friction coefficients: Use the geometric mean of the colliding and collider actors.
-  pairParams.coulombFrictionCoefficient =
-      Sqrt(collidingParams.coulombFrictionCoefficient * colliderParams.coulombFrictionCoefficient);
-  pairParams.viscousFrictionCoefficient =
-      Sqrt(collidingParams.viscousFrictionCoefficient * colliderParams.viscousFrictionCoefficient);
-  pairParams.normalViscousDampingCoefficient = Sqrt(
-      collidingParams.normalViscousDampingCoefficient *
-      colliderParams.normalViscousDampingCoefficient);
-  if (Max(collidingParams.coulombFrictionCoefficient, collidingParams.viscousFrictionCoefficient) >
+  if (paramsOverride == nullptr || !paramsOverride->coulombFrictionCoefficient) {
+    pairParams.coulombFrictionCoefficient = Sqrt(
+        collidingParams.coulombFrictionCoefficient * colliderParams.coulombFrictionCoefficient);
+  }
+  if (paramsOverride == nullptr || !paramsOverride->viscousFrictionCoefficient) {
+    pairParams.viscousFrictionCoefficient = Sqrt(
+        collidingParams.viscousFrictionCoefficient * colliderParams.viscousFrictionCoefficient);
+  }
+  if (paramsOverride == nullptr || !paramsOverride->normalViscousDampingCoefficient) {
+    pairParams.normalViscousDampingCoefficient = Sqrt(
+        collidingParams.normalViscousDampingCoefficient *
+        colliderParams.normalViscousDampingCoefficient);
+  }
+  // Penalty coefficient and friction falloff velocity: Use the geometric mean if both actors are
+  // dynamic, and the colliding if the collider is static.
+  if (paramsOverride == nullptr || !paramsOverride->penaltyCoefficient) {
+    pairParams.penaltyCoefficient = isStaticCollider
+        ? collidingParams.penaltyCoefficient
+        : Sqrt(collidingParams.penaltyCoefficient * colliderParams.penaltyCoefficient);
+  }
+  if (paramsOverride == nullptr || !paramsOverride->frictionFalloffVel) {
+    pairParams.frictionFalloffVel = isStaticCollider
+        ? collidingParams.frictionFalloffVel
+        : Sqrt(collidingParams.frictionFalloffVel * colliderParams.frictionFalloffVel);
+  }
+
+  bool const hasFrictionOverride = paramsOverride != nullptr &&
+      (paramsOverride->coulombFrictionCoefficient || paramsOverride->viscousFrictionCoefficient);
+  if (!hasFrictionOverride &&
+      Max(collidingParams.coulombFrictionCoefficient, collidingParams.viscousFrictionCoefficient) >
           0_r &&
       Max(colliderParams.coulombFrictionCoefficient, colliderParams.viscousFrictionCoefficient) >
           0_r &&
@@ -889,15 +934,6 @@ inline ContactParams CombineContactParams(
     MOCHI_LOG_WARNING_ONCE(
         "Inconsistent friction coefficients between the contact pair. No friction will be applied.");
   }
-
-  // Penalty coefficient and friction falloff velocity: Use the geometric mean if both actors are
-  // dynamic, and the colliding if the collider is static.
-  pairParams.penaltyCoefficient = isStaticCollider
-      ? collidingParams.penaltyCoefficient
-      : Sqrt(collidingParams.penaltyCoefficient * colliderParams.penaltyCoefficient);
-  pairParams.frictionFalloffVel = isStaticCollider
-      ? collidingParams.frictionFalloffVel
-      : Sqrt(collidingParams.frictionFalloffVel * colliderParams.frictionFalloffVel);
 
   // If penalty tractions are integrated on some colliding manifold other than a 2D surface (e.g.,
   // lumping contact tractions on a thin rod's centerline), we need to correct the penalty factor
@@ -938,10 +974,14 @@ GetContactPairParams(ContactAssemblyReg const& reg, entt::entity colliding, entt
   int const collidingIntegralDim = CollidingIntegralDim(reg, colliding);
   int const colliderIntegralDim = ColliderIntegralDim(reg, collider);
   real const colliderPenaltyLengthScale = ColliderPenaltyLengthScale(reg, collider);
+  auto const& overrideTable = reg.ctx<CContactPairParamsOverrideTable const>();
+  ContactPairParamsOverride const* const paramsOverride =
+      overrideTable.Empty() ? nullptr : overrideTable.Find(colliding, collider);
 
   return CombineContactParams(
       collidingParams,
       colliderParams,
+      paramsOverride,
       isStaticCollider,
       collidingIntegralDim,
       colliderIntegralDim,
@@ -960,11 +1000,9 @@ inline bool ValidCollidingNormals(ContactAssemblyReg const& reg, entt::entity co
 void UpdateStageStartDataPipeline(entt::registry& reg, CIslandDescendants const& descendants);
 
 template <TimeStep kTimeStep>
-MOCHI_API void CollisionDetectionPipeline(
-    entt::registry& reg,
-    CIslandDescendants const& descendants);
+void CollisionDetectionPipeline(entt::registry& reg, CIslandDescendants const& descendants);
 
-MOCHI_API void ContactJacobiansPipeline(
+void ContactJacobiansPipeline(
     entt::registry& reg,
     GradTarget gradTarget,
     CIslandDescendants const& descendants,
@@ -972,7 +1010,7 @@ MOCHI_API void ContactJacobiansPipeline(
 
 // Collision detection for far SDF queries.
 // Handles both ContactType::Async and ContactType::Sync.
-MOCHI_API void FarSdfCollisionDetection(
+void FarSdfCollisionDetection(
     ecs::Included<TagUseContact, CRequiresFarSdfEvaluation>,
     entt::registry& reg,
     entt::entity ent);
@@ -991,7 +1029,7 @@ void UpdateCollisionSamplePositionsImpl(
 // Updates the collision sample positions, having them match 1:1 the quadrature points of the
 // given discretization. Used for colliding objects with a deforming surface.
 template <typename DiscretizationType, TimeStep kTimeStep, int kNumFields>
-MOCHI_API void UpdateCollisionSamplePositions(
+void UpdateCollisionSamplePositions(
     ecs::RequiredTag<TagUseContact>,
     CFinalDisplacementRef<kTimeStep> const& currSol,
     DiscretizationType const& discretization,
@@ -1074,7 +1112,7 @@ void UpdateQueryActorContactForces(
     CQueryActorContactForces& outQueryActorForces);
 
 // Assemble collision response into DoFs
-MOCHI_API void AssembleCollisionResponse(
+void AssembleCollisionResponse(
     ContactAssemblyReg reg,
     entt::entity colliding,
     entt::entity collider,
@@ -1083,9 +1121,9 @@ MOCHI_API void AssembleCollisionResponse(
     Span<real const> intWeights,
     Span<ContactJac const*> jacs,
     Allocator* filoAllocator, // Will be used in first-in-last-out order
-    double* objective,
-    ColumnVectorView<real> residual,
-    AnyMatrixView<real> dresidual,
+    double* outObj,
+    ColumnVectorView<real> outRes,
+    AnyMatrixView<real> outDRes,
     bool isSyncRigid = false); // Optionally set to 'true' to improve performance when assembling
                                // sync contact between rigid (including articulated rigid) actors.
 

@@ -47,12 +47,13 @@ namespace mochi::krylov {
  *            iterMax must be between 0 and the size of A.
  * @param[in] statusCheck A functor called at each iteration to check the stop criteria.
  * @param[in] verbosity Verbosity level for logging output.
+ * @param[in] initialGuessHint Indicates whether @p x is known to be zero. The zero hint skips the
+ * initial matrix-vector product and requires @p x to be exactly zero.
  * @param[in] dot The dot operator. Must also handle a matrix-vector operation.
  * @param[in] vectorFactory Factory to create vectors of a given type.
  *
- * @return Linear solver status. Contains the number of iterations and the achieved absolute and
- * relative residuals. "iterMax+1" is used to indicate that the maximum number of iterations was
- * reached without convergence.
+ * @return Linear solver status. Contains the convergence status, number of iterations, and achieved
+ * absolute and relative residuals.
  *
  * @note It uses right preconditioning.
  * @note It minimizes the ||.||_{prec^-1} norm of the residual.
@@ -79,6 +80,7 @@ LinearSolverStatus MinRes(
     int iterMax,
     StopCriterion statusCheck = {},
     VerbosityLevel verbosity = VerbosityLevel::Warning,
+    InitialGuessHint initialGuessHint = InitialGuessHint::Unknown,
     Dot dot = {},
     VectorFactory vectorFactory = {}) {
   using Scalar = decltype(dot(rhs, rhs));
@@ -89,6 +91,9 @@ LinearSolverStatus MinRes(
 
   int n = static_cast<int>(NumRows(x));
   MOCHI_ASSERT_VERBOSE(NumRows(x) == NumRows(rhs));
+  MOCHI_ASSERT_VERBOSE(
+      initialGuessHint != InitialGuessHint::Zero || dot(x, x) == 0,
+      "InitialGuessHint::Zero requires an exactly zero initial guess.");
 
   iterMax = Min(n, iterMax);
 
@@ -101,7 +106,10 @@ LinearSolverStatus MinRes(
       if (dot(rhs, rhs) == 0) {
         SetZero(x);
         return LinearSolverStatus{
-            .numIterDone = 0, .residualNorm = 0.0, .relativeResidualNorm = 0.0, .converged = true};
+            .numIterDone = 0,
+            .residualNorm = 0.0,
+            .relativeResidualNorm = 0.0,
+            .convergence = LinearSolverConvergenceStatus::Converged};
       }
       if (verbosity >= VerbosityLevel::Warning) {
         MOCHI_LOG_WARNING(
@@ -109,13 +117,17 @@ LinearSolverStatus MinRes(
             static_cast<double>(gammaSqr));
       }
       return LinearSolverStatus{
-          .numIterDone = 0, .residualNorm = 0.0, .relativeResidualNorm = 0.0, .converged = false};
+          .numIterDone = 0,
+          .residualNorm = 0.0,
+          .relativeResidualNorm = 0.0,
+          .convergence = LinearSolverConvergenceStatus::Diverged};
     }
   statusCheck.SetScaling(Sqrt(gammaSqr));
 
   auto Az = vectorFactory.GetSameAs(x);
   auto v = vectorFactory.GetSameAs(x);
-  if (dot(x, x) == 0) {
+  if (initialGuessHint == InitialGuessHint::Zero) {
+    // With x_0 = 0, v_0 = rhs, so the solve above already computed z_0 = Prec^{-1} v_0.
     v = rhs;
   } else {
     Apply(A, x, Az);
@@ -128,7 +140,10 @@ LinearSolverStatus MinRes(
     MOCHI_UNLIKELY {
       if (dot.Norm(v) == 0) {
         return LinearSolverStatus{
-            .numIterDone = 0, .residualNorm = 0.0, .relativeResidualNorm = 0.0, .converged = true};
+            .numIterDone = 0,
+            .residualNorm = 0.0,
+            .relativeResidualNorm = 0.0,
+            .convergence = LinearSolverConvergenceStatus::Converged};
       }
       if (verbosity >= VerbosityLevel::Warning) {
         MOCHI_LOG_WARNING(
@@ -136,7 +151,10 @@ LinearSolverStatus MinRes(
             static_cast<double>(gammaSqr));
       }
       return LinearSolverStatus{
-          .numIterDone = 0, .residualNorm = 0.0, .relativeResidualNorm = 0.0, .converged = false};
+          .numIterDone = 0,
+          .residualNorm = 0.0,
+          .relativeResidualNorm = 0.0,
+          .convergence = LinearSolverConvergenceStatus::Diverged};
     }
 
   auto gamma = Sqrt(gammaSqr);
@@ -146,7 +164,8 @@ LinearSolverStatus MinRes(
         .numIterDone = 0,
         .residualNorm = static_cast<double>(statusCheck.GetLatestResidualNorm()),
         .relativeResidualNorm = static_cast<double>(statusCheck.GetLatestRelativeResidualNorm()),
-        .converged = IsConverged(myStatus)};
+        .convergence = IsConverged(myStatus) ? LinearSolverConvergenceStatus::Converged
+                                             : LinearSolverConvergenceStatus::Diverged};
   }
   auto invGamma = Scalar(1) / gamma;
   z *= invGamma;
@@ -192,7 +211,7 @@ LinearSolverStatus MinRes(
               .residualNorm = static_cast<double>(statusCheck.GetLatestResidualNorm()),
               .relativeResidualNorm =
                   static_cast<double>(statusCheck.GetLatestRelativeResidualNorm()),
-              .converged = false};
+              .convergence = LinearSolverConvergenceStatus::Diverged};
         } else {
           // Lucky breakdown: gammaSqr == 0 and ||v_new|| == 0, so the Krylov subspace is
           // exhausted. Perform the final Givens rotation to update x before returning.
@@ -215,7 +234,8 @@ LinearSolverStatus MinRes(
               .residualNorm = static_cast<double>(statusCheck.GetLatestResidualNorm()),
               .relativeResidualNorm =
                   static_cast<double>(statusCheck.GetLatestRelativeResidualNorm()),
-              .converged = IsConverged(myStatus)};
+              .convergence = IsConverged(myStatus) ? LinearSolverConvergenceStatus::Converged
+                                                   : LinearSolverConvergenceStatus::Diverged};
         }
       }
 
@@ -263,7 +283,8 @@ LinearSolverStatus MinRes(
           .numIterDone = iter,
           .residualNorm = static_cast<double>(statusCheck.GetLatestResidualNorm()),
           .relativeResidualNorm = static_cast<double>(statusCheck.GetLatestRelativeResidualNorm()),
-          .converged = IsConverged(myStatus)};
+          .convergence = IsConverged(myStatus) ? LinearSolverConvergenceStatus::Converged
+                                               : LinearSolverConvergenceStatus::Diverged};
     }
     gamma = gammaNew;
 
@@ -290,10 +311,10 @@ LinearSolverStatus MinRes(
   } // for (int iter = 1; iter <= iterMax; ++iter)
 
   return LinearSolverStatus{
-      .numIterDone = iterMax + 1,
+      .numIterDone = iterMax,
       .residualNorm = static_cast<double>(statusCheck.GetLatestResidualNorm()),
       .relativeResidualNorm = static_cast<double>(statusCheck.GetLatestRelativeResidualNorm()),
-      .converged = false};
+      .convergence = LinearSolverConvergenceStatus::Stopped};
 }
 
 } // namespace mochi::krylov

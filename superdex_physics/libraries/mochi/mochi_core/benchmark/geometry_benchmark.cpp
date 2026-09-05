@@ -17,10 +17,17 @@
 #include "config.h"
 
 #include <mochi_core/geometry/geometry_utils.h>
+#include <mochi_core/geometry/model_utils.h>
 #include <mochi_core/geometry/tetrahedral_mesh.h>
+#include <mochi_core/utils/dynamic_array.h>
+#include <mochi_core/utils/rand_utils.h>
+#include <mochi_core/utils/reflection.h>
+#include <mochi_core/utils/string_utils.h>
 
 #include <functional>
 #include <numeric>
+#include <string>
+#include <string_view>
 #include <vector>
 
 using namespace mochi;
@@ -99,6 +106,78 @@ BENCHMARK_TEMPLATE(HasOverlap, Obb, Obb, 16)->Name("Geometry/HasOverlap/ObbVsObb
 BENCHMARK_TEMPLATE(HasOverlap, Obb, Plane, 1)->Name("Geometry/HasOverlap/ObbVsPlane/Batch1");
 BENCHMARK_TEMPLATE(HasOverlap, Obb, Plane, 16)->Name("Geometry/HasOverlap/ObbVsPlane/Batch16");
 
+static void RunBoundingSphereBenchmark(
+    benchmark::State& state,
+    Span<Real3 const> coordinates,
+    BoundingSphereAlgorithm algorithm) {
+  Sphere sphere{};
+  for (auto _ : state) {
+    sphere = mochi::CalcBoundingSphere(coordinates, algorithm);
+    MOCHI_NO_DISCARD_IN_LOOP(sphere);
+  }
+  state.counters["points_per_second"] = benchmark::Counter(
+      static_cast<double>(coordinates.size()), benchmark::Counter::kIsIterationInvariantRate);
+}
+
+static void CalcBoundingSphereRandomPoints(
+    benchmark::State& state,
+    BoundingSphereAlgorithm algorithm,
+    size_t numPoints) {
+  DynamicArray<Real3> coordinates(numPoints);
+  auto random = RandomGenerator(42);
+  SetRandom(random, -1_r, 1_r, MakeSpan(coordinates));
+  RunBoundingSphereBenchmark(state, MakeConstSpan(coordinates), algorithm);
+}
+
+static void CalcBoundingSphereMesh(
+    benchmark::State& state,
+    BoundingSphereAlgorithm algorithm,
+    std::string_view meshPath) {
+  ModelData const modelData =
+      model::LoadFromFile(GetAssetPath(std::string{meshPath}), ErrorAssert{});
+  if (!modelData.mesh.has_value()) {
+    state.SkipWithError("Model does not contain mesh coordinates.");
+    return;
+  }
+
+  auto const coordinates = Unflatten<Real3 const>(MakeConstSpan(modelData.mesh->coordinates));
+  RunBoundingSphereBenchmark(state, coordinates, algorithm);
+}
+
+[[maybe_unused]] static bool const kBoundingSphereBenchmarksRegistered = [] {
+  constexpr size_t kBoundingSphereRandomPointCounts[] = {10, 100, 1000, 10000};
+  constexpr char const* kBoundingSphereMeshes[] = {
+      "cube/cube_fine_mesh.mochi.json",
+      "duck/duck_1899.mochi.h5",
+  };
+  constexpr char const* kNamePrefix = "Geometry/CalcBoundingSphere";
+
+  for (int iAlgorithm = 0; iAlgorithm < static_cast<int>(BoundingSphereAlgorithm::Count);
+       ++iAlgorithm) {
+    auto const algorithm = static_cast<BoundingSphereAlgorithm>(iAlgorithm);
+    char const* algorithmName = SReflect::EnumToString(algorithm);
+    for (size_t numPoints : kBoundingSphereRandomPointCounts) {
+      benchmark::RegisterBenchmark(
+          Format("%s/Random/%s/Points%zu", kNamePrefix, algorithmName, numPoints).c_str(),
+          CalcBoundingSphereRandomPoints,
+          algorithm,
+          numPoints);
+    }
+
+    for (char const* meshPath : kBoundingSphereMeshes) {
+      if (!MOCHI_USE_HDF5 && std::string_view{meshPath}.ends_with(".h5")) {
+        continue;
+      }
+      benchmark::RegisterBenchmark(
+          Format("%s/Mesh/%s/%s", kNamePrefix, algorithmName, meshPath).c_str(),
+          CalcBoundingSphereMesh,
+          algorithm,
+          meshPath);
+    }
+  }
+  return true;
+}();
+
 static void CalcAabb(benchmark::State& state, size_t numPoints) {
   std::vector<Real3> points(numPoints);
   auto pointsSpan = MakeConstSpan(points);
@@ -133,7 +212,9 @@ BENCHMARK_CAPTURE(CalcAabbWithDisplacements, 1000, 1000);
 BENCHMARK_CAPTURE(CalcAabbWithDisplacements, 10000, 10000);
 BENCHMARK_CAPTURE(CalcAabbWithDisplacements, 100000, 100000);
 
-static void CalcAabbWithSortedIndices(benchmark::State& state, std::string const& meshPath) {
+static void CalcAabbWithDisplacementsAndSortedIndices(
+    benchmark::State& state,
+    std::string const& meshPath) {
   // This overload of CalcAabb takes points, displacements, and indices. In practice, it is used to
   // find the bounds of a deformed soft actor. We load a real mesh to ensure a realistic
   // distribution of boundary indices.
@@ -145,17 +226,17 @@ static void CalcAabbWithSortedIndices(benchmark::State& state, std::string const
 
   Aabb aabb = {};
   for (auto _ : state) {
-    aabb = CalcAabbWithSortedIndices(points, displacementsSpan, indices);
+    aabb = CalcAabbWithDisplacementsAndSortedIndices(points, displacementsSpan, indices);
   }
   benchmark::DoNotOptimize(aabb);
 }
 
 // clang-format off
-BENCHMARK_CAPTURE(CalcAabbWithSortedIndices, icosphere_3subdiv, "sphere/icosphere_3subdiv.1.mochi.json");
-BENCHMARK_CAPTURE(CalcAabbWithSortedIndices, icosphere_4subdiv, "sphere/icosphere_4subdiv.1.mochi.json");
+BENCHMARK_CAPTURE(CalcAabbWithDisplacementsAndSortedIndices, icosphere_3subdiv, "sphere/icosphere_3subdiv.1.mochi.json");
+BENCHMARK_CAPTURE(CalcAabbWithDisplacementsAndSortedIndices, icosphere_4subdiv, "sphere/icosphere_4subdiv.1.mochi.json");
 // The 5-subdivision sphere is not shipped externally.
 #if MOCHI_INTERNAL
-BENCHMARK_CAPTURE(CalcAabbWithSortedIndices, icosphere_5subdiv, "sphere/icosphere_5subdiv.1.mochi.json");
+BENCHMARK_CAPTURE(CalcAabbWithDisplacementsAndSortedIndices, icosphere_5subdiv, "sphere/icosphere_5subdiv.1.mochi.json");
 #endif
 // clang-format on
 

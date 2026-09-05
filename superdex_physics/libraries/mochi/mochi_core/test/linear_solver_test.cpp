@@ -65,7 +65,7 @@ TEST(KrylovSolver, IsIterativeSolver) {
       "Please update this unit test if LinearSolverType enumerator changes");
 }
 
-TEST(KrylovSolver, IsConverged) {
+TEST(KrylovSolver, IsIterationStatusConverged) {
   static_assert(!krylov::IsConverged(krylov::IterationStatus::Active));
   static_assert(krylov::IsConverged(krylov::IterationStatus::ConvergedAtol));
   static_assert(krylov::IsConverged(krylov::IterationStatus::ConvergedRtol));
@@ -73,6 +73,17 @@ TEST(KrylovSolver, IsConverged) {
   static_assert(
       static_cast<int>(krylov::IterationStatus::Count) == 4,
       "Please update unit tests if IterationStatus enumerator changes");
+}
+
+TEST(KrylovSolver, IsLinearSolverConverged) {
+  static_assert(LinearSolverStatus{}.convergence == LinearSolverConvergenceStatus::None);
+  static_assert(!IsConverged(LinearSolverConvergenceStatus::None));
+  static_assert(IsConverged(LinearSolverConvergenceStatus::Converged));
+  static_assert(!IsConverged(LinearSolverConvergenceStatus::Stopped));
+  static_assert(!IsConverged(LinearSolverConvergenceStatus::Diverged));
+  static_assert(
+      static_cast<int>(LinearSolverConvergenceStatus::Count) == 4,
+      "Please update unit tests if LinearSolverConvergenceStatus enumerator changes");
 }
 
 static void LinearSolve_PsdMatrix(PreconditionerType precType) {
@@ -108,9 +119,9 @@ static void LinearSolve_PsdMatrix(PreconditionerType precType) {
     cgParams.solverType = LinearSolverType::CG;
     pcgSolver.SetParams(cgParams); // Set params through 'SetParams'.
     EXPECT_EQ(pcgSolver.GetParams().solverType, LinearSolverType::CG);
-    outputVec.SetZero();
+    outputVec = 0.3_r * expected;
     auto pcgStatus = pcgSolver.Solve(inputMat, inputVec, outputVec);
-    EXPECT_TRUE(pcgStatus.converged);
+    EXPECT_EQ(pcgStatus.convergence, LinearSolverConvergenceStatus::Converged);
     ColumnVector<real> delta = expected - outputVec;
     EXPECT_NEAR_TOL(delta.Norm(), 0_r, kErrorRelTol * expected.Norm());
   }
@@ -121,8 +132,13 @@ static void LinearSolve_PsdMatrix(PreconditionerType precType) {
     cgPrecInnerParams.normType = LinearSolverConvergenceNorm::ResidualPreconditionerInduced;
     LinearSolver<real> pcgPrecInnerSolver(cgPrecInnerParams);
     outputVec.SetZero();
-    auto pcgPrecInnerStatus = pcgPrecInnerSolver.Solve(inputMat, inputVec, outputVec);
-    EXPECT_TRUE(pcgPrecInnerStatus.converged);
+    auto pcgPrecInnerStatus = pcgPrecInnerSolver.Solve(
+        inputMat,
+        inputVec,
+        outputVec,
+        /*hasOperatorChanged*/ true,
+        InitialGuessHint::Zero);
+    EXPECT_EQ(pcgPrecInnerStatus.convergence, LinearSolverConvergenceStatus::Converged);
     ColumnVector<real> delta = expected - outputVec;
     EXPECT_NEAR_TOL(delta.Norm(), 0_r, kErrorRelTol * expected.Norm());
   }
@@ -133,8 +149,13 @@ static void LinearSolve_PsdMatrix(PreconditionerType precType) {
     LinearSolver<real> gmresSolver(gmresParams); // Set params through the constructor.
     EXPECT_EQ(gmresSolver.GetParams().solverType, LinearSolverType::GMRES);
     outputVec.SetZero();
-    auto gmresStatus = gmresSolver.Solve(inputMat, inputVec, outputVec);
-    EXPECT_TRUE(gmresStatus.converged);
+    auto gmresStatus = gmresSolver.Solve(
+        inputMat,
+        inputVec,
+        outputVec,
+        /*hasOperatorChanged*/ true,
+        InitialGuessHint::Zero);
+    EXPECT_EQ(gmresStatus.convergence, LinearSolverConvergenceStatus::Converged);
     ColumnVector<real> delta = expected - outputVec;
     EXPECT_NEAR_TOL(delta.Norm(), 0_r, kErrorRelTol * expected.Norm());
   }
@@ -153,8 +174,12 @@ static void LinearSolve_PsdMatrix(PreconditionerType precType) {
     int initNumIter = -1;
     for (int ii = 0; ii < 4; ++ii) {
       outputVec.SetZero();
-      auto dcgStatus =
-          dcgSolver.Solve(inputMat, inputVec, outputVec, /* hasOperatorChanged */ ii % 2 == 0);
+      auto dcgStatus = dcgSolver.Solve(
+          inputMat,
+          inputVec,
+          outputVec,
+          /*hasOperatorChanged*/ ii % 2 == 0,
+          InitialGuessHint::Zero);
       ColumnVector<real> delta = expected - outputVec;
       EXPECT_NEAR_TOL(delta.Norm(), 0_r, kErrorRelTol * expected.Norm());
       if (ii == 0) {
@@ -179,7 +204,7 @@ static void LinearSolve_PsdMatrix(PreconditionerType precType) {
       auto const ldltStatus =
           ldltSolver.Solve(denseMat, inputVec, outputVec, /* hasOperatorChanged */ ii % 2 == 0);
       ColumnVector<real> delta = expected - outputVec;
-      EXPECT_TRUE(ldltStatus.converged);
+      EXPECT_EQ(ldltStatus.convergence, LinearSolverConvergenceStatus::Converged);
       EXPECT_NEAR_TOL(delta.Norm(), 0_r, kErrorRelTol * expected.Norm());
     }
   }
@@ -196,7 +221,7 @@ static void LinearSolve_PsdMatrix(PreconditionerType precType) {
       auto const ldltStatus =
           ldltSolver.Solve(inputMat, inputVec, outputVec, /* hasOperatorChanged */ ii % 2 == 0);
       ColumnVector<real> delta = expected - outputVec;
-      EXPECT_TRUE(ldltStatus.converged);
+      EXPECT_EQ(ldltStatus.convergence, LinearSolverConvergenceStatus::Converged);
       EXPECT_NEAR_TOL(delta.Norm(), 0_r, kErrorRelTol * expected.Norm());
     }
   }
@@ -213,7 +238,7 @@ static void LinearSolve_PsdMatrix(PreconditionerType precType) {
       auto const luStatus =
           luSolver.Solve(inputMat, inputVec, outputVec, /* hasOperatorChanged */ ii % 2 == 0);
       ColumnVector<real> delta = expected - outputVec;
-      EXPECT_TRUE(luStatus.converged);
+      EXPECT_EQ(luStatus.convergence, LinearSolverConvergenceStatus::Converged);
       EXPECT_NEAR_TOL(delta.Norm(), 0_r, kErrorRelTol * expected.Norm());
     }
   }

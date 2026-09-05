@@ -1,6 +1,6 @@
 # Differentiable-simulation tests: build the single- and double-precision physics wheels from
 # source the way the wheels workflow does (cibuildwheel, manylinux container, toolchain from the
-# pyprojects) and run the `superdex_python` test suite against them in both precisions -- the
+# pyprojects) and run the `superdex-physics` wheel's test suite against them in both precisions -- the
 # diffsim gradient checks (every path against independent finite differences) need the double
 # build, the single build runs the float32 smoke test and the loader tests.
 #
@@ -15,14 +15,16 @@ on:
     branches: [main]
     paths:
       - 'superdex_physics/**'
-      - 'superdex_python/**'
+      - 'superdex_physics/wheels/superdex-physics/**'
+      - 'superdex_physics/wheels/superdex-physics-fp64/**'
       - 'superdex_physics_fp64/**'
       - 'tools/build_wheels.py'
       - '.github/workflows/diffsim-tests.yml'
   pull_request:
     paths:
       - 'superdex_physics/**'
-      - 'superdex_python/**'
+      - 'superdex_physics/wheels/superdex-physics/**'
+      - 'superdex_physics/wheels/superdex-physics-fp64/**'
       - 'superdex_physics_fp64/**'
       - 'tools/build_wheels.py'
       - '.github/workflows/diffsim-tests.yml'
@@ -70,14 +72,14 @@ jobs:
           SUPERDEX_PRECISION=double python -c "import superdex.physics as p; assert p.uses_double_precision(); assert hasattr(p.diffsim, 'set_gravity_backward'), 'not this checkout''s engine'; print('double precision import ok')"
       - name: Test in double precision (diffsim gradient checks, torch bridge)
         shell: bash
-        working-directory: superdex_python
+        working-directory: superdex_physics/wheels/superdex-physics
         env:
           SUPERDEX_PRECISION: double
           SUPERDEX_REQUIRE_NATIVE: '1'
         run: python -m unittest discover -s test -t . -v
       - name: Test in single precision (float32 smoke test, loader)
         shell: bash
-        working-directory: superdex_python
+        working-directory: superdex_physics/wheels/superdex-physics
         env:
           SUPERDEX_REQUIRE_NATIVE: '1'
         run: python -m unittest discover -s test -t . -v

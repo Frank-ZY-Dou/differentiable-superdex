@@ -23,6 +23,7 @@
 #include "mochi_articulated_body.h"
 #include "mochi_constraint.h"
 #include "mochi_contact_filter.h"
+#include "mochi_contact_pair_params.h"
 #include "mochi_ecs_utils.h"
 #include "mochi_scene.h"
 #include "mochi_simulation.h"
@@ -53,6 +54,13 @@ struct ExportActorNameEntry {
   DynamicString name;
 };
 } // namespace
+
+// Helper function for deterministic serialization of name pairs.
+static void CanonicalizePair(DynamicString& first, DynamicString& second) {
+  if (second < first) {
+    std::swap(first, second);
+  }
+}
 
 // Helper function to make a name unique by appending a number if needed
 static void MakeNameUnique(DynamicString& name, std::unordered_map<std::string, int>& usedNames) {
@@ -463,6 +471,7 @@ static std::optional<ContactFilter> ExportContactFilter(
         LayerContactEntry entry;
         entry.enable = false;
         entry.layers = {nameA, nameB};
+        CanonicalizePair(entry.layers[0], entry.layers[1]);
         contactFilter.layerContactSymmetric->push_back(entry);
       }
     } else {
@@ -503,6 +512,7 @@ static std::optional<ContactFilter> ExportContactFilter(
     if (contactTable.entitiesWithNoContact.contains({entityB, entityA})) {
       // Both directions disabled - export as symmetric, only when A <= B to avoid duplicates
       if (entityA <= entityB) {
+        CanonicalizePair(entry.actors[0], entry.actors[1]);
         contactFilter.actorContactSymmetric->push_back(entry);
       }
     } else {
@@ -510,6 +520,19 @@ static std::optional<ContactFilter> ExportContactFilter(
       contactFilter.actorContactAsymmetric->push_back(entry);
     }
   }
+
+  std::ranges::sort(*contactFilter.actorContactAsymmetric, {}, [](ActorContactEntry const& entry) {
+    return std::pair<std::string_view, std::string_view>{entry.actors[0], entry.actors[1]};
+  });
+  std::ranges::sort(*contactFilter.actorContactSymmetric, {}, [](ActorContactEntry const& entry) {
+    return std::pair<std::string_view, std::string_view>{entry.actors[0], entry.actors[1]};
+  });
+  std::ranges::sort(*contactFilter.layerContactAsymmetric, {}, [](LayerContactEntry const& entry) {
+    return std::pair<std::string_view, std::string_view>{entry.layers[0], entry.layers[1]};
+  });
+  std::ranges::sort(*contactFilter.layerContactSymmetric, {}, [](LayerContactEntry const& entry) {
+    return std::pair<std::string_view, std::string_view>{entry.layers[0], entry.layers[1]};
+  });
 
   // Prune empty optional arrays
   if (contactFilter.actorContactAsymmetric->empty()) {
@@ -526,6 +549,38 @@ static std::optional<ContactFilter> ExportContactFilter(
   }
 
   return contactFilter;
+}
+
+static std::optional<DynamicArray<ContactPairParamsOverrideEntry>> ExportContactPairParamsOverrides(
+    entt::registry const& registry,
+    std::unordered_map<entt::entity, DynamicString> const& exportedActorNames) {
+  DynamicArray<ContactPairParamsOverrideEntry> entries;
+  auto const& table = registry.ctx<CContactPairParamsOverrideTable const>();
+  entries.reserve(table.GetRecords().size());
+
+  for (auto const& [entities, paramsOverride] : table.GetRecords()) {
+    auto const exportedNameA = exportedActorNames.find(entities.first);
+    auto const exportedNameB = exportedActorNames.find(entities.second);
+    if (exportedNameA == exportedActorNames.end() || exportedNameB == exportedActorNames.end()) {
+      continue;
+    }
+
+    ContactPairParamsOverrideEntry entry;
+    entry.actors = {exportedNameA->second, exportedNameB->second};
+    // Runtime pairs are unordered. Canonicalize by exported name, then sort the unordered table's
+    // entries so semantically identical scenes produce deterministic prefab JSON.
+    CanonicalizePair(entry.actors[0], entry.actors[1]);
+    entry.paramsOverride = paramsOverride;
+    entries.push_back(std::move(entry));
+  }
+
+  std::ranges::sort(entries, {}, [](ContactPairParamsOverrideEntry const& entry) {
+    return std::pair<std::string_view, std::string_view>{entry.actors[0], entry.actors[1]};
+  });
+  if (entries.empty()) {
+    return std::nullopt;
+  }
+  return entries;
 }
 
 static ArticulatedActorPrefab ExportArticulatedActorImpl(
@@ -989,7 +1044,7 @@ static bool ExportActorToPrefab(
   return true;
 }
 
-MOCHI_API void prefab::ExportScene(
+void prefab::ExportScene(
     Scene const* scene,
     std::string_view exportName,
     std::string_view outputDir,
@@ -997,7 +1052,7 @@ MOCHI_API void prefab::ExportScene(
   ExportSceneExcluding(scene, exportName, outputDir, {}, error);
 }
 
-MOCHI_API void prefab::ExportSceneExcluding(
+void prefab::ExportSceneExcluding(
     Scene const* scene,
     std::string_view exportName,
     std::string_view outputDir,
@@ -1233,14 +1288,15 @@ MOCHI_API void prefab::ExportSceneExcluding(
     return a.skeletonParams.name;
   });
 
-  // Export contact filter settings after all actors are named
+  // Export scene-level contact configuration after all actors are named.
   prefab.contactFilter = ExportContactFilter(registry, exportActorNames, error);
   MOCHI_ERROR_RETURN(error);
+  prefab.contactPairParamsOverrides = ExportContactPairParamsOverrides(registry, exportActorNames);
 
   WritePrefabToDisk(prefab, exportDir, exportName, error);
 }
 
-MOCHI_API void prefab::ExportActor(
+void prefab::ExportActor(
     Actor const* actor,
     std::string_view exportName,
     std::string_view outputDir,

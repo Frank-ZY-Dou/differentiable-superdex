@@ -890,11 +890,11 @@ void mochi::DefineMochiPhysics_MochiPhysicsScene([[maybe_unused]] py::module_& m
     )
     .def("destroy_constraint", py::overload_cast<mochi::Constraint*>(&mochi::Scene::DestroyConstraint)
       , py::arg("constraint")
-      , "Destroy a constraint and remove it from the scene.\n\nArgs:\n    constraint (Optional[Constraint]): Pointer to the constraint to destroy.\n\nNote:\n    If ``constraint`` is None, this function has no effect.\n\nNote:\n    After the constraint is destroyed, do not use the pointer or its handle.\n\nWarning:\n    The pointer must be None or point to a live constraint owned by this scene.\n    Passing a pointer to a constraint that has been destroyed is undefined\n    behavior.\n\nSee Also:\n    :meth:`~superdex.physics.Scene.get_constraint`,\n    :meth:`~superdex.physics.Constraint.get_handle`"
+      , "Destroy a constraint and remove it from the scene.\n\nArgs:\n    constraint (Optional[Constraint]): Pointer to the constraint to destroy.\n\nNote:\n    If ``constraint`` is None, this function has no effect.\n\nNote:\n    Use this function to destroy constraints created through the scene's\n    constraint-creation APIs. It has no effect on constraints created\n    automatically while creating or configuring an actor, such as joint-limit,\n    cycle-joint, or pose-controller constraints. To remove such a constraint,\n    remove the corresponding actor feature, if supported, or destroy the actor.\n\nNote:\n    After the constraint is destroyed, do not use the pointer or its handle.\n\nWarning:\n    The pointer must be None or point to a live constraint owned by this scene.\n    Passing a pointer to a constraint that has been destroyed is undefined\n    behavior.\n\nSee Also:\n    :meth:`~superdex.physics.Scene.get_constraint`,\n    :meth:`~superdex.physics.Constraint.get_handle`"
     )
     .def("destroy_constraint", py::overload_cast<mochi::ConstraintHandle>(&mochi::Scene::DestroyConstraint)
       , py::arg("constraint")
-      , "Destroy a constraint and remove it from the scene.\n\nArgs:\n    constraint (ConstraintHandle): Handle of the constraint to destroy. If\n        valid, it must be owned by this scene.\n\nNote:\n    An invalid handle or one that does not currently identify a constraint in\n    the scene has no effect.\n\nNote:\n    After the constraint is destroyed, do not use its handle.\n\nSee Also:\n    :meth:`~superdex.physics.Scene.get_constraint`,\n    :meth:`~superdex.physics.Constraint.get_handle`"
+      , "Destroy a constraint and remove it from the scene.\n\nArgs:\n    constraint (ConstraintHandle): Handle of the constraint to destroy. If\n        valid, it must be owned by this scene.\n\nNote:\n    An invalid handle or one that does not currently identify a constraint in\n    the scene has no effect.\n\nNote:\n    Use this function to destroy constraints created through the scene's\n    constraint-creation APIs. It has no effect on constraints created\n    automatically while creating or configuring an actor, such as joint-limit,\n    cycle-joint, or pose-controller constraints. To remove such a constraint,\n    remove the corresponding actor feature, if supported, or destroy the actor.\n\nNote:\n    After the constraint is destroyed, do not use its handle.\n\nSee Also:\n    :meth:`~superdex.physics.Scene.get_constraint`,\n    :meth:`~superdex.physics.Constraint.get_handle`"
     )
     .def("get_num_constraints", &mochi::Scene::GetNumConstraints
       , "Get the number of constraints in the scene.\n\nReturns:\n    Number of constraints in the scene.\n\nNote:\n    Includes constraints created implicitly by\n    :meth:`~superdex.physics.Scene.create_articulated_actor` (e.g. articulated\n    joint limits)."
@@ -988,6 +988,53 @@ void mochi::DefineMochiPhysics_MochiPhysicsScene([[maybe_unused]] py::module_& m
       , py::arg("enable")
       , py::arg("include_nested_actors")
       , "Equivalent to calling\n:meth:`~superdex.physics.Scene.enable_actor_contact_asymmetric` with ``actor_a``\nand ``actor_b`` in both orders using the same ``include_nested_actors``.\n\nArgs:\n    actor_a (ActorHandle): Handle of the first actor.\n    actor_b (ActorHandle): Handle of the second actor.\n    enable (bool): True to enable contact, false to disable it.\n    include_nested_actors (IncludeNestedActors | int): Whether nested actors\n        should be affected by this contact setting. See\n        :meth:`~superdex.physics.Scene.enable_actor_contact_asymmetric` for\n        details.\n\nRaises:\n    :class:`~superdex.physics.Error`: If an error occurs.\n\nSee Also:\n    :meth:`~superdex.physics.Scene.enable_actor_contact_asymmetric`,\n    :meth:`~superdex.physics.Scene.enable_layer_contact_symmetric`"
+    )
+    .def("set_contact_pair_params_override", [](mochi::Scene& self, mochi::ActorHandle actor_a, mochi::ActorHandle actor_b, mochi::ContactPairParamsOverride const& params_override) {
+      mochi::Error error;
+      self.SetContactPairParamsOverride(actor_a, actor_b, params_override, error);
+      if (!error.IsOK()) {
+        throw MochiErrorException(error);
+      }
+    }
+      , py::arg("actor_a")
+      , py::arg("actor_b")
+      , py::arg("params_override")
+      , "Set contact parameter overrides for an unordered actor pair.\n\nArgs:\n    actor_a (ActorHandle): Handle of the first actor.\n    actor_b (ActorHandle): Handle of the second actor.\n    params_override (ContactPairParamsOverride): Parameter override with at\n        least one present field. This replaces any existing override for the\n        pair; absent fields use the normal actor-parameter combination.\n\nRaises:\n    :class:`~superdex.physics.Error`: If an error occurs.\n\nNote:\n    Both actors must have contact parameters.\n\nNote:\n    The exact actors are used; nested actors are not included automatically.\n\nSee Also:\n    :meth:`~superdex.physics.Scene.clear_contact_pair_params_override`,\n    :meth:`~superdex.physics.Scene.has_contact_pair_params_override`,\n    :meth:`~superdex.physics.Scene.get_contact_pair_params_override`"
+    )
+    .def("clear_contact_pair_params_override", [](mochi::Scene& self, mochi::ActorHandle actor_a, mochi::ActorHandle actor_b) {
+      mochi::Error error;
+      self.ClearContactPairParamsOverride(actor_a, actor_b, error);
+      if (!error.IsOK()) {
+        throw MochiErrorException(error);
+      }
+    }
+      , py::arg("actor_a")
+      , py::arg("actor_b")
+      , "Clear contact parameter overrides for an unordered actor pair.\n\nArgs:\n    actor_a (ActorHandle): Handle of the first actor.\n    actor_b (ActorHandle): Handle of the second actor.\n\nRaises:\n    :class:`~superdex.physics.Error`: If an error occurs.\n\nNote:\n    Clearing a valid pair without an override succeeds without changing the\n    scene.\n\nSee Also:\n    :meth:`~superdex.physics.Scene.set_contact_pair_params_override`"
+    )
+    .def("has_contact_pair_params_override", [](mochi::Scene& self, mochi::ActorHandle actor_a, mochi::ActorHandle actor_b) {
+      mochi::Error error;
+      auto result = self.HasContactPairParamsOverride(actor_a, actor_b, error);
+      if (!error.IsOK()) {
+        throw MochiErrorException(error);
+      }
+      return result;
+    }
+      , py::arg("actor_a")
+      , py::arg("actor_b")
+      , "Check whether the exact unordered actor pair has a parameter override.\n\nArgs:\n    actor_a (ActorHandle): Handle of the first actor.\n    actor_b (ActorHandle): Handle of the second actor.\n\nReturns:\n    True if the exact pair has a stored override.\n\nRaises:\n    :class:`~superdex.physics.Error`: If an error occurs.\n\nSee Also:\n    :meth:`~superdex.physics.Scene.get_contact_pair_params_override`"
+    )
+    .def("get_contact_pair_params_override", [](mochi::Scene& self, mochi::ActorHandle actor_a, mochi::ActorHandle actor_b) {
+      mochi::Error error;
+      auto result = self.GetContactPairParamsOverride(actor_a, actor_b, error);
+      if (!error.IsOK()) {
+        throw MochiErrorException(error);
+      }
+      return result;
+    }
+      , py::arg("actor_a")
+      , py::arg("actor_b")
+      , "Get the parameter override for the exact unordered actor pair.\n\nArgs:\n    actor_a (ActorHandle): Handle of the first actor.\n    actor_b (ActorHandle): Handle of the second actor.\n\nReturns:\n    The complete stored override.\n\nRaises:\n    :class:`~superdex.physics.Error`: If an error occurs.\n\nNote:\n    Reports an error when a valid pair has no stored override.\n\nSee Also:\n    :meth:`~superdex.physics.Scene.set_contact_pair_params_override`,\n    :meth:`~superdex.physics.Scene.has_contact_pair_params_override`"
     )
     .def("register_pre_step_callback", &mochi::Scene::RegisterPreStepCallback
       , py::arg("debug_name")

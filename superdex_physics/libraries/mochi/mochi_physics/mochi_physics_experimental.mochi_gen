@@ -1,3 +1,17 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 namespace experimental;
 
 fn experimental::RestoreStateFromScene(Scene* sceneTo, Scene const* sceneFrom, StateHandle handleFrom) -> void [mochi_error];
@@ -182,7 +196,7 @@ struct experimental::IKSolverParams [no_reflection] {
 // target position and orientation of rigid links in articulated bodies.
 //
 // @note The IK solver takes ownership of the scene passed at creation. The scene is mutated
-// (e.g., gravity zeroed, single-island forced, contact friction zeroed, articulated inertia and joint
+// (e.g., gravity zeroed, single-island forced, contact dissipation zeroed, articulated inertia and joint
 // friction removed) and is unsuitable for general simulation afterward. Use it only via this
 // @ref IKSolver.
 // @note Targets must be set before calling @ref IKSolver::SolveIK.
@@ -279,11 +293,14 @@ class experimental::IKSolver [no_init, no_destruct, no_reflection] {
 //
 // @return Pointer to the created @ref experimental::IKSolver, or nullptr on error.
 //
-// @note The @ref experimental::IKSolver assumes exclusive control of the provided scene. The scene
-// must not be used directly and will be destroyed by @ref experimental::DestroyIKSolver.
-// @note Scene ownership transfers only on success. On error, ownership is unchanged.
+// @note The scene must have been created with @ref Context::CreateScene and must not be owned or
+// managed by another API.
+// @note On success, ownership transfers to the @ref experimental::IKSolver, which assumes exclusive
+// control and destroys the scene when @ref experimental::DestroyIKSolver is called. Do not use the
+// scene directly after ownership transfers. On error, ownership is unchanged.
+// @note Returns an error if scene ownership has already been claimed.
 // @note The scene must contain only @ref ActorType::Articulated and @ref ActorType::Rigid actors.
-// @note The scene's solver parameters, gravity, single-island setting, contact friction, and
+// @note The scene's solver parameters, gravity, single-island setting, contact dissipation, and
 // articulated inertia/joint-friction terms are reconfigured for IK and cannot be relied upon
 // afterwards.
 //
@@ -382,6 +399,12 @@ struct experimental::RodActorParams [no_reflection] {
   // @note Each element's frame axis is interpreted as one cross-sectional principal axis (the other
   // is the cross product of the segment direction and that axis); the flexural stiffness components
   // are defined with respect to these axes.
+  // @note A rod actor uses a visual mesh only when the shape has embedding data. For shapes created
+  // from @ref ModelData, the embedding is built from the skinning data in @ref
+  // ModelData::visualMesh. Without visual-mesh skinning, @ref Context::GetShapeVisualMesh still
+  // returns the shape's visual mesh, but the rod actor ignores it: @ref Actor::GetVisualMesh returns
+  // an empty view, and @ref QueryType::VisualNodePositions and @ref QueryType::VisualNodeNormals are
+  // unsupported. Setting @ref useVisualMeshContact to true then causes actor creation to fail.
   ShapeHandle shape;
 
   // @brief Contact properties for interactions with volume actors.
