@@ -12,6 +12,15 @@ wheels = [
 ]
 
 [[package]]
+name = "attrs"
+version = "26.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9a/8e/82a0fe20a541c03148528be8cac2408564a6c9a0cc7e9171802bc1d26985/attrs-26.1.0.tar.gz", hash = "sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32", size = 952055, upload-time = "2026-03-19T14:22:25.026Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl", hash = "sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309", size = 67548, upload-time = "2026-03-19T14:22:23.645Z" },
+]
+
+[[package]]
 name = "certifi"
 version = "2026.7.22"
 source = { registry = "https://pypi.org/simple" }
@@ -343,6 +352,21 @@ wheels = [
 ]
 
 [[package]]
+name = "pyarrow"
+version = "25.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3d/e3/27f57f80141379d60defe6703eb50a707325706f07fedfd1312c7a751995/pyarrow-25.0.1.tar.gz", hash = "sha256:9150a83248bfed9813ea3c3af74c3856c1984d444aa28e58bf7733b9750ddf6a", size = 1201653, upload-time = "2026-08-10T12:40:53.904Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a6/e2/9ab15b88cbfac28e16419ce5439ec29234c5172cb8259301b4ba639bdec0/pyarrow-25.0.1-cp312-cp312-macosx_12_0_arm64.whl", hash = "sha256:df961f2e7ae9cf496459259d798652c70625f6c080650d6952f8c04053c58ee9", size = 35861559, upload-time = "2026-08-10T12:38:02.567Z" },
+    { url = "https://files.pythonhosted.org/packages/58/79/a0036dbe1eabe1f73127427342f1d99982584c4a2cde2651d6c93499c6f6/pyarrow-25.0.1-cp312-cp312-macosx_12_0_x86_64.whl", hash = "sha256:cc4aa407fde9fc660be3939e49ea31f50f3e9fec17c0ec63159f7711edd3efc9", size = 37628383, upload-time = "2026-08-10T12:38:09.083Z" },
+    { url = "https://files.pythonhosted.org/packages/13/49/d93a57d375f4bf0cf82913dd6bb54acafde83dd993be2282c81ac5616cad/pyarrow-25.0.1-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:4340f0ba6c1d2e13f21658de1d7c662ca2545018568d0030a1e9afca159d87e3", size = 46820190, upload-time = "2026-08-10T12:38:15.458Z" },
+    { url = "https://files.pythonhosted.org/packages/60/c9/711ca85d79f1ec98f29a5eae2b051e25b4ecec5de3e3c0e2d5c5dcb15664/pyarrow-25.0.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:5389cdf79447ed1515c9e31620e6e1e2302249564d603f2ad727d4f6d313e4c3", size = 50102437, upload-time = "2026-08-10T12:38:22.487Z" },
+    { url = "https://files.pythonhosted.org/packages/80/53/8fb8359ff17cfb6263a1cf3ebf7caec9fe197de118719e84fcb1d0618026/pyarrow-25.0.1-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:d51592cb7561e87877c506113e7adbf1342ab579e6c21f0ef44b8ba41cb74c80", size = 49942424, upload-time = "2026-08-10T12:38:28.755Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/83/4e5ae02a9341571b18a6fca380ac7a58ce6ddae7ab3c060208c0a1e79f02/pyarrow-25.0.1-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:6109c94d8b9f3b17a041daca16cacb2f651ad8f1ef70a4232c2c0f37a23da2a8", size = 53144206, upload-time = "2026-08-10T12:38:34.862Z" },
+    { url = "https://files.pythonhosted.org/packages/65/ee/197cbf47e49f83e6ebeb946a5259a48a638dea27ac774db42fe78022179d/pyarrow-25.0.1-cp312-cp312-win_amd64.whl", hash = "sha256:8858d7bfc22e3f51529aeaa4077225029724623e4595dc9eff8c793935c34140", size = 27953934, upload-time = "2026-08-10T12:38:39.808Z" },
+]
+
+[[package]]
 name = "pycollada"
 version = "0.9.3"
 source = { registry = "https://pypi.org/simple" }
@@ -451,6 +475,25 @@ wheels = [
 ]
 
 [[package]]
+name = "rerun-sdk"
+version = "0.33.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "psutil" },
+    { name = "pyarrow" },
+    { name = "typing-extensions" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/31/17/5a521e86ac0064bd0f452e3e98e2422433511b54110423c0217d2cc1234f/rerun_sdk-0.33.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:97f123e3ef6aa69b60194bc566e5435c7d4040757ed4f58297ea46c8ef320c5c", size = 125707606, upload-time = "2026-05-29T09:42:53.584Z" },
+    { url = "https://files.pythonhosted.org/packages/34/2f/2ca2599aca03b69fbcac7c8391ef50376968edd7c58b96de53a4b7f20624/rerun_sdk-0.33.0-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:8f734cf59419dcfbc46915bea6cec030224f16e96c3a597f0ccf7cb7b058dd43", size = 135271020, upload-time = "2026-05-29T09:43:00.106Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/ba/d70997b43e6db4f58c4326c29c6a6a384ddc6c2fe125f231c885ad9b3b1f/rerun_sdk-0.33.0-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:53d95609f8b330026bcd041bf6d11b46ee1c18b6fbde155135f291fe86328eeb", size = 139552018, upload-time = "2026-05-29T09:43:06.275Z" },
+    { url = "https://files.pythonhosted.org/packages/14/a5/0cac294d16aff6c9a2f183f838428a0380b4d2fd9e053bb37b3041999ad5/rerun_sdk-0.33.0-cp310-abi3-win_amd64.whl", hash = "sha256:b152992a72ec240062c8c285bd30ab681b464a25efbe1464c66fdac82320de1f", size = 120418186, upload-time = "2026-05-29T09:43:13.733Z" },
+]
+
+[[package]]
 name = "scikit-build-core"
 version = "1.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -521,7 +564,7 @@ wheels = [
 
 [[package]]
 name = "superdex-dev"
-version = "1.0.0"
+version = "1.0.0+diffsim.1"
 source = { virtual = "." }
 
 [package.optional-dependencies]
@@ -592,7 +635,7 @@ provides-extras = ["build", "core", "double", "fp64", "gui"]
 
 [[package]]
 name = "superdex-lab"
-version = "1.0.0"
+version = "1.0.0+diffsim.1"
 source = { editable = "superdex_lab" }
 dependencies = [
     { name = "gymnasium" },
@@ -607,18 +650,18 @@ requires-dist = [
     { name = "gymnasium", specifier = ">=1.1.1" },
     { name = "h5py", specifier = ">=3.11.0" },
     { name = "numpy", specifier = ">=1.26.4" },
-    { name = "superdex-physics", specifier = "==1.0.0" },
-    { name = "superdex-robotics", specifier = "==1.0.0" },
+    { name = "superdex-physics", specifier = "==1.0.0+diffsim.1" },
+    { name = "superdex-robotics", specifier = "==1.0.0+diffsim.1" },
 ]
 
 [[package]]
 name = "superdex-mesh-cli"
-version = "1.0.0"
+version = "1.0.0+diffsim.1"
 source = { editable = "superdex_mesh_cli" }
 
 [[package]]
 name = "superdex-physics"
-version = "1.0.0"
+version = "1.0.0+diffsim.1"
 source = { editable = "superdex_physics/wheels/superdex-physics" }
 dependencies = [
     { name = "imageio", extra = ["ffmpeg"] },
@@ -627,6 +670,7 @@ dependencies = [
     { name = "polyscope" },
     { name = "pycollada" },
     { name = "pyre-extensions" },
+    { name = "rerun-sdk" },
     { name = "scikit-image" },
     { name = "scipy" },
     { name = "tabulate" },
@@ -643,10 +687,11 @@ requires-dist = [
     { name = "polyscope", specifier = ">=2.5.0,<2.6" },
     { name = "pycollada" },
     { name = "pyre-extensions" },
+    { name = "rerun-sdk", specifier = "==0.33.0" },
     { name = "scikit-image" },
     { name = "scipy" },
-    { name = "superdex-physics-fp64", marker = "extra == 'double'", specifier = "==1.0.0" },
-    { name = "superdex-physics-fp64", marker = "extra == 'fp64'", specifier = "==1.0.0" },
+    { name = "superdex-physics-fp64", marker = "extra == 'double'", specifier = "==1.0.0+diffsim.1" },
+    { name = "superdex-physics-fp64", marker = "extra == 'fp64'", specifier = "==1.0.0+diffsim.1" },
     { name = "tabulate" },
     { name = "trimesh" },
     { name = "typing-extensions" },
@@ -656,23 +701,23 @@ provides-extras = ["double", "fp64"]
 
 [[package]]
 name = "superdex-physics-debugger"
-version = "1.0.0"
+version = "1.0.0+diffsim.1"
 source = { editable = "superdex_physics_debugger" }
 
 [[package]]
 name = "superdex-physics-fp64"
-version = "1.0.0"
+version = "1.0.0+diffsim.1"
 source = { editable = "superdex_physics/wheels/superdex-physics-fp64" }
 dependencies = [
     { name = "superdex-physics" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "superdex-physics", specifier = "==1.0.0" }]
+requires-dist = [{ name = "superdex-physics", specifier = "==1.0.0+diffsim.1" }]
 
 [[package]]
 name = "superdex-robotics"
-version = "1.0.0"
+version = "1.0.0+diffsim.1"
 source = { editable = "superdex_robotics/wheels/superdex-robotics" }
 dependencies = [
     { name = "superdex-physics" },
@@ -680,15 +725,15 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "superdex-physics", specifier = "==1.0.0" },
-    { name = "superdex-robotics-fp64", marker = "extra == 'double'", specifier = "==1.0.0" },
-    { name = "superdex-robotics-fp64", marker = "extra == 'fp64'", specifier = "==1.0.0" },
+    { name = "superdex-physics", specifier = "==1.0.0+diffsim.1" },
+    { name = "superdex-robotics-fp64", marker = "extra == 'double'", specifier = "==1.0.0+diffsim.1" },
+    { name = "superdex-robotics-fp64", marker = "extra == 'fp64'", specifier = "==1.0.0+diffsim.1" },
 ]
 provides-extras = ["double", "fp64"]
 
 [[package]]
 name = "superdex-robotics-fp64"
-version = "1.0.0"
+version = "1.0.0+diffsim.1"
 source = { editable = "superdex_robotics/wheels/superdex-robotics-fp64" }
 dependencies = [
     { name = "superdex-physics-fp64" },
@@ -697,20 +742,20 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "superdex-physics-fp64", specifier = "==1.0.0" },
-    { name = "superdex-robotics", specifier = "==1.0.0" },
+    { name = "superdex-physics-fp64", specifier = "==1.0.0+diffsim.1" },
+    { name = "superdex-robotics", specifier = "==1.0.0+diffsim.1" },
 ]
 
 [[package]]
 name = "superdex-studio"
-version = "1.0.0"
+version = "1.0.0+diffsim.1"
 source = { editable = "superdex_studio" }
 dependencies = [
     { name = "superdex-mesh-cli" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "superdex-mesh-cli", specifier = "==1.0.0" }]
+requires-dist = [{ name = "superdex-mesh-cli", specifier = "==1.0.0+diffsim.1" }]
 
 [[package]]
 name = "tabulate"

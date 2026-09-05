@@ -18,7 +18,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "superdex-robotics-fp64"
-version = "1.0.0"
+version = "1.0.0+diffsim.1"
 requires-python = ">=3.12,<3.13"
 authors = [{name = "SuperDex Team"}]
 description = "FP64 robotics extension for SuperDex"
@@ -26,8 +26,8 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "thirdparty_licenses/**/*"]
 dependencies = [
-    "superdex-physics-fp64==1.0.0",
-    "superdex-robotics==1.0.0",
+    "superdex-physics-fp64==1.0.0+diffsim.1",
+    "superdex-robotics==1.0.0+diffsim.1",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",

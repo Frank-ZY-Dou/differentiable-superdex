@@ -18,7 +18,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "superdex-physics"
-version = "1.0.0"
+version = "1.0.0+diffsim.1"
 requires-python = ">=3.12,<3.13"
 authors = [{name = "SuperDex Team"}]
 description = "Physics runtime for SuperDex"
@@ -49,8 +49,8 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-double = ["superdex-physics-fp64==1.0.0"]
-fp64 = ["superdex-physics-fp64==1.0.0"]
+double = ["superdex-physics-fp64==1.0.0+diffsim.1"]
+fp64 = ["superdex-physics-fp64==1.0.0+diffsim.1"]
 
 [project.urls]
 Homepage = "https://github.com/facebookresearch/project_superdex"

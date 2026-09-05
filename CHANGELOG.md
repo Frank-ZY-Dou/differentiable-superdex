@@ -2,7 +2,11 @@
 
 All notable changes to this repository will be documented here.
 
-## [Unreleased]
+## [1.0.0+diffsim.1] - 2026-09-05
+
+The differentiable-simulation fork of SuperDex 1.0.0 (`+diffsim.N` counts the fork's
+releases on that base; these distributions are built from this repository, not from PyPI).
+
 
 - Differentiable simulation (`superdex.physics.diffsim`, `diffsim_rollout`, `diffsim_torch`):
   the discrete adjoint through the implicit steps now covers rigid, articulated (with pose
