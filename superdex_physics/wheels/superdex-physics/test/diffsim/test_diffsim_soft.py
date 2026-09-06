@@ -691,22 +691,31 @@ class DeformableColliderGradientTest(unittest.TestCase):
         self.assertGreater(float(np.abs(fd).max()), 1e-6, "vacuous: the forces do not move the loss")
         np.testing.assert_allclose(adjoint, fd, rtol=1e-4, atol=1e-11)
 
-    def test_contact_force_adjoint_against_a_deformable_collider_is_refused(self) -> None:
-        """The box's total contact force depends on the soft collider's nodal positions, which
-        the contact-force adjoint does not reach: it is refused (the value is available)."""
+    def test_contact_force_adjoint_against_a_deformable_collider_runs(self) -> None:
+        """The box's total contact force depends on the soft collider's nodal positions; the
+        contact-force adjoint reaches them (exactness: EngineContactForceAdjointTest in
+        test_diffsim_torch). Here: the adjoint runs and leaves a nonzero gradient on the
+        soft cube's initial nodal velocities."""
         scene, soft, rigid = scenes.rigid_on_soft_collider("coulomb")
         self.addCleanup(physics.destroy_scene, scene)
         _configure(scene)
         rigid.register_query(physics.QueryType.TOTAL_CONTACT_FORCE)
-        pre = scene.capture_state()
-        scene.step(self.dt)
-        post = scene.capture_state()
-        self.assertGreater(float(np.linalg.norm(rigid.get_contact_force_world())), 1.0)
-        diffsim.reset_back_propagation(scene)
-        diffsim.prepare_back_propagate(scene, post, pre)
-        with self.assertRaisesRegex(Exception, "deformable collider"):
-            diffsim.get_contact_force_world_backward(rigid, np.array([1.0, 0.0, 0.0]))
-        scene.release_all_states()
+
+        class ForceLoss:
+            def value(self) -> float:
+                f = np.asarray(rigid.get_contact_force_world(), dtype=np.float64)
+                return 0.5 * float(f @ f)
+
+            def accumulate_output_grad(self) -> None:
+                diffsim.get_contact_force_world_backward(
+                    rigid, np.asarray(rigid.get_contact_force_world(), dtype=np.float64)
+                )
+
+        result = DifferentiableRollout(scene, dt=self.dt, num_steps=4).run(
+            apply_inputs=lambda step: None, terminal_losses=[ForceLoss()]
+        )
+        self.assertTrue(result.fd_valid, result.flagged_steps)
+        self.assertGreater(float(np.abs(result.gradients["jelly"].initial_velocity).max()), 0.0)
 
     def _stack_loss_rollout(self, friction, v_top, v_bottom, num_steps):
         scene, bottom, top = scenes.soft_on_soft(friction)

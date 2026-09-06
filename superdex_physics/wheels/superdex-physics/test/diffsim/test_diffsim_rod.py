@@ -526,11 +526,12 @@ class RodSupportBoundaryTest(unittest.TestCase):
         were refused before): the gradient of the rod's tip position with respect to the
         cube's initial velocity against central FD, as in RodDynamicContactAdjointTest.
         Measured 1.2e-4 relative (x 1.1e-4, y 1.4e-5, z 7e-4 on a component ten times
-        smaller; the difference quotients agree to 1e-5 from eps 1e-5 to 1e-7), against
-        3e-5 with the box collider of the same cube (x 2.4e-5, z 1.7e-4): the rod-cube
-        contact scenes carry an approximation of this order on the rod side (see
-        scenes.rod_onto_cube), and a rigid cube on a static mesh box or the chain pushing
-        a mesh-collider cube are exact to 5e-7 / 1e-4 (test_diffsim_gradients)."""
+        smaller), against 3e-5 with the box collider of the same cube (x 2.4e-5, z 1.7e-4).
+        These are not adjoint errors: the loss is piecewise smooth (the rod's contact set
+        switches), and its difference quotients spread by 3e-3 (x, y) to 4e-2 (z) across
+        eps 1e-6..1e-9, a band the adjoint lies within (2026-09-06). A rigid cube on a static
+        mesh box or the chain pushing a mesh-collider cube are exact to 5e-7 / 1e-4
+        (test_diffsim_gradients)."""
         dt, num_steps, goal = 0.005, 20, np.array([0.3, 0.0, 0.1])
         v0_cube = np.array([0.3, 0.0, 0.0])
         scene, rod, cube = scenes.rod_onto_cube(

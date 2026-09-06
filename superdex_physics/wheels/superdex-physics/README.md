@@ -202,9 +202,9 @@ rigid bodies, so torque gradients are exact to 1.6e-7 at 0.3 N m and 3e-5 at 1.2
 cube; the contact-force query adjoint is exact against static and moving colliders alike,
 checked against the kinematic identity of a free body); the
 stiffness damping of soft materials and point-cloud colliders (shells and rods acting as
-colliders, no SDF Hessians) are not differentiable, the adjoint of a contact-force query on an
-actor touching a deformable collider is refused, and the rod-cube contact scenes carry a
-1e-4-level approximation on the rod side (documented in their tests); a soft body pressed and dragged by a link can trap the forward Newton solve at
+colliders, no SDF Hessians) are not differentiable, and the contact-force query adjoint refuses
+contacts with point-cloud colliders and the samples of shells and rods (a soft body as the
+collider or as the colliding body is covered); a soft body pressed and dragged by a link can trap the forward Newton solve at
 isolated steps, which the driver's substepping resolves (see the examples' docstrings). Losses
 through frictional contact are piecewise smooth: at steps where the forward Newton solve is
 nearly degenerate (100+ iterations to a 1e-9 residual, an arm pushing a cube over the ground)

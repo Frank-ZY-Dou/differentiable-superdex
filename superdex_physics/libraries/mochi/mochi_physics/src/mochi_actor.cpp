@@ -2714,18 +2714,21 @@ static void AccumulateContactForceWorldAdjoints(
       numContacts == isize(collisionResult.forcePerUnitArea),
       "Expected prepared force adjoints for every contact point.");
   MOCHI_ASSERT(
-      collisionResult.jacColliderFromWorld.size() == 1,
-      "Contact-force adjoints against a deformable collider are refused by the caller.");
+      collisionResult.jacColliderFromWorld.size() == 1 ||
+          isize(collisionResult.jacColliderFromWorld) == numContacts,
+      "Unexpected number of collider-space Jacobians.");
 
-  // Transform to collider space
-  gradForce = DotMatVec3x3(collisionResult.jacColliderFromWorld[0], gradForce);
-
-  // Accumulate into each contact's adjoint
+  // Accumulate into each contact's adjoint, in the collider space of that contact (one shared
+  // Jacobian for rigid colliders, one per contact for mapped ones).
   auto const& collidingSamples = reg.get<CContactSamples<TimeStep::Current> const>(colliding);
-  for (int i = 0; i < numContacts; ++i) {
+  int const dJac = collisionResult.jacColliderFromWorld.size() == 1 ? 0 : 1;
+  for (int i = 0, iJac = 0; i < numContacts; ++i, iJac += dJac) {
+    Vec4r const gradForceCollider =
+        DotMatVec3x3(collisionResult.jacColliderFromWorld[iJac], gradForce);
     // Multiply by the contact weight of the colliding actor's sample
     int const sample = collisionResult.sampleIndices[i];
-    collisionResult.forcePerUnitArea[i] += ToReal3(collidingSamples.weights[sample] * gradForce);
+    collisionResult.forcePerUnitArea[i] +=
+        ToReal3(collidingSamples.weights[sample] * gradForceCollider);
   }
 }
 
@@ -2749,22 +2752,31 @@ static void GetContactForceWorldBackwardImpl(
   MOCHI_ERROR_RETURN(error);
 
   Vec4r const gradForceWorld = Load<RigidSize::kDTrans, Vec4r>(gradOutput.data());
-  // The force adjoints of a deformable (mapped) collider would have to reach its nodal degrees
-  // of freedom through the per-contact mapping Jacobians, which the contact-force adjoint
-  // accumulation does not do (it treats every collider as rigid): refuse rather than drop them.
-  auto const isDeformableCollider = [](ContactDetectionResult const& result) {
-    return !result.posColliding.empty() && result.jacColliderFromWorld.size() != 1;
+  // The accumulation of the force adjoints (AccumulateContactForceAdjoints) covers rigid
+  // actors and articulated links, and soft actors with an SDF collider (their mapping); the
+  // samples of shells and rods and point-cloud colliders are not covered - refuse rather than
+  // drop their terms.
+  auto const isSupportedCollider = [&](entt::entity collider) {
+    return reg.any_of<TagStaticActor, TagRigidActor>(collider) ||
+        (reg.all_of<TagSoftActor>(collider) && !reg.any_of<TagNestedSoftActor, TagRomActor>(collider) &&
+         reg.try_get<CSdfMapping<TimeStep::Current> const>(collider) != nullptr);
+  };
+  auto const isSupportedColliding = [&](entt::entity colliding) {
+    return reg.all_of<TagRigidActor>(colliding) ||
+        (reg.all_of<TagSoftActor>(colliding) &&
+         !reg.any_of<TagNestedSoftActor, TagRomActor>(colliding));
   };
   if (auto* collisionsAsync =
           reg.try_get<CActiveCollisions<ContactType::Async, TimeStep::Current>>(e)) {
     for (auto& collision : *collisionsAsync) {
       if (exclusiveEntity == entt::null || collision.colliderEntity == exclusiveEntity) {
         MOCHI_ERROR_IF(
-            isDeformableCollider(collision.collisionResult),
+            !collision.collisionResult.posColliding.empty() &&
+                !isSupportedCollider(collision.colliderEntity),
             error,
-            "Contact-force adjoints against a deformable collider are not supported: the "
-            "queried force depends on the collider's nodal positions. Query the force on the "
-            "deformable actor's own samples instead, or disable that contact.");
+            "Contact-force adjoints against this collider are not supported (point-cloud, "
+            "shell, rod, nested or ROM colliders): disable that contact or set its collider "
+            "type to NONE.");
         MOCHI_ERROR_RETURN(error);
         AccumulateContactForceWorldAdjoints(reg, e, collision.collisionResult, gradForceWorld);
       }
@@ -2775,11 +2787,12 @@ static void GetContactForceWorldBackwardImpl(
     for (auto& collision : *collisionsSync) {
       if (exclusiveEntity == entt::null || collision.colliderEntity == exclusiveEntity) {
         MOCHI_ERROR_IF(
-            isDeformableCollider(collision.collisionResult),
+            !collision.collisionResult.posColliding.empty() &&
+                !isSupportedCollider(collision.colliderEntity),
             error,
-            "Contact-force adjoints against a deformable collider are not supported: the "
-            "queried force depends on the collider's nodal positions. Query the force on the "
-            "deformable actor's own samples instead, or disable that contact.");
+            "Contact-force adjoints against this collider are not supported (point-cloud, "
+            "shell, rod, nested or ROM colliders): disable that contact or set its collider "
+            "type to NONE.");
         MOCHI_ERROR_RETURN(error);
         AccumulateContactForceWorldAdjoints(reg, e, collision.collisionResult, gradForceWorld);
       }
@@ -2794,6 +2807,12 @@ static void GetContactForceWorldBackwardImpl(
         if (reg.any_of<CRequiresFarSdfEvaluation>(jac.otherEntity)) {
           continue;
         }
+        MOCHI_ERROR_IF(
+            !jac.query->posColliding.empty() && !isSupportedColliding(jac.otherEntity),
+            error,
+            "Contact-force adjoints of the samples of a shell, rod, nested or ROM actor "
+            "against this actor are not supported: disable that contact.");
+        MOCHI_ERROR_RETURN(error);
         AccumulateContactForceWorldAdjoints(reg, jac.otherEntity, *jac.query, -gradForceWorld);
       }
     }

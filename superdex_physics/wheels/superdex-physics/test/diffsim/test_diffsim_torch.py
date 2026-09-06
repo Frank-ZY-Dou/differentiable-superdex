@@ -978,6 +978,73 @@ class PolicyRolloutTest(unittest.TestCase):
         self.assertGreaterEqual(len(rel_errors), 2, f"too few smooth entries: {skipped}")
         self.assertLessEqual(max(rel_errors.values()), 1e-4, (rel_errors, skipped))
 
+    def test_contact_force_observation_on_a_soft_collider_vs_fd(self) -> None:
+        """A rigid box resting on a soft cube that is an SDF collider, observed (its contact
+        force, from both directions of the contact) and driven (the policy's output is the
+        external force on it): directional FD along the gradient at eps 1e-6 / 1e-7."""
+        diffsim_torch = _make_bridge_module()
+        scene, soft, rigid = scenes.rigid_on_soft_collider("coulomb")
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        observations = [diffsim_torch.ContactForceObservation(rigid)]
+        num_steps = 12
+        start = np.asarray(rigid.get_center_of_mass_transform().translation, dtype=np.float64)
+        terminal = TranslationErrorLoss(rigid, ref=start + np.array([0.04, 0.0, -0.01]))
+        policy = torch.nn.Linear(3 + 1, 6).double()
+        with torch.no_grad():
+            policy.weight.copy_(torch.tensor(0.05 * np.cos(np.arange(6 * 4, dtype=np.float64)).reshape(6, 4)))
+            policy.weight[3:, :] = 0.0
+            policy.weight[0, -1] = 4.0
+            policy.bias.zero_()
+        rollout = diffsim_torch.PolicyRollout(
+            scene, dt=DT, num_steps=num_steps, policy=policy, observations=observations,
+            force_actors=[rigid], time_feature=True, terminal_losses=[terminal],
+        )
+        self.addCleanup(rollout.close)
+        loss = rollout()
+        loss.backward()
+        self.assertTrue(rollout.last_result.fd_valid)
+        params = list(policy.parameters())
+        analytic = [p.grad.detach().numpy().copy() for p in params]
+        values = [p.detach().numpy().copy() for p in params]
+        state_init = rollout.initial_state
+        dofs = np.arange(6, dtype=np.int32)
+        self.assertGreater(float(np.abs(analytic[0][:3, :3]).max()), 0.0)
+
+        def objective() -> float:
+            with torch.no_grad():
+                for p, v in zip(params, values):
+                    p.copy_(torch.tensor(v, dtype=torch.float64))
+            scene.restore_state(state_init, False)
+            rollout.probe_initial_observations()
+            for step in range(num_steps):
+                obs = np.concatenate([observations[0].value(), [step / num_steps]])
+                with torch.no_grad():
+                    forces = policy(torch.tensor(obs, dtype=torch.float64)).numpy()
+                rigid.set_external_forces_on_dofs(dofs, np.ascontiguousarray(forces))
+                scene.step(DT)
+                _assert_step_converged(self, scene, step)
+            return terminal.value()
+
+        self.assertAlmostEqual(objective(), float(loss.detach()), delta=1e-12)
+        self.assertGreater(float(np.linalg.norm(observations[0].value())), 1.0, "the box must be in contact")
+        grad_norm = float(np.sqrt(sum(float((g * g).sum()) for g in analytic)))
+        direction = [g / grad_norm for g in analytic]
+
+        def directional_fd(eps: float) -> float:
+            pair = []
+            for sign in (+1.0, -1.0):
+                for v, d in zip(values, direction):
+                    v += sign * eps * d
+                pair.append(objective())
+                for v, d in zip(values, direction):
+                    v -= sign * eps * d
+            return (pair[0] - pair[1]) / (2.0 * eps)
+
+        fds = [directional_fd(eps) for eps in (1e-6, 1e-7)]
+        self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), 1e-4, f"rough directional FD {fds}")
+        self.assertLessEqual(abs(grad_norm - fds[0]) / abs(fds[0]), 1e-4, (grad_norm, fds))
+
     def test_contact_force_observation_with_substeps_vs_fd(self) -> None:
         """The tactile observation over split steps. The driver's failure-adaptive
         substepping is replaced by a deterministic split of every step into two half steps,
@@ -1565,6 +1632,35 @@ class EngineContactForceAdjointTest(unittest.TestCase):
                     lambda a, u: a.set_external_forces_on_dofs(dofs, np.ascontiguousarray(u)), forces, True,
                 )
                 self.assertLessEqual(rel, 1e-6, (collider_type, friction, rel))
+
+    def test_soft_body_colliders_are_exact(self) -> None:
+        """The force on a rigid box resting on a soft cube, driven by external forces on the box.
+        With the soft cube an SDF collider (scenes.rigid_on_soft_collider) the force has both
+        directions of the contact: the box's samples against the cube's mapped SDF (the
+        adjoint reaches the cube's nodes through the mapping and through the deformation
+        gradient of its tetrahedra) and the cube's samples against the box's SDF (the
+        samples' Jacobian w.r.t. the cube's nodes); with the cube a plain soft actor
+        (scenes.soft_cube_under_rigid, its samples only) the second direction alone. Both
+        against the kinematic identity of the box (implemented 2026-09-06; the query adjoint
+        used to refuse the first and drop the second silently)."""
+        dofs = np.arange(6, dtype=np.int32)
+        for label, make in (
+            ("soft SDF collider, both directions", lambda: scenes.rigid_on_soft_collider("coulomb")),
+            ("soft samples only", lambda: scenes.soft_cube_under_rigid("coulomb", rigid_velocity=(0.0, 0.0, 0.0))),
+        ):
+            def build(make=make):
+                scene, soft, rigid = make()
+                configure_for_differentiability(scene)
+                rigid.register_query(physics.QueryType.TOTAL_CONTACT_FORCE)
+                return scene, rigid, rigid
+
+            forces = np.zeros((self.NUM_STEPS, 6))
+            forces[:, 0] = np.linspace(2.0, 8.0, self.NUM_STEPS)
+            forces[:, 4] = 0.3
+            rel = self._engine_vs_kinematic(
+                build, "rigid", lambda a, u: a.set_external_forces_on_dofs(dofs, np.ascontiguousarray(u)), forces, True
+            )
+            self.assertLessEqual(rel, 1e-5, (label, rel))
 
     def test_moving_collider_is_exact(self) -> None:
         """A rigid pusher (pushed and tilted by external forces) against the target cube, with

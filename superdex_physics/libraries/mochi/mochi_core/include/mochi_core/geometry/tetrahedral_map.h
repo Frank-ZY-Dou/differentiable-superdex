@@ -76,6 +76,14 @@ class TetrahedralMap : public BaseMap {
       DynamicArray<VMatrix3x3r>* outMapJac,
       DynamicArray<ColliderJacDofs>* outDofsJac) const override;
 
+  // Gradients, w.r.t. the rest-space position, of the barycentric coordinates of tetrahedron
+  // `tet`: the rows of the result for its first three nodes (the fourth's is minus their sum).
+  // The contact-force adjoints of a differentiable scene use them to differentiate the
+  // deformation gradient of the mapping w.r.t. the nodal positions.
+  [[nodiscard]] VMatrix3x3r RestBarycentricGradients(int tet) const {
+    return Transpose3x3(Invert3x3(_M0T[tet]));
+  }
+
  protected:
   std::shared_ptr<TetrahedralMesh const> _tetMesh;
   std::unique_ptr<TetrahedralMeshBvhObject<Aabb>> _aabbTreeObject;

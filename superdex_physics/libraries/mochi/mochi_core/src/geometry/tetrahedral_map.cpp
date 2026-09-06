@@ -181,6 +181,7 @@ void TetrahedralMap::MapPoints(
     }
     if (outDofsJac) {
       auto const& nodeInds = _tetMesh->GetElementConnectivity()[tet];
+      (*outDofsJac)[i].element = tet;
       for (int j = 0; j < 4; j++) {
         VMatrix3x3r dpddofj = Get(b, j) * VEye<3>();
         std::copy(dpddofj.begin(), dpddofj.end(), &(*outDofsJac)[i].jac[3 * j]);

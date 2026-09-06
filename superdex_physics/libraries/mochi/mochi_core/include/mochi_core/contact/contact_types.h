@@ -155,6 +155,10 @@ struct ColliderJacDofs {
   NdArray<Vec4r, kMaxDoFs> jac = {};
   std::array<int, kMaxDoFs> inds =
       {}; // Indices of the dofs (local to the actor, not global to the sim)
+  // The element of the mapping that contains the contact (the tetrahedron for a tetrahedral
+  // map), -1 when the mapping does not report one. The contact-force adjoints of a differentiable
+  // scene differentiate the mapping's Jacobian through it.
+  int element = -1;
 };
 
 /*

@@ -48,9 +48,13 @@ releases on that base; these distributions are built from this repository, not f
   current-state Hessians; a grid SDF's interpolated gradient turns near edges, where the forward
   solve's quasi-Newton Jacobian leaves the term out), and against a dynamic collider the forces
   turn with it (`d(R_B f)/d delta = delta x R_B f`). All cases now agree with the kinematic
-  identity of a free body to 1e-6 (`EngineContactForceAdjointTest`). The adjoint of a force
-  query on an actor touching a deformable collider is refused with an explicit error (it used to
-  drop the collider's nodal dependence silently).
+  identity of a free body to 1e-6 (`EngineContactForceAdjointTest`). The adjoint also reaches
+  soft bodies: the nodes of a soft-body SDF collider through its mapping and through the
+  deformation gradient of its tetrahedra, and the nodes of a soft body whose samples touch the
+  queried actor through the samples' interpolation (that direction used to be dropped silently;
+  the other refused). A box resting on a soft cube agrees with the kinematic identity to 1e-5 in
+  both configurations, and a tactile policy on the box passes its finite-difference check.
+  Contacts with point-cloud colliders and the samples of shells and rods are refused explicitly.
 - Deformable (soft-body SDF) colliders are differentiable: mapped SDF colliders provide SDF
   Hessians, the stage-start query stores the Jacobians of the collider's stage-start mapping
   (`jacWorldFromDofsStageStart`), and both the colliding-side and the collider-side contact
