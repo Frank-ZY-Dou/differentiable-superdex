@@ -21,6 +21,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <tuple>
 #include <utility>
@@ -98,6 +99,42 @@ SampleTwoVerticesTwoBones() {
       SkinningWeightsByBone(skinningIdx, skinningWeights, kWeightsPerNode, trans.size()),
       std::move(trans),
       inputVec};
+}
+
+static DTransformParameterizationCollection SampleTransformParameterizations() {
+  DTransformParameterizationCollection parameterization;
+  parameterization.resize(2);
+  parameterization[0].preTransform = TransformSRT{
+      0.5_r,
+      Quaternion::FromRotationVector(Real3{0.5_r, 0.6_r, -1.1_r}),
+      Real3{0.1_r, 0.2_r, 0.3_r}};
+  parameterization[1].preTransform = TransformSRT{
+      0.7_r,
+      Quaternion::FromRotationVector(Real3{-0.8_r, -0.6_r, 0.6_r}),
+      Real3{0.4_r, -0.6_r, -0.4_r}};
+  parameterization[0].postTransform = TransformSRT{
+      0.3_r,
+      Quaternion::FromRotationVector(Real3{-0.5_r, 0.3_r, 1.1_r}),
+      Real3{-0.1_r, 0.5_r, -0.3_r}};
+  parameterization[1].postTransform = TransformSRT{
+      0.8_r,
+      Quaternion::FromRotationVector(Real3{-0.2_r, 0.9_r, -0.7_r}),
+      Real3{-0.3_r, -0.8_r, -0.1_r}};
+  return parameterization;
+}
+
+static ColumnVector<real, 2 * RigidSize::kDAll> SampleBoneParameterDirection() {
+  return {1.0_r, 2.0_r, 3.0_r, 4.0_r, 5.0_r, 6.0_r, 1.0_r, -0.5_r, 2.0_r, -3.0_r, 4.0_r, -2.0_r};
+}
+
+static void ExpectOnlySecondVertexWritten(
+    ColumnVectorView<real const> activeResult,
+    ColumnVectorView<real const> expected) {
+  for (int i = 0; i < kDSkinningDofsPerVertex; ++i) {
+    EXPECT_EQ(activeResult[i], -1_r);
+    EXPECT_NEAR_EQ(
+        activeResult[i + kDSkinningDofsPerVertex], expected[i + kDSkinningDofsPerVertex]);
+  }
 }
 
 // Tests to see if the output of the differentiable skinning transform matches
@@ -254,6 +291,54 @@ TEST(DSkinning, ConsistencyTestDInput) {
   }
 }
 
+TEST(DSkinning, VectorDTransformMatchesMatrixAndFiniteDifference) {
+  constexpr int kDim = kDSkinningDofsPerVertex;
+  auto [weights, trans, inputVec] = SampleTwoVerticesTwoBones();
+
+  auto dskinning = DSkinningTransform(weights, SampleTransformParameterizations());
+  auto const transSpan = MakeConstSpan(trans);
+  ColumnVector<real, 6> direction = {1_r, 2_r, 3_r, 4_r, 5_r, 6_r};
+  ColumnVector<real> vectorResult(direction.Rows());
+  dskinning.DTransform(transSpan, AsConstView(direction), AsView(vectorResult));
+
+  RowMatrix<real, krylov::kDynamic, kDim> inputJacobian(direction.Rows(), kDim);
+  inputJacobian.SetZero();
+  inputJacobian.Col(0) = direction;
+  RowMatrix<real, krylov::kDynamic, kDim> outputJacobian(direction.Rows(), kDim);
+  dskinning.DTransform(transSpan, AsConstView(inputJacobian), AsView(outputJacobian));
+  ColumnVector<real> matrixDifference = vectorResult - outputJacobian.Col(0);
+  EXPECT_NEAR_EQ(matrixDifference.Norm(), 0_r);
+
+  dfunc_t func = [&](ColumnVectorView<real const> v) {
+    ColumnVector<real> out(v.Rows());
+    dskinning.Transform(transSpan, v, AsView(out));
+    return out;
+  };
+  TestDerivative(func, inputVec, direction, 0.001_r, vectorResult);
+}
+
+TEST(DSkinning, VectorDTransformSupportsActiveVerticesAndAliasing) {
+  auto [weights, trans, inputVec] = SampleTwoVerticesTwoBones();
+  auto const transSpan = MakeConstSpan(trans);
+  auto dskinning = DSkinningTransform(weights);
+
+  ColumnVector<real, 6> direction = {1_r, 2_r, 3_r, 4_r, 5_r, 6_r};
+  ColumnVector<real> expected(direction.Rows());
+  dskinning.DTransform(transSpan, AsConstView(direction), AsView(expected));
+
+  ColumnVector<real> activeResult(direction.Rows());
+  activeResult.SetConstant(-1_r);
+  std::array<int, 1> const activeVertices = {1};
+  dskinning.DTransform(
+      transSpan, AsConstView(direction), AsView(activeResult), MakeConstSpan(activeVertices));
+  ExpectOnlySecondVertexWritten(AsConstView(activeResult), AsConstView(expected));
+
+  ColumnVector<real> aliased = direction;
+  dskinning.DTransform(transSpan, AsConstView(aliased), AsView(aliased));
+  ColumnVector<real> aliasingDifference = aliased - expected;
+  EXPECT_NEAR_EQ(aliasingDifference.Norm(), 0_r);
+}
+
 // Checks that the sparse matrix of derivatives with respect to bone parameters
 // is correct by manually checking the entries.
 TEST(DSkinning, ValidateDBones) {
@@ -307,26 +392,7 @@ TEST(DSkinning, ValidateDBones) {
 TEST(DSkinning, ConsistencyTestDBones) {
   auto [weights, trans, inputVec] = SampleTwoVerticesTwoBones();
 
-  DTransformParameterizationCollection parameterization;
-  parameterization.resize(2);
-  parameterization[0].preTransform = TransformSRT{
-      0.5_r,
-      Quaternion::FromRotationVector(Real3{0.5_r, 0.6_r, -1.1_r}),
-      Real3{0.1_r, 0.2_r, 0.3_r}};
-  parameterization[1].preTransform = TransformSRT{
-      0.7_r,
-      Quaternion::FromRotationVector(Real3{-0.8_r, -0.6_r, 0.6_r}),
-      Real3{0.4_r, -0.6_r, -0.4_r}};
-  parameterization[0].postTransform = TransformSRT{
-      0.3_r,
-      Quaternion::FromRotationVector(Real3{-0.5_r, 0.3_r, 1.1_r}),
-      Real3{-0.1_r, 0.5_r, -0.3_r}};
-  parameterization[1].postTransform = TransformSRT{
-      0.8_r,
-      Quaternion::FromRotationVector(Real3{-0.2_r, 0.9_r, -0.7_r}),
-      Real3{-0.3_r, -0.8_r, -0.1_r}};
-
-  auto dskinning = DSkinningTransform(weights, parameterization);
+  auto dskinning = DSkinningTransform(weights, SampleTransformParameterizations());
 
   ColumnVector<real> inputVecCopy = inputVec;
   auto transCount = trans.size();
@@ -351,8 +417,7 @@ TEST(DSkinning, ConsistencyTestDBones) {
     TransformToRawDofs(trans[itrans], paramsSlice);
   }
 
-  ColumnVector<real, 2 * RigidSize::kDAll> dirVec{
-      1.0_r, 2.0_r, 3.0_r, 4.0_r, 5.0_r, 6.0_r, 1.0_r, -0.5_r, 2.0_r, -3.0_r, 4.0_r, -2.0_r};
+  auto const dirVec = SampleBoneParameterDirection();
 
   auto dbones = dskinning.CreateDBones();
   dskinning.DTransformDBones(MakeConstSpan(trans), inputVec, dbones);
@@ -361,4 +426,42 @@ TEST(DSkinning, ConsistencyTestDBones) {
   testVec = dbones * dirVec;
 
   TestLieDerivative(func, initialParamsVec, dirVec, 0.001_r, testVec);
+}
+
+TEST(DSkinning, DTransformDBonesTimesVectorMatchesMatrix) {
+  auto [weights, trans, inputVec] = SampleTwoVerticesTwoBones();
+  auto dskinning = DSkinningTransform(weights, SampleTransformParameterizations());
+  auto const transSpan = MakeConstSpan(trans);
+  auto const direction = SampleBoneParameterDirection();
+
+  ColumnVector<real> vectorResult(inputVec.Rows());
+  dskinning.DTransformDBonesTimesVector(
+      transSpan, AsConstView(inputVec), AsConstView(direction), AsView(vectorResult));
+
+  auto dbones = dskinning.CreateDBones();
+  dskinning.DTransformDBones(transSpan, AsConstView(inputVec), dbones);
+  ColumnVector<real> const matrixResult = dbones * direction;
+  ColumnVector<real> const matrixDifference = vectorResult - matrixResult;
+  EXPECT_NEAR_EQ(matrixDifference.Norm(), 0_r);
+}
+
+TEST(DSkinning, DTransformDBonesTimesVectorSupportsActiveVertices) {
+  auto [weights, trans, inputVec] = SampleTwoVerticesTwoBones();
+  auto dskinning = DSkinningTransform(weights, SampleTransformParameterizations());
+  auto const direction = SampleBoneParameterDirection();
+
+  ColumnVector<real> expected(inputVec.Rows());
+  dskinning.DTransformDBonesTimesVector(
+      MakeConstSpan(trans), AsConstView(inputVec), AsConstView(direction), AsView(expected));
+
+  ColumnVector<real> activeResult(inputVec.Rows());
+  activeResult.SetConstant(-1_r);
+  std::array<int, 1> const activeVertices = {1};
+  dskinning.DTransformDBonesTimesVector(
+      MakeConstSpan(trans),
+      AsConstView(inputVec),
+      AsConstView(direction),
+      AsView(activeResult),
+      MakeConstSpan(activeVertices));
+  ExpectOnlySecondVertexWritten(AsConstView(activeResult), AsConstView(expected));
 }

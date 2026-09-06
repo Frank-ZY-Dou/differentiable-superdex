@@ -28,6 +28,76 @@
 #include <utility>
 
 namespace mochi {
+namespace details {
+
+constexpr int kMaxStackBones = 64;
+constexpr size_t kBoneJacobiansStackSize =
+    kMaxStackBones * sizeof(VMatrix3x3r) + alignof(VMatrix3x3r);
+constexpr size_t kBoneParameterJacobiansStackSize =
+    kMaxStackBones * (sizeof(VMatrix3x3r) + sizeof(VMatrix4x4r)) + alignof(VMatrix3x3r) +
+    alignof(VMatrix4x4r);
+
+template <bool kTranspose>
+void ComputeBoneJacobians(
+    DSkinningTransform const& dskinning,
+    Span<TransformRT const> boneTransforms,
+    DynamicArray<VMatrix3x3r>& jacobians) {
+  jacobians.reserve(dskinning.GetBoneCount());
+  for (int boneId = 0; boneId < dskinning.GetBoneCount(); ++boneId) {
+    auto const& pre = dskinning.GetBonePreTransform(boneId);
+    auto const& post = dskinning.GetBonePostTransform(boneId);
+    real const scale = pre.GetScale() * post.GetScale();
+    Quaternion const rot =
+        post.GetRotation() * boneTransforms[boneId].GetRotation() * pre.GetRotation();
+    if constexpr (kTranspose) {
+      jacobians.emplace_back(scale * ToVMatrix3x3Transpose(rot));
+    } else {
+      jacobians.emplace_back(scale * ToVMatrix3x3(rot));
+    }
+  }
+}
+
+MOCHI_FORCE_INLINE VMatrix3x3r WeightedVertexJacobian(
+    DSkinningTransform::VertexBones const& bones,
+    Span<VMatrix3x3r const> jacobians) {
+  auto vertexBones = MakeConstSpan(bones);
+  MOCHI_ASSERT_VERBOSE(!vertexBones.empty(), "Vertex has no skinning bones.");
+  VMatrix3x3r weightedJacobian = vertexBones[0].second * jacobians[vertexBones[0].first];
+  for (auto const& [boneId, weight] : vertexBones.subspan(1)) {
+    weightedJacobian += weight * jacobians[boneId];
+  }
+  return weightedJacobian;
+}
+
+// Precompute per-bone derivatives:
+// - Translation derivatives are independent of the input and directly precomputed.
+// - Rotation derivatives require the products of matrix transforms, which are precomputed.
+template <bool kTransposePostMat>
+void ComputeBoneParameterJacobians(
+    DSkinningTransform const& dskinning,
+    Span<TransformRT const> boneTransforms,
+    DynamicArray<VMatrix3x3r>& postMat,
+    DynamicArray<VMatrix4x4r>& preMatT) {
+  postMat.reserve(dskinning.GetBoneCount());
+  preMatT.reserve(dskinning.GetBoneCount());
+  for (int boneId = 0; boneId < dskinning.GetBoneCount(); ++boneId) {
+    auto const& pre = dskinning.GetBonePreTransform(boneId);
+    auto const& post = dskinning.GetBonePostTransform(boneId);
+    Quaternion const& boneRotation = boneTransforms[boneId].GetRotation();
+
+    if constexpr (kTransposePostMat) {
+      postMat.emplace_back(post.GetScale() * ToVMatrix3x3Transpose(post.GetRotation()));
+    } else {
+      postMat.emplace_back(post.GetScale() * ToVMatrix3x3(post.GetRotation()));
+    }
+
+    TransformSRT const bonePreTransform{
+        pre.GetScale(), boneRotation * pre.GetRotation(), boneRotation * pre.VGetTranslation()};
+    preMatT.emplace_back(ToVMatrix4x4Transpose(bonePreTransform));
+  }
+}
+
+} // namespace details
 
 void DSkinningTransform::Transform(
     Span<TransformRT const> boneTransforms,
@@ -76,6 +146,40 @@ void DSkinningTransform::Transform(
 
 void DSkinningTransform::DTransform(
     Span<TransformRT const> boneTransforms,
+    ColumnVectorView<real const> input,
+    ColumnVectorView<real> output,
+    Span<int const> activeVertices) const {
+  MOCHI_PROFILE_SCOPE();
+  static_assert(RigidSize::kDim == 3, "Only supported for 3D");
+  MOCHI_ASSERT_VERBOSE(boneTransforms.size() == GetBoneCount());
+  MOCHI_ASSERT_VERBOSE(input.Rows() % RigidSize::kDim == 0 && input.Rows() == output.Rows());
+
+  // Store transposed per-bone Jacobians to use the faster DotVecMat3x3 in the vertex loop.
+  MOCHI_FILO_STACK_ALLOCATOR(alloc, details::kBoneJacobiansStackSize);
+  DynamicArray<VMatrix3x3r> jacobianT(&alloc);
+  details::ComputeBoneJacobians</* kTranspose */ true>(*this, boneTransforms, jacobianT);
+  Span<VMatrix3x3r const> const jacobianTSpan = MakeConstSpan(jacobianT);
+
+  auto workerTask = [&](int loopStart, int loopEnd) {
+    constexpr int kDim = RigidSize::kDim;
+    for (int i = loopStart; i < loopEnd; ++i) {
+      int const vertexId = activeVertices.empty() ? i : activeVertices[i];
+      VMatrix3x3r const weightedJacobianT =
+          details::WeightedVertexJacobian(perVertexBones[vertexId], jacobianTSpan);
+      Vec4r const inVector = Load<kDim, Vec4r>(&input[vertexId * kDim]);
+      Store<kDim>(&output[vertexId * kDim], DotVecMat3x3(inVector, weightedJacobianT));
+    }
+  };
+
+  // Use the forward-transform threshold until this overload is benchmarked independently.
+  constexpr int kMinVerticesPerTask = 6000;
+  int const numVertices =
+      activeVertices.empty() ? input.Rows() / RigidSize::kDim : isize(activeVertices);
+  ParallelForRange("DTransformVector", 0, numVertices, kMinVerticesPerTask, INT_MAX, workerTask);
+}
+
+void DSkinningTransform::DTransform(
+    Span<TransformRT const> boneTransforms,
     RowMatrixView<real const, krylov::kDynamic, RigidSize::kDim> inputJacobian,
     RowMatrixView<real, krylov::kDynamic, RigidSize::kDim> outputJacobian,
     Span<int const> activeVertices) const {
@@ -85,30 +189,20 @@ void DSkinningTransform::DTransform(
   MOCHI_ASSERT_VERBOSE(inputJacobian.Rows() % RigidSize::kDim == 0);
   MOCHI_ASSERT_VERBOSE(inputJacobian.Rows() == outputJacobian.Rows());
 
-  // Precompute per-bone full 3x3 Jacobian.
-  MOCHI_FILO_STACK_ALLOCATOR(alloc, 2304); // Capacity for 64 transforms with 32-bit 9-floats.
-  DynamicArray<VMatrix3x3r> jac(&alloc);
-  jac.reserve(GetBoneCount());
-  for (int boneId = 0; boneId < GetBoneCount(); ++boneId) {
-    auto pre = ToSimdMatrix(GetBonePreTransform(boneId).Jacobian3x3());
-    auto bone = VGetRotationMatrix(boneTransforms[boneId]);
-    auto post = ToSimdMatrix(GetBonePostTransform(boneId).Jacobian3x3());
-    jac.emplace_back(Dot3x3(post, Dot3x3(bone, pre)));
-  }
+  MOCHI_FILO_STACK_ALLOCATOR(alloc, details::kBoneJacobiansStackSize);
+  DynamicArray<VMatrix3x3r> jacobians(&alloc);
+  details::ComputeBoneJacobians</* kTranspose */ false>(*this, boneTransforms, jacobians);
+  Span<VMatrix3x3r const> const jacobiansSpan = MakeConstSpan(jacobians);
 
   auto workerTask = [&](int loopStart, int loopEnd) {
     constexpr int kDim = RigidSize::kDim;
     VMatrix3x3r inVertexJac;
     for (int i = loopStart; i < loopEnd; ++i) {
       int const vertexId = activeVertices.empty() ? i : activeVertices[i];
-      auto vertexBones = MakeConstSpan(perVertexBones[vertexId]);
-      MOCHI_ASSERT_VERBOSE(!vertexBones.empty(), "Vertex has no skinning bones.");
-      VMatrix3x3r weightedJac = vertexBones[0].second * jac[vertexBones[0].first];
-      for (auto const& [boneId, weight] : vertexBones.subspan(1)) {
-        weightedJac += weight * jac[boneId];
-      }
+      VMatrix3x3r const weightedJacobian =
+          details::WeightedVertexJacobian(perVertexBones[vertexId], jacobiansSpan);
       LoadMatrix<3, 3>(inVertexJac, &inputJacobian(vertexId * kDim, 0));
-      StoreMatrix<3, 3>(&outputJacobian(vertexId * kDim, 0), Dot3x3(weightedJac, inVertexJac));
+      StoreMatrix<3, 3>(&outputJacobian(vertexId * kDim, 0), Dot3x3(weightedJacobian, inVertexJac));
     }
   };
 
@@ -119,6 +213,60 @@ void DSkinningTransform::DTransform(
   int const numVertices =
       activeVertices.empty() ? inputJacobian.Rows() / RigidSize::kDim : isize(activeVertices);
   ParallelForRange("DTransform", 0, numVertices, kMinVerticesPerTask, INT_MAX, workerTask);
+}
+
+void DSkinningTransform::DTransformDBonesTimesVector(
+    Span<TransformRT const> boneTransforms,
+    ColumnVectorView<real const> unposedPositions,
+    ColumnVectorView<real const> input,
+    ColumnVectorView<real> output,
+    Span<int const> activeVertices) const {
+  MOCHI_PROFILE_SCOPE();
+  static_assert(RigidSize::kDim == 3, "Only supported for 3D");
+  MOCHI_ASSERT_VERBOSE(boneTransforms.size() == GetBoneCount());
+  MOCHI_ASSERT_VERBOSE(
+      unposedPositions.Rows() % RigidSize::kDim == 0 && unposedPositions.Rows() == output.Rows());
+  MOCHI_ASSERT_VERBOSE(input.Rows() == GetBoneCount() * RigidSize::kDAll);
+
+  MOCHI_FILO_STACK_ALLOCATOR(alloc, details::kBoneParameterJacobiansStackSize);
+  DynamicArray<VMatrix3x3r> postMatT(&alloc); // postMatT = (spost * Rpost)^T
+  DynamicArray<VMatrix4x4r> preMatT(&alloc); // preMatT = (R * (spre Rpre, tpre))^T
+  details::ComputeBoneParameterJacobians</* kTransposePostMat */ true>(
+      *this, boneTransforms, postMatT, preMatT);
+
+  auto workerTask = [&](int loopBegin, int loopEnd) {
+    for (int i = loopBegin; i < loopEnd; ++i) {
+      int const vertexId = activeVertices.empty() ? i : activeVertices[i];
+      Vec4r const unposedPosition =
+          ToSimdPoint(Load<RigidSize::kDim, Vec4r>(&unposedPositions[vertexId * RigidSize::kDim]));
+      Vec4r result = {};
+      for (auto const& [boneId, weight] : perVertexBones[vertexId]) {
+        int const boneOffset = boneId * RigidSize::kDAll;
+        Vec4r const translationVelocity = Load<RigidSize::kDTrans, Vec4r>(&input[boneOffset]);
+        Vec4r const angularVelocity =
+            Load<RigidSize::kDRot, Vec4r>(&input[boneOffset + RigidSize::kDTrans]);
+        Vec4r const transformedPoint = DotVecMat4x4(unposedPosition, preMatT[boneId]);
+        Vec4r const velocity = translationVelocity + Cross3(angularVelocity, transformedPoint);
+        result += weight * DotVecMat3x3(velocity, postMatT[boneId]);
+      }
+      Store<RigidSize::kDim>(&output[vertexId * RigidSize::kDim], result);
+    }
+  };
+
+  constexpr int kMinFlopsPerTask = 100000; // 20 μs @ 5 GFLOPs (SIMD operations).
+  // Lower bound for one bone influence: matrix-vector product, cross product, and weighted
+  // accumulation.
+  constexpr int kMatrixVectorFlopsPerComponent = 2 * RigidSize::kDim - 1;
+  constexpr int kCrossProductFlopsPerComponent = 3;
+  constexpr int kWeightedAccumulationFlopsPerComponent = 2;
+  constexpr int kFlopsPerVertex = RigidSize::kDim *
+      (kMatrixVectorFlopsPerComponent + kCrossProductFlopsPerComponent +
+       kWeightedAccumulationFlopsPerComponent);
+  constexpr int kMinVerticesPerTask = Max(1, kMinFlopsPerTask / kFlopsPerVertex);
+  int const numVertices =
+      activeVertices.empty() ? unposedPositions.Rows() / RigidSize::kDim : isize(activeVertices);
+  ParallelForRange(
+      "DTransformDBonesTimesVector", 0, numVertices, kMinVerticesPerTask, INT_MAX, workerTask);
 }
 
 void DSkinningTransform::DTransformDBones(
@@ -134,19 +282,11 @@ void DSkinningTransform::DTransformDBones(
   MOCHI_ASSERT_VERBOSE(boneTransforms.size() == GetBoneCount());
   MOCHI_ASSERT_VERBOSE(input.Rows() % RigidSize::kDim == 0 && input.Rows() == outputDBones.Rows());
 
-  // Precompute per-bone derivatives:
-  // - Translation derivatives are independent of the input and directly precomputed.
-  // - Rotation derivatives require the products of matrix transforms, which are precomputed.
-  DynamicArray<VMatrix3x3r> postMat; // postMat = spost * Rpost
-  DynamicArray<VMatrix4x4r> preMatT; // preMatT = (R * (spre Rpre, tpre))^T
-  postMat.reserve(GetBoneCount());
-  preMatT.reserve(GetBoneCount());
-  for (int boneId = 0; boneId < GetBoneCount(); ++boneId) {
-    postMat.emplace_back(ToSimdMatrix(GetBonePostTransform(boneId).Jacobian3x3()));
-    preMatT.emplace_back(Dot4x4(
-        ToVMatrix4x4Transpose(GetBonePreTransform(boneId)),
-        ToVMatrix4x4Transpose(TransformRT{boneTransforms[boneId].GetRotation()})));
-  }
+  MOCHI_FILO_STACK_ALLOCATOR(alloc, details::kBoneParameterJacobiansStackSize);
+  DynamicArray<VMatrix3x3r> postMat(&alloc); // postMat = spost * Rpost
+  DynamicArray<VMatrix4x4r> preMatT(&alloc); // preMatT = (R * (spre Rpre, tpre))^T
+  details::ComputeBoneParameterJacobians</* kTransposePostMat */ false>(
+      *this, boneTransforms, postMat, preMatT);
 
   auto workerTask = [&](int loopBegin, int loopEnd) {
     for (int i = loopBegin; i < loopEnd; ++i) {

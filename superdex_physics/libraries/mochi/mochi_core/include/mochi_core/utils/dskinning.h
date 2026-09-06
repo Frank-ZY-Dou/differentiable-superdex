@@ -219,11 +219,30 @@ struct DSkinningTransform {
       ColumnVectorView<real> output,
       Span<int const> activeVertices = {}) const;
 
-  // Compute the derivative of the forward map with respect to the inputs
+  // Apply the derivative of the forward map with respect to the inputs to a packed vector.
+  // The input and output may be the same view. When activeVertices is non-empty, only the
+  // corresponding output entries are written; all other entries are left unchanged.
+  inline void DTransform(
+      Span<TransformRT const> worldFromBoneTransforms,
+      ColumnVectorView<real const> input,
+      ColumnVectorView<real> output,
+      Span<int const> activeVertices = {}) const;
+
+  // Compute the derivative of the forward map with respect to the inputs.
   inline void DTransform(
       Span<TransformRT const> worldFromBoneTransforms,
       RowMatrixView<real const, krylov::kDynamic, RigidSize::kDim> input,
       RowMatrixView<real, krylov::kDynamic, RigidSize::kDim> output,
+      Span<int const> activeVertices = {}) const;
+
+  // Multiply the derivative of the forward map with respect to the bone parameters by a packed
+  // vector. Input blocks contain translation followed by Lie rotation parameters. When
+  // activeVertices is non-empty, only the corresponding output entries are written.
+  inline void DTransformDBonesTimesVector(
+      Span<TransformRT const> worldFromBoneTransforms,
+      ColumnVectorView<real const> unposedPositions,
+      ColumnVectorView<real const> input,
+      ColumnVectorView<real> output,
       Span<int const> activeVertices = {}) const;
 
   // Compute the derivative of the forward map with respect to the bone parameters.
