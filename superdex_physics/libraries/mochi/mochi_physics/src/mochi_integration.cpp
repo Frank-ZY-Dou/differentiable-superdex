@@ -39,9 +39,7 @@ void mochi::integration::ClearMultiStepIntegrationData(entt::registry& reg, entt
     intReducedPoses->prevSteps.clear();
   }
   if (auto* intJointVels = reg.try_get<CIntegrationArticulatedJointVels>(e)) {
-    for (auto& jointVel : intJointVels->value) {
-      jointVel.prevSteps.clear();
-    }
+    intJointVels->prevSteps.clear();
   }
   if (auto* intRodPoses = reg.try_get<CIntegrationRodPoses>(e)) {
     intRodPoses->prevSteps.clear();

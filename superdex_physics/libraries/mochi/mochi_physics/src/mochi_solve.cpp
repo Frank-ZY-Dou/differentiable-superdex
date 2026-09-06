@@ -973,9 +973,7 @@ TimeIntegratorParams mochi::solver::CreateIslandTimeIntegrationParams(
         MOCHI_ASSERT_VERBOSE(numPrevStepsActor == isize(intSkinnedVels->prevSteps));
       }
       if (auto const* intJointVels = reg.try_get<CIntegrationArticulatedJointVels>(actor)) {
-        for (auto const& jointVel : intJointVels->value) {
-          MOCHI_ASSERT_VERBOSE(numPrevStepsActor == isize(jointVel.prevSteps));
-        }
+        MOCHI_ASSERT_VERBOSE(numPrevStepsActor == isize(intJointVels->prevSteps));
       }
       if (auto const* intRodPoses = reg.try_get<CIntegrationRodPoses>(actor)) {
         MOCHI_ASSERT_VERBOSE(numPrevStepsActor == isize(intRodPoses->prevSteps));

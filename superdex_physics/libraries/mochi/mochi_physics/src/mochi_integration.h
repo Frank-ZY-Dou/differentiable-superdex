@@ -162,6 +162,26 @@ void AddWeightedDifferences(
   out.SetRotation(Normalize(Quaternion::FromRotationVector(deltaRot) * base.GetRotation()));
 }
 
+template <typename CoeffsT, typename GetValueT>
+void AddWeightedRigidBodyVelDifferences(
+    RigidBodyVel const& base,
+    GetValueT&& getValue,
+    CoeffsT const& coeffs,
+    Int2 range,
+    RigidBodyVel& out) {
+  ColumnVector<real, RigidBodyVel::kRawSize> baseVector;
+  base.ToRawValues(baseVector);
+  ColumnVector<real, RigidBodyVel::kRawSize> deltaVector = {}; // Weighted-average delta.
+  for (int s = range[0]; s < range[1]; ++s) {
+    ColumnVector<real, RigidBodyVel::kRawSize> valVector;
+    getValue(s).ToRawValues(valVector);
+    deltaVector += coeffs[s] * (valVector - baseVector);
+  }
+  // Add the delta to the base and store in the result.
+  baseVector += deltaVector;
+  out.FromRawValues(baseVector);
+}
+
 /// @brief Implementation for RigidBodyVel.
 template <typename CoeffsT>
 void AddWeightedDifferences(
@@ -171,17 +191,34 @@ void AddWeightedDifferences(
     CoeffsT const& coeffs,
     Int2 range,
     RigidBodyVel& out) {
-  ColumnVector<real, RigidBodyVel::kRawSize> baseVector;
-  base.ToRawValues(baseVector);
-  ColumnVector<real, RigidBodyVel::kRawSize> deltaVector = {}; // Weighted-average delta.
+  AddWeightedRigidBodyVelDifferences(
+      base, [&](int s) -> RigidBodyVel const& { return vals[s].value; }, coeffs, range, out);
+}
+
+/// @brief Implementation for ArticulatedJointVelocities.
+template <typename CoeffsT>
+void AddWeightedDifferences(
+    std::monostate /* unused */,
+    DynamicArray<RigidBodyVel> const& base,
+    Span<ArticulatedJointVelocities const> vals,
+    CoeffsT const& coeffs,
+    Int2 range,
+    DynamicArray<RigidBodyVel>& out) {
+#if MOCHI_ASSERT_VERBOSE_ENABLED
+  MOCHI_ASSERT_VERBOSE(out.size() == base.size(), "Size mismatch");
   for (int s = range[0]; s < range[1]; ++s) {
-    ColumnVector<real, RigidBodyVel::kRawSize> valVector;
-    vals[s].value.ToRawValues(valVector);
-    deltaVector += coeffs[s] * (valVector - baseVector);
+    MOCHI_ASSERT_VERBOSE(vals[s].value.size() == base.size(), "Size mismatch");
   }
-  // Add the delta to the base and store in the result.
-  baseVector += deltaVector;
-  out.FromRawValues(baseVector);
+#endif
+
+  for (int i = 0; i < isize(base); ++i) {
+    AddWeightedRigidBodyVelDifferences(
+        base[i],
+        [&](int s) -> RigidBodyVel const& { return vals[s].value[i]; },
+        coeffs,
+        range,
+        out[i]);
+  }
 }
 
 /// @brief Implementation for articulated pose.

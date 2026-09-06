@@ -2447,6 +2447,7 @@ class ExternalPoseResetTest : public CreateBlendedActorTest {
     entt::entity const linkEntity = GetEntity(link);
     entt::entity const nestedEntity = GetEntity(nested);
     ASSERT_FALSE(reg.get<CIntegrationArticulatedReducedPose const>(parentEntity).prevSteps.empty());
+    ASSERT_FALSE(reg.get<CIntegrationArticulatedJointVels const>(parentEntity).prevSteps.empty());
     ASSERT_FALSE(reg.get<CIntegrationRigidVels const>(linkEntity).prevSteps.empty());
     ASSERT_FALSE(reg.get<CIntegrationDisplacementSlices const>(nestedEntity).prevSteps.empty());
     ASSERT_FALSE(reg.get<CConservativeStepBounds const>(linkEntity).needsNextStepRelaxation);
@@ -2489,6 +2490,7 @@ class ExternalPoseResetTest : public CreateBlendedActorTest {
     EXPECT_TRUE(test::NearEqualSpan(parentAfter, nestedAfter, kTolerance));
 
     EXPECT_TRUE(reg.get<CIntegrationArticulatedReducedPose const>(parentEntity).prevSteps.empty());
+    EXPECT_TRUE(reg.get<CIntegrationArticulatedJointVels const>(parentEntity).prevSteps.empty());
     EXPECT_TRUE(reg.get<CIntegrationRigidVels const>(linkEntity).prevSteps.empty());
     EXPECT_TRUE(reg.get<CIntegrationDisplacementSlices const>(nestedEntity).prevSteps.empty());
     EXPECT_TRUE(reg.get<CConservativeStepBounds const>(linkEntity).needsNextStepRelaxation);

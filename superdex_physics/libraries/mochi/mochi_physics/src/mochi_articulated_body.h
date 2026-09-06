@@ -102,15 +102,27 @@ template <TimeStep kRelTime>
 struct CArticulatedLinkTransforms : public std::vector<TransformRT>, NoCopy {
   using std::vector<TransformRT>::vector; // Inherit base class' constructors
 };
+struct ArticulatedJointVelocities {
+  ArticulatedJointVelocities() = default;
+  explicit ArticulatedJointVelocities(int size) : value(size) {}
+  explicit ArticulatedJointVelocities(DynamicArray<RigidBodyVel> const& valueIn) : value(valueIn) {}
+  explicit ArticulatedJointVelocities(DynamicArray<RigidBodyVel>&& valueIn)
+      : value(std::move(valueIn)) {}
+
+  DynamicArray<RigidBodyVel> value;
+
+  MOCHI_STRUCT_BEGIN(mochi::ArticulatedJointVelocities);
+  MOCHI_FIELD(value);
+  MOCHI_STRUCT_END();
+};
+
 template <TimeStep kRelTime>
-struct CArticulatedJointVels : NoCopy {
-  CArticulatedJointVels() = default;
-  explicit CArticulatedJointVels(int size) : value(size) {}
-  std::vector<CRigidVel<kRelTime>> value;
+struct CArticulatedJointVels : public ArticulatedJointVelocities, NoCopy {
+  using ArticulatedJointVelocities::ArticulatedJointVelocities;
 
   MOCHI_TEMPLATE_BEGIN(mochi::CArticulatedJointVels, kRelTime);
   MOCHI_ATTRIBUTE_IF(kRelTime == TimeStep::Current, CaptureState);
-  MOCHI_FIELD(value);
+  MOCHI_BASE_CLASS(ArticulatedJointVelocities);
   MOCHI_TEMPLATE_END();
 };
 
@@ -118,16 +130,7 @@ struct CArticulatedJointVels : NoCopy {
 MOCHI_DEFINE_INTEGRATION_COMPONENT(CIntegrationArticulatedReducedPose, ArticulatedPose);
 
 /// @brief Component for time integration of articulated joint velocities.
-struct CIntegrationArticulatedJointVels : public NoCopy {
-  CIntegrationArticulatedJointVels() = default;
-  explicit CIntegrationArticulatedJointVels(int numLinks) : value(numLinks) {}
-  DynamicArray<IntegrationBundle<RigidBodyVelContainer>> value;
-
-  MOCHI_STRUCT_BEGIN(mochi::CIntegrationArticulatedJointVels);
-  MOCHI_ATTRIBUTE(CaptureState);
-  MOCHI_FIELD(value);
-  MOCHI_STRUCT_END();
-};
+MOCHI_DEFINE_INTEGRATION_COMPONENT(CIntegrationArticulatedJointVels, ArticulatedJointVelocities);
 
 struct CArticulatedSkinningData : public ArticulatedSkinningData, NoCopy {};
 
