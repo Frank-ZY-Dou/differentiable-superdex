@@ -847,37 +847,45 @@ class DMapBlending final : public DMapImpl {
  */
 class DMapInverse final : public DMapImpl {
  public:
-  DMapInverse(int slice, int offset, bool sharedDofs)
-      : _slice(slice), _offset(offset), _sharedDofs(sharedDofs) {}
-
+  // With stageStart, the Jacobians of the collider's stage-start mapping
+  // (ContactDetectionResult::jacColliderFromWorldStageStart / jacWorldFromDofsStageStart) are
+  // used: the previous-state assembly of a differentiable scene differentiates the stage-start
+  // contact data (explicit normals, relative displacements) through them.
+  DMapInverse(int slice, int offset, bool sharedDofs, bool stageStart = false)
+      : _slice(slice), _offset(offset), _sharedDofs(sharedDofs), _stageStart(stageStart) {}
   void SetData(ContactDetectionResult const* query) {
     _query = query;
   }
-
   void WriteJacobianSlice(Span<int const> /* indsY */, Span<ContactJac> outJacsY) const override {
     MOCHI_ASSERT(_query, "Data is not set");
     MOCHI_ASSERT(outJacsY.size() > _slice, "Insufficient Jacobian slices");
+    auto const& jacColliderFromWorld =
+        _stageStart ? _query->jacColliderFromWorldStageStart : _query->jacColliderFromWorld;
+    auto const& jacWorldFromDofs =
+        _stageStart ? _query->jacWorldFromDofsStageStart : _query->jacWorldFromDofs;
+    MOCHI_ASSERT(
+        isize(jacWorldFromDofs) == isize(_query->posColliding) &&
+            (jacColliderFromWorld.size() == 1 ||
+             isize(jacColliderFromWorld) == isize(_query->posColliding)),
+        "The collider's mapping Jacobians are missing for this time step.");
     auto& outJacY = outJacsY[_slice];
-
     outJacY.Resize(_sharedDofs, false, _query->ndofs, _query->ndofs, isize(_query->posColliding));
-
     // Compute Jacobians dref_ddofs = - dref_ddef * ddef_ddofs
-    for (int i = 0, l = 0, dl = (_query->jacColliderFromWorld.size() == 1 ? 0 : 1);
+    for (int i = 0, l = 0, dl = (jacColliderFromWorld.size() == 1 ? 0 : 1);
          i < outJacY.nContacts;
          i++, l += dl) {
       for (int j = 0; j < outJacY.nDoFsInternal; j++) {
         outJacY.Jac(i).Col(j) = AsColumnVectorView<3>(
-            DotMatVec3x3(_query->jacColliderFromWorld[l], -_query->jacWorldFromDofs[i].jac[j]));
+            DotMatVec3x3(jacColliderFromWorld[l], -jacWorldFromDofs[i].jac[j]));
       }
     }
-
     // Copy DoF indices
     if (_sharedDofs) {
       std::iota(outJacY.Inds(0).begin(), outJacY.Inds(0).end(), _offset);
     } else {
       for (int i = 0; i < outJacY.nContacts; i++) {
         for (int j = 0; j < outJacY.nDoFsInternal; j++) {
-          outJacY.Inds(i)[j] = _offset + _query->jacWorldFromDofs[i].inds[j];
+          outJacY.Inds(i)[j] = _offset + jacWorldFromDofs[i].inds[j];
         }
       }
     }
@@ -887,6 +895,7 @@ class DMapInverse final : public DMapImpl {
   int const _slice;
   int const _offset;
   bool _sharedDofs;
+  bool _stageStart;
   ContactDetectionResult const* _query = nullptr;
 };
 

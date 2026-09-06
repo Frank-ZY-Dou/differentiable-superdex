@@ -78,8 +78,10 @@ import numpy as np
 import superdex.physics as physics
 
 from superdex.physics.diffsim_rollout import DifferentiableRollout
+from superdex.physics.utils.penetration import PenetrationChecker
 
 from . import scenes
+from .harness import DisplacementErrorLoss, TranslationErrorLoss
 
 diffsim = physics.diffsim
 
@@ -611,6 +613,164 @@ class SoftSyncContactGradientTest(unittest.TestCase):
             rel_errors[k] = abs(grad_soft[k] - fds[0]) / denom
         self.assertGreaterEqual(len(rel_errors), 2, f"too few smooth entries: {skipped}")
         self.assertLessEqual(max(rel_errors.values()), 1e-4, (rel_errors, skipped))
+
+
+class DeformableColliderGradientTest(unittest.TestCase):
+    """A soft cube as the COLLIDER of other actors' samples (an SDF collider created through
+    the experimental API: its rest-space grid SDF mapped through the deformation). The
+    previous-state assembly differentiates the stage-start contact data through the Jacobians
+    of the collider's stage-start mapping (``jacWorldFromDofsStageStart``, 2026-09-05); with
+    the current mapping in their place the rigid-box gradients below were 1e-3 relative off
+    finite differences, and the soft-on-soft case aborted."""
+
+    dt = DT
+
+    def _box_loss_rollout(self, friction, forces, num_steps):
+        """Loss of the box's final position under per-step external forces, fresh scene."""
+        scene, soft, rigid = scenes.rigid_on_soft_collider(friction)
+        try:
+            _configure(scene)
+            loss = TranslationErrorLoss(rigid, ref=np.array([0.08, 0.0, 0.29]))
+            dofs = np.arange(6, dtype=np.int32)
+            for step in range(num_steps):
+                rigid.set_external_forces_on_dofs(dofs, np.ascontiguousarray(forces[step]))
+                scene.step(self.dt)
+            return loss.value()
+        finally:
+            physics.destroy_scene(scene)
+
+    def test_rigid_box_on_soft_collider_force_gradients(self) -> None:
+        """The box's samples against the soft cube's mapped SDF and the soft's samples
+        against the box's SDF, in one island: the gradient of the box's final position with
+        respect to its per-step external forces (all six DoFs at the first, a middle and the
+        last step) against central FD at eps 1e-6, to 1e-4 relative plus 1e-11 absolute (the
+        loss is of order 1e-3, so the difference quotients carry about 1e-12 of rounding,
+        which dominates the entries near 1e-8 that the scene's symmetry in y leaves; the FD
+        estimates at eps 1e-6 and 1e-7 agree to 1e-4 for every entry above 1e-6). Measured
+        (2026-09-05): 2.5e-6 for the x-force at the first step, 1.3e-9 for the y-torque, at
+        most 1.0e-4 on a 2e-8 entry."""
+        num_steps = 8
+        forces = np.zeros((num_steps, 6))
+        forces[:, 0] = np.linspace(2.0, 6.0, num_steps)
+        forces[:, 4] = 0.3
+        scene, soft, rigid = scenes.rigid_on_soft_collider("coulomb")
+        self.addCleanup(physics.destroy_scene, scene)
+        _configure(scene)
+        checker = PenetrationChecker(scene)
+        loss = TranslationErrorLoss(rigid, ref=np.array([0.08, 0.0, 0.29]))
+        dofs = np.arange(6, dtype=np.int32)
+
+        def apply(step):
+            rigid.set_external_forces_on_dofs(dofs, np.ascontiguousarray(forces[step]))
+            if step > 0:
+                checker.record(step)
+
+        result = DifferentiableRollout(scene, dt=self.dt, num_steps=num_steps).run(
+            apply_inputs=apply, terminal_losses=[loss]
+        )
+        self.assertTrue(result.fd_valid, result.flagged_steps)
+        self.assertIn("jelly / rigid", checker.report(4), "the box and the soft cube must touch")
+        grad = result.gradients["rigid"].external_forces
+        self.assertAlmostEqual(self._box_loss_rollout("coulomb", forces, num_steps), result.loss, delta=1e-12)
+        adjoint, fd = [], []
+        for step in (0, num_steps // 2, num_steps - 1):
+            for dof in range(6):
+                fds = []
+                for eps in (1e-6, 1e-7):
+                    pair = []
+                    for sign in (+1.0, -1.0):
+                        perturbed = forces.copy()
+                        perturbed[step, dof] += sign * eps
+                        pair.append(self._box_loss_rollout("coulomb", perturbed, num_steps))
+                    fds.append((pair[0] - pair[1]) / (2.0 * eps))
+                if abs(fds[0]) > 1e-6:
+                    self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), 1e-4, (step, dof, fds))
+                adjoint.append(grad[dof, step])
+                fd.append(fds[0])
+        adjoint, fd = np.array(adjoint), np.array(fd)
+        self.assertGreater(float(np.abs(fd).max()), 1e-6, "vacuous: the forces do not move the loss")
+        np.testing.assert_allclose(adjoint, fd, rtol=1e-4, atol=1e-11)
+
+    def test_contact_force_adjoint_against_a_deformable_collider_is_refused(self) -> None:
+        """The box's total contact force depends on the soft collider's nodal positions, which
+        the contact-force adjoint does not reach: it is refused (the value is available)."""
+        scene, soft, rigid = scenes.rigid_on_soft_collider("coulomb")
+        self.addCleanup(physics.destroy_scene, scene)
+        _configure(scene)
+        rigid.register_query(physics.QueryType.TOTAL_CONTACT_FORCE)
+        pre = scene.capture_state()
+        scene.step(self.dt)
+        post = scene.capture_state()
+        self.assertGreater(float(np.linalg.norm(rigid.get_contact_force_world())), 1.0)
+        diffsim.reset_back_propagation(scene)
+        diffsim.prepare_back_propagate(scene, post, pre)
+        with self.assertRaisesRegex(Exception, "deformable collider"):
+            diffsim.get_contact_force_world_backward(rigid, np.array([1.0, 0.0, 0.0]))
+        scene.release_all_states()
+
+    def _stack_loss_rollout(self, friction, v_top, v_bottom, num_steps):
+        scene, bottom, top = scenes.soft_on_soft(friction)
+        try:
+            _configure(scene)
+            top.set_node_velocities_local(np.ascontiguousarray(v_top))
+            bottom.set_node_velocities_local(np.ascontiguousarray(v_bottom))
+            loss = DisplacementErrorLoss(top, ref=(0.02, 0.0, -0.01))
+            for _ in range(num_steps):
+                scene.step(self.dt)
+            return loss.value()
+        finally:
+            physics.destroy_scene(scene)
+
+    def test_soft_on_soft_initial_velocity_gradients(self) -> None:
+        """Two stacked soft cubes, each the collider of the other's samples: the gradient of
+        the top cube's displacements with respect to the initial nodal velocities of both
+        cubes, along two random directions each, against central FD at eps 1e-6 / 1e-7.
+        Measured 5e-9 to 2e-7."""
+        num_steps = 8
+        scene, bottom, top = scenes.soft_on_soft("coulomb")
+        self.addCleanup(physics.destroy_scene, scene)
+        _configure(scene)
+        n_top, n_bottom = top.get_num_dofs(), bottom.get_num_dofs()
+        v_top = np.zeros(n_top)
+        v_top[0::3] = 0.2
+        v_bottom = np.zeros(n_bottom)
+        top.set_node_velocities_local(np.ascontiguousarray(v_top))
+        checker = PenetrationChecker(scene)
+        loss = DisplacementErrorLoss(top, ref=(0.02, 0.0, -0.01))
+        result = DifferentiableRollout(scene, dt=self.dt, num_steps=num_steps).run(
+            apply_inputs=lambda step: checker.record(step) if step > 0 else None,
+            terminal_losses=[loss],
+        )
+        self.assertTrue(result.fd_valid, result.flagged_steps)
+        self.assertIn("bottom / top", checker.report(4), "the cubes must touch")
+        self.assertAlmostEqual(
+            self._stack_loss_rollout("coulomb", v_top, v_bottom, num_steps), result.loss, delta=1e-12
+        )
+        rng = np.random.default_rng(7)
+        for name, n, base_top, base_bottom in (
+            ("top", n_top, True, False),
+            ("bottom", n_bottom, False, True),
+        ):
+            grad = result.gradients[name].initial_velocity
+            self.assertGreater(float(np.abs(grad).max()), 0.0, f"{name}: vacuous")
+            for _ in range(2):
+                d = rng.standard_normal(n)
+                d /= np.linalg.norm(d)
+                fds = []
+                for eps in (1e-6, 1e-7):
+                    pair = []
+                    for sign in (+1.0, -1.0):
+                        pair.append(
+                            self._stack_loss_rollout(
+                                "coulomb",
+                                v_top + sign * eps * d if base_top else v_top,
+                                v_bottom + sign * eps * d if base_bottom else v_bottom,
+                                num_steps,
+                            )
+                        )
+                    fds.append((pair[0] - pair[1]) / (2.0 * eps))
+                self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), 1e-4, (name, fds))
+                self.assertLessEqual(abs(float(grad @ d) - fds[0]) / abs(fds[0]), 1e-5, (name, grad @ d, fds))
 
 
 class SoftArticulatedContactGradientTest(unittest.TestCase):

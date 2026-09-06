@@ -460,15 +460,20 @@ void deformable::SetupCollidingJacobians(
           VMatrix3x3r jacColliderFromWorldStageStart = {};
           Span<VMatrix3x3r const> toColliderJacs = jac->query->jacColliderFromWorld;
           if constexpr (kStageStart) {
-            MOCHI_ASSERT(
-                jac->query->jacColliderFromWorld.size() == 1,
-                "Stage-start contact Jacobians of deformable samples are implemented for "
-                "colliders with one shared collider-space Jacobian (rigid and articulated-link "
-                "SDF colliders) only.");
-            jacColliderFromWorldStageStart = ToVMatrix3x3Transpose(
-                reg.get<CRootTransform const>(jac->otherEntity)
-                    .worldFromLocalStageStart.GetRotation());
-            toColliderJacs = MakeSingletonConstSpan(jacColliderFromWorldStageStart);
+            if (jac->query->jacColliderFromWorld.size() == 1) {
+              jacColliderFromWorldStageStart = ToVMatrix3x3Transpose(
+                  reg.get<CRootTransform const>(jac->otherEntity)
+                      .worldFromLocalStageStart.GetRotation());
+              toColliderJacs = MakeSingletonConstSpan(jacColliderFromWorldStageStart);
+            } else {
+              // A mapped (soft-body SDF) collider: the per-contact Jacobians of its stage-start
+              // mapping, stored by the stage-start query.
+              MOCHI_ASSERT(
+                  isize(jac->query->jacColliderFromWorldStageStart) ==
+                      isize(jac->query->sampleIndices),
+                  "Missing per-contact stage-start collider Jacobians of a mapped collider.");
+              toColliderJacs = jac->query->jacColliderFromWorldStageStart;
+            }
           }
           DQuad dquad(discretizationImpl.femElements, toColliderJacs);
           DMap<DQuad, DMapRTConst, DMapDeformable<kNumFields>> dmap(&dquad, &dtransform, &dsoft);
@@ -498,6 +503,7 @@ MOCHI_SETUP_COLLIDING_JACOBIANS_INST(
     TagShellActor, CFemSurfaceDiscretization, TimeStep::StageStart);
 MOCHI_SETUP_COLLIDING_JACOBIANS_INST(TagRodActor, CFemSegmentDiscretization, TimeStep::StageStart);
 
+template <TimeStep kTimeStep>
 void deformable::SetupColliderJacobians(
     [[maybe_unused]] ecs::OptionalTag<TagSoftActor> isSoftActor,
     [[maybe_unused]] ecs::OptionalTag<TagShellActor> isShellActor,
@@ -506,14 +512,19 @@ void deformable::SetupColliderJacobians(
     CDofOffset const& dofOffset,
     CCollJacs<CollRole::Collider>& outJacobians) {
   MOCHI_PROFILE_SCOPE();
+  static_assert(kTimeStep == TimeStep::Current || kTimeStep == TimeStep::StageStart);
   MOCHI_ASSERT_VERBOSE(
       isSoftActor || isShellActor || isRodActor,
       "Invalid actor type for deformable::SetupColliderJacobians.");
-
+  // The stage-start Jacobians of a ROM's rigid transform layer are not stored (see
+  // rom::AddRigidContactJacobians); differentiable scenes reject ROM colliders.
+  MOCHI_ASSERT(
+      kTimeStep == TimeStep::Current || !isRomActor,
+      "Stage-start collider Jacobians are not available for ROM actors.");
   // Create differentiable map
-  DMapInverse dinvmap(0, dofOffset.dofsOffset, isRomActor);
+  DMapInverse dinvmap(
+      0, dofOffset.dofsOffset, isRomActor, /*stageStart*/ kTimeStep == TimeStep::StageStart);
   DMap<DMapInverse> dmap(&dinvmap);
-
   // Compute Jacobians
   for (auto& jac : outJacobians) {
     dinvmap.SetData(jac.query);
@@ -522,6 +533,17 @@ void deformable::SetupColliderJacobians(
     jacs[0].CompressIndices();
   }
 }
+#define MOCHI_SETUP_COLLIDER_JACOBIANS_INST(TIME_STEP)               \
+  template void deformable::SetupColliderJacobians<TIME_STEP>(       \
+      [[maybe_unused]] ecs::OptionalTag<TagSoftActor> isSoftActor,   \
+      [[maybe_unused]] ecs::OptionalTag<TagShellActor> isShellActor, \
+      [[maybe_unused]] ecs::OptionalTag<TagRodActor> isRodActor,     \
+      ecs::OptionalTag<TagRomActor> isRomActor,                      \
+      CDofOffset const& dofOffset,                                   \
+      CCollJacs<CollRole::Collider>& outJacobians);
+MOCHI_SETUP_COLLIDER_JACOBIANS_INST(TimeStep::Current);
+MOCHI_SETUP_COLLIDER_JACOBIANS_INST(TimeStep::StageStart);
+#undef MOCHI_SETUP_COLLIDER_JACOBIANS_INST
 
 void deformable::EmplaceContactComponents(
     entt::registry& reg,

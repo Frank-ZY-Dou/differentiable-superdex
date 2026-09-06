@@ -1084,7 +1084,7 @@ static void EvalStageStartContactWithSingleCollider(
         nullptr, /* outNdofs: registered in the detection pass, no need to update */
         nullptr, /* outColliderIntegrationWeights: registered in the detection pass */
         &outResult.jacColliderFromWorldStageStart,
-        nullptr /* outDofsJac: registered in the detection pass, no need to update */);
+        &outResult.jacWorldFromDofsStageStart);
 
     MOCHI_ASSERT_VERBOSE(
         isSdfGradUnitary == outResult.isSdfGradUnitary, "Inconsistent isSdfGradUnitary flags");
@@ -1128,6 +1128,9 @@ static void EvalStageStartContactWithSingleCollider(
     DynamicArray<Real3> sdfGradTemp(&allocator);
     DynamicArray<VMatrix3x3r> jacColliderFromWorldTemp(&allocator);
     DynamicArray<Matrix3x3r> sdfHessTemp(&allocator);
+    // The stage-start DoF Jacobians of the mapping (per contact, like the current ones).
+    bool const withDofsJac = explicitNormals && !outResult.jacWorldFromDofs.empty();
+    DynamicArray<ColliderJacDofs> jacWorldFromDofsTemp;
     posCollidingTemp.resize_noinit(outResult.sampleIndices.size());
     if (explicitNormals) {
       sdfValTemp.resize_noinit(outResult.sampleIndices.size());
@@ -1135,6 +1138,9 @@ static void EvalStageStartContactWithSingleCollider(
       jacColliderFromWorldTemp.resize_noinit(outResult.sampleIndices.size());
       if (withHessians) {
         sdfHessTemp.resize_noinit(outResult.sampleIndices.size());
+      }
+      if (withDofsJac) {
+        jacWorldFromDofsTemp.resize_noinit(outResult.sampleIndices.size());
       }
     }
     for (int i = 0, j = 0; i < outResult.sampleIndices.size(); ++i) {
@@ -1147,6 +1153,9 @@ static void EvalStageStartContactWithSingleCollider(
           jacColliderFromWorldTemp[i] = outResult.jacColliderFromWorldStageStart[j];
           if (withHessians) {
             sdfHessTemp[i] = outResult.sdfInfoStageStart.hess[j];
+          }
+          if (withDofsJac) {
+            jacWorldFromDofsTemp[i] = outResult.jacWorldFromDofsStageStart[j];
           }
         }
         j++;
@@ -1161,6 +1170,9 @@ static void EvalStageStartContactWithSingleCollider(
           if (withHessians) {
             sdfHessTemp[i] = outResult.sdfInfo.hess[i];
           }
+          if (withDofsJac) {
+            jacWorldFromDofsTemp[i] = outResult.jacWorldFromDofs[i];
+          }
         }
       }
     }
@@ -1171,6 +1183,9 @@ static void EvalStageStartContactWithSingleCollider(
       outResult.jacColliderFromWorldStageStart = jacColliderFromWorldTemp;
       if (withHessians) {
         outResult.sdfInfoStageStart.hess = sdfHessTemp;
+      }
+      if (withDofsJac) {
+        outResult.jacWorldFromDofsStageStart = std::move(jacWorldFromDofsTemp);
       }
     }
   }
@@ -1643,21 +1658,21 @@ static void InitColliderJacobians(
   ecs::ScheduleInvokeForEach(
       sem,
       "deformable::SetupColliderJacobians (soft)",
-      &deformable::SetupColliderJacobians,
+      &deformable::SetupColliderJacobians<kTimeStep>,
       reg,
       descendants.softActors);
 
   ecs::ScheduleInvokeForEach(
       sem,
       "deformable::SetupColliderJacobians (shell)",
-      &deformable::SetupColliderJacobians,
+      &deformable::SetupColliderJacobians<kTimeStep>,
       reg,
       descendants.shellActors);
 
   ecs::ScheduleInvokeForEach(
       sem,
       "deformable::SetupColliderJacobians (rod)",
-      &deformable::SetupColliderJacobians,
+      &deformable::SetupColliderJacobians<kTimeStep>,
       reg,
       descendants.rodActors);
 

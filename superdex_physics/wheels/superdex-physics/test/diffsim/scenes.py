@@ -629,9 +629,9 @@ def soft_cube_under_rigid(friction: str = "rich", rigid_velocity=(0.2, 0.0, 0.0)
     into it, like the other contact scenes) and sliding with ``rigid_velocity``:
     sync contact of the soft cube's samples against the box's SDF, in one island.
     The reverse direction (the box's samples against the soft's mapped SDF) is
-    disabled by the asymmetric layer filter: deformable colliders have no
-    stage-start SDF Hessian, and the backward rejects them. Returns (scene, soft,
-    rigid)."""
+    disabled by the asymmetric layer filter, so this scene isolates the deformable's
+    own samples; :func:`rigid_on_soft_collider` has both directions. Returns
+    (scene, soft, rigid)."""
     scene = physics.create_scene(f"diffsim_soft_under_rigid_{friction}")
     scene.set_gravity(GRAVITY)
     cp = contact_params(friction)
@@ -661,6 +661,67 @@ def soft_cube_under_rigid(friction: str = "rich", rigid_velocity=(0.2, 0.0, 0.0)
     scene.enable_layer_contact_asymmetric("Rigid", "Soft", False)
     rigid.set_velocity(list(rigid_velocity), [0.0, 0.0, 0.0])
     return scene, soft, rigid
+
+
+def _soft_with_sdf_collider(scene, name, cp, position):
+    """A soft cube that is also an SDF collider (its rest-space grid SDF mapped through the
+    deformation), created through the experimental API: soft actors created with
+    ``create_soft_actor`` are not colliders."""
+    ex = physics.experimental
+    return ex.create_soft_actor(
+        scene,
+        physics.SoftActorParams(
+            name=name,
+            shape=cube_shape(),
+            material=physics.SoftMaterialParams(),
+            contact=cp,
+            world_from_local=physics.TransformRT(list(position)),
+        ),
+        ex.ExperimentalSoftActorParams(collider_type=physics.ColliderType.SDF),
+    )
+
+
+def rigid_on_soft_collider(friction: str = "coulomb"):
+    """A soft cube on the ground, an SDF collider, with a dynamic rigid box resting on top of
+    it (1 mm into it) and offset by 3 cm: contact in both directions, the box's samples
+    against the soft's mapped SDF (the deformable as the collider) and the soft's samples
+    against the box's SDF. Returns (scene, soft, rigid)."""
+    scene = physics.create_scene(f"diffsim_rigid_on_soft_collider_{friction}")
+    scene.set_gravity(GRAVITY)
+    cp = contact_params(friction)
+    scene.create_rigid_actor(
+        name="ground",
+        shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+        is_static=True,
+        contact=cp,
+    )
+    soft = _soft_with_sdf_collider(scene, "jelly", cp, (0.0, 0.0, 0.099))
+    rigid = scene.create_rigid_actor(
+        name="rigid",
+        shape=cube_shape(),
+        density=1000.0,
+        contact=cp,
+        world_from_local=physics.TransformRT([0.03, 0.0, 0.298]),
+    )
+    return scene, soft, rigid
+
+
+def soft_on_soft(friction: str = "coulomb"):
+    """Two soft cubes, both SDF colliders, stacked on the ground with a 3 cm offset (the top
+    one 1 mm into the bottom one): each cube's samples against the other's mapped SDF.
+    Returns (scene, bottom, top)."""
+    scene = physics.create_scene(f"diffsim_soft_on_soft_{friction}")
+    scene.set_gravity(GRAVITY)
+    cp = contact_params(friction)
+    scene.create_rigid_actor(
+        name="ground",
+        shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+        is_static=True,
+        contact=cp,
+    )
+    bottom = _soft_with_sdf_collider(scene, "bottom", cp, (0.0, 0.0, 0.099))
+    top = _soft_with_sdf_collider(scene, "top", cp, (0.03, 0.0, 0.298))
+    return scene, bottom, top
 
 
 def rod_onto_cube(

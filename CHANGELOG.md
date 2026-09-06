@@ -50,10 +50,14 @@ releases on that base; these distributions are built from this repository, not f
   turn with it (`d(R_B f)/d delta = delta x R_B f`). All cases now agree with the kinematic
   identity of a free body to 1e-6 (`EngineContactForceAdjointTest`). The adjoint of a force
   query on an actor touching a deformable collider is refused with an explicit error (it used to
-  drop the collider's nodal dependence silently), and mapped (soft-body) SDF colliders now provide
-  SDF Hessians; deformable colliders stay rejected in differentiable scenes because the
-  stage-start contact Jacobians of a deforming collider are not differentiated (measured 1e-3
-  relative against finite differences for a rigid box resting on a soft cube).
+  drop the collider's nodal dependence silently).
+- Deformable (soft-body SDF) colliders are differentiable: mapped SDF colliders provide SDF
+  Hessians, the stage-start query stores the Jacobians of the collider's stage-start mapping
+  (`jacWorldFromDofsStageStart`), and both the colliding-side and the collider-side contact
+  Jacobians of the previous-state assembly use them. A rigid box resting on a soft cube (the
+  box's samples against the cube's mapped SDF) agrees with finite differences to 4e-6 (1e-3 with
+  the current mapping in place of the stage-start one), two stacked soft cubes to 2e-7; before,
+  such scenes were rejected. Point-cloud (shell, rod) and ROM colliders stay rejected.
 - Examples: `example_diffsim_robot_video.py` (reach, push, soft push, two-cube push, push with a
   feedback policy trained on top of an optimized open-loop plan on three cube starts against an
   open-loop baseline, gripper grasp, soft grasp, five-finger hand grasp, tendon finger, cable haul).

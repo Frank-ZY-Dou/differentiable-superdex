@@ -300,6 +300,9 @@ static void AddPerCollisionMissingStageStartContacts(
   if (isMappedCollider || isPointCloudCollider) {
     current.jacWorldFromDofs.reserve(newSize);
   }
+  if (isMappedCollider) {
+    current.jacWorldFromDofsStageStart.reserve(newSize);
+  }
 
   // If the current collision is empty, initialize shared data.
   if (current.sampleIndices.empty()) {
@@ -337,6 +340,11 @@ static void AddPerCollisionMissingStageStartContacts(
     }
     if (isMappedCollider || isPointCloudCollider) {
       current.jacWorldFromDofs.push_back(stageStart.jacWorldFromDofs[contactIdx]);
+    }
+    if (isMappedCollider) {
+      // The stage-start mapping of the appended contact is the one the stage-start detection
+      // found (the current mapping of a contact that was not colliding then is unknown).
+      current.jacWorldFromDofsStageStart.push_back(stageStart.jacWorldFromDofs[contactIdx]);
     }
   }
 }

@@ -301,6 +301,14 @@ struct ContactDetectionResult {
    */
   DynamicArray<ColliderJacDofs> jacWorldFromDofs = {};
 
+  /**
+   * @brief Optional: Jacobian wrt DoFs of the transformation to world space from collider space
+   * at stage start (the collider's stage-start mapping; the previous-state assembly of
+   * differentiable scenes differentiates the stage-start contact data through it).
+   * @note Empty or 1-to-1 with sampleIndices for deformable colliders.
+   */
+  DynamicArray<ColliderJacDofs> jacWorldFromDofsStageStart = {};
+
   /** @brief Number of DoFs in the mapping Jacobians. */
   int ndofs = 0;
 
@@ -358,6 +366,7 @@ struct ContactDetectionResult {
     MOCHI_ASSERT_EMPTY_ONE_OR_FULL(jacColliderFromWorld);
     MOCHI_ASSERT_EMPTY_ONE_OR_FULL(jacColliderFromWorldStageStart);
     MOCHI_ASSERT_EMPTY_OR_FULL(jacWorldFromDofs);
+    MOCHI_ASSERT_EMPTY_OR_FULL(jacWorldFromDofsStageStart);
     MOCHI_ASSERT_EMPTY_OR_FULL(forcePerUnitArea);
     MOCHI_ASSERT_EMPTY_OR_FULL(colliderIntegrationWeights);
     MOCHI_ASSERT_EMPTY_OR_FULL(colliderFeatureIndices);
@@ -377,6 +386,7 @@ struct ContactDetectionResult {
     jacColliderFromWorld.clear();
     jacColliderFromWorldStageStart.clear();
     jacWorldFromDofs.clear();
+    jacWorldFromDofsStageStart.clear();
     culledPositionsBuffer.clear();
     culledIndicesBuffer.clear();
     forcePerUnitArea.clear();
