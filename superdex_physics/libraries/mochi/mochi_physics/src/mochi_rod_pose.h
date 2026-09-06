@@ -36,7 +36,20 @@ struct RodPose {
 
 // Container wrapping a RodPose value for use with IntegrationBundle.
 struct RodPoseContainer {
+ private:
+  static RodPose CreateValue(int numNodes, bool isClosedLoop) {
+    MOCHI_ASSERT_VERBOSE(
+        numNodes >= (isClosedLoop ? 3 : 2),
+        "A rod requires at least 2 nodes, or 3 nodes for a closed loop.");
+    return {
+        ColumnVector<real>::Zero(numNodes * fem::kNumRodFields),
+        DynamicArray<Real3>(isClosedLoop ? numNodes : numNodes - 1)};
+  }
+
+ public:
   RodPoseContainer() = default;
+  explicit RodPoseContainer(int numNodes, bool isClosedLoop)
+      : value(CreateValue(numNodes, isClosedLoop)) {}
   explicit RodPoseContainer(RodPose const& v) : value(v) {}
   explicit RodPoseContainer(RodPose&& v) : value(std::move(v)) {}
 
@@ -48,19 +61,7 @@ struct RodPoseContainer {
 };
 
 // Component for time integration of rod poses (displacement-twist + frame axes).
-struct CIntegrationRodPoses : public IntegrationBundle<RodPoseContainer>, NoCopy {
-  CIntegrationRodPoses() = default;
-  explicit CIntegrationRodPoses(int numNodes, bool isClosedLoop) {
-    int const numElements = isClosedLoop ? numNodes : numNodes - 1;
-    stepStart.value.displacements = ColumnVector<real>::Zero(numNodes * fem::kNumRodFields);
-    stepStart.value.frameAxes.resize(numElements, Real3{});
-  }
-
-  MOCHI_STRUCT_BEGIN(mochi::CIntegrationRodPoses);
-  MOCHI_ATTRIBUTE(CaptureState);
-  MOCHI_BASE_CLASS(IntegrationBundle<RodPoseContainer>);
-  MOCHI_STRUCT_END();
-};
+MOCHI_DEFINE_INTEGRATION_COMPONENT(CIntegrationRodPoses, RodPoseContainer);
 
 // Component holding the rod pose at a given time level, following the CRigidState<kStep> pattern.
 // CRodPose<Current> is the single source of truth for displacements + frame axes during the solve.
@@ -69,13 +70,6 @@ struct CIntegrationRodPoses : public IntegrationBundle<RodPoseContainer>, NoCopy
 template <TimeStep kStep>
 struct CRodPose : public RodPoseContainer, NoCopy {
   using RodPoseContainer::RodPoseContainer;
-
-  CRodPose() = default;
-  explicit CRodPose(int numNodes, bool isClosedLoop)
-      : RodPoseContainer(
-            RodPose{
-                ColumnVector<real>::Zero(numNodes * fem::kNumRodFields),
-                DynamicArray<Real3>(isClosedLoop ? numNodes : numNodes - 1, Real3{})}) {}
 
   MOCHI_TEMPLATE_BEGIN(mochi::CRodPose, kStep);
   MOCHI_ATTRIBUTE_IF(kStep == TimeStep::Current, CaptureState);

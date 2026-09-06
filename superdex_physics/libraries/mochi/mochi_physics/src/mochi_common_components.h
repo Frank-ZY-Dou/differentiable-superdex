@@ -386,10 +386,14 @@ struct IntegrationBundle {
     stages.reserve(kMaxIntegrationStages);
   }
 
-  // Constructor from numDofs only if T is constructible from int
-  explicit IntegrationBundle(int numDofs)
-    requires(std::is_constructible_v<T, int>)
-      : stepStart(numDofs) {
+  // Forward value-specific construction arguments to the step-start state.
+  template <typename... Args>
+  explicit IntegrationBundle(Args&&... args)
+    requires(
+        sizeof...(Args) > 0 && std::is_constructible_v<T, Args...> &&
+        !(sizeof...(Args) == 1 &&
+          (std::is_base_of_v<IntegrationBundle<T>, std::remove_cvref_t<Args>> && ...)))
+      : stepStart(std::forward<Args>(args)...) {
     prevSteps.reserve(kMaxIntegrationSteps);
     stages.reserve(kMaxIntegrationStages);
   }
@@ -406,6 +410,29 @@ struct IntegrationBundle {
   MOCHI_FIELD(stages) MOCHI_ATTRIBUTE(NoSerialize);
   MOCHI_TEMPLATE_END();
 };
+
+// Macros for defining ECS components of numerically-integrated positions/velocities. Invoke them
+// directly in namespace mochi. ValueType must not contain a top-level comma; use a type alias for
+// multi-argument template types.
+#define MOCHI_DEFINE_INTEGRATION_COMPONENT(Component, ValueType)   \
+  struct Component : public IntegrationBundle<ValueType>, NoCopy { \
+    using IntegrationBundle<ValueType>::IntegrationBundle;         \
+                                                                   \
+    MOCHI_STRUCT_BEGIN(mochi::Component);                          \
+    MOCHI_ATTRIBUTE(CaptureState);                                 \
+    MOCHI_BASE_CLASS(IntegrationBundle<ValueType>);                \
+    MOCHI_STRUCT_END();                                            \
+  }
+
+#define MOCHI_DEFINE_INTEGRATION_COMPONENT_TEMPLATE(Component, ValueType, ...) \
+  struct Component : public IntegrationBundle<ValueType>, NoCopy {             \
+    using IntegrationBundle<ValueType>::IntegrationBundle;                     \
+                                                                               \
+    MOCHI_TEMPLATE_BEGIN(mochi::Component, __VA_ARGS__);                       \
+    MOCHI_ATTRIBUTE(CaptureState);                                             \
+    MOCHI_BASE_CLASS(IntegrationBundle<ValueType>);                            \
+    MOCHI_TEMPLATE_END();                                                      \
+  }
 
 // Rigid body state at a given time.
 struct TransformRTContainer {
@@ -429,12 +456,7 @@ struct CRigidState : public TransformRTContainer {
 };
 
 /// @brief Component for time integration of rigid body pose.
-struct CIntegrationRigidStates : public IntegrationBundle<TransformRTContainer>, NoCopy {
-  MOCHI_STRUCT_BEGIN(mochi::CIntegrationRigidStates);
-  MOCHI_ATTRIBUTE(CaptureState);
-  MOCHI_BASE_CLASS(IntegrationBundle<TransformRTContainer>);
-  MOCHI_STRUCT_END();
-};
+MOCHI_DEFINE_INTEGRATION_COMPONENT(CIntegrationRigidStates, TransformRTContainer);
 
 // Traits that define metadata for different vector types that might be part of an
 // actor's state.
@@ -682,31 +704,19 @@ struct VelocityVectorMetadata : public MatrixMetadata<MatrixSemantics::TangentSp
 template <typename Scalar, TimeStep kRelTime, DisplacementLayer kLayer = DisplacementLayer::Default>
 using CVelocitySlice = CTimeSlice<Scalar, VelocityVectorMetadata<kLayer>, kRelTime>;
 
-/// @brief Component for time integration of displacement slices.
 using DefaultDisplacementSlice =
     VectorComponent<real, DisplacementVectorMetadata<DisplacementLayer::Default>>;
-struct CIntegrationDisplacementSlices : public IntegrationBundle<DefaultDisplacementSlice>, NoCopy {
-  using IntegrationBundle<DefaultDisplacementSlice>::IntegrationBundle;
+/// @brief Component for time integration of displacement slices.
+MOCHI_DEFINE_INTEGRATION_COMPONENT(CIntegrationDisplacementSlices, DefaultDisplacementSlice);
 
-  MOCHI_STRUCT_BEGIN(mochi::CIntegrationDisplacementSlices);
-  MOCHI_ATTRIBUTE(CaptureState);
-  MOCHI_BASE_CLASS(IntegrationBundle<DefaultDisplacementSlice>);
-  MOCHI_STRUCT_END();
-};
-
+template <DisplacementLayer kLayer>
+using VelocityIntegrationValue = VectorComponent<real, VelocityVectorMetadata<kLayer>>;
 /// @brief Component for time integration of velocity slices.
 template <DisplacementLayer kLayer = DisplacementLayer::Default>
-struct CIntegrationVelocitySlices
-    : public IntegrationBundle<VectorComponent<real, VelocityVectorMetadata<kLayer>>>,
-      NoCopy {
-  using BaseClass = IntegrationBundle<VectorComponent<real, VelocityVectorMetadata<kLayer>>>;
-  using BaseClass::BaseClass;
-
-  MOCHI_TEMPLATE_BEGIN(mochi::CIntegrationVelocitySlices, kLayer);
-  MOCHI_ATTRIBUTE(CaptureState);
-  MOCHI_BASE_CLASS(BaseClass);
-  MOCHI_TEMPLATE_END();
-};
+MOCHI_DEFINE_INTEGRATION_COMPONENT_TEMPLATE(
+    CIntegrationVelocitySlices,
+    VelocityIntegrationValue<kLayer>,
+    kLayer);
 
 template <typename... Ts>
 struct CVariant {

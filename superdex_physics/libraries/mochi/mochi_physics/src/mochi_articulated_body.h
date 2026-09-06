@@ -115,20 +115,13 @@ struct CArticulatedJointVels : NoCopy {
 };
 
 /// @brief Component for time integration of articulated reduced pose.
-struct CIntegrationArticulatedReducedPose : public IntegrationBundle<ArticulatedPose>, NoCopy {
-  using IntegrationBundle<ArticulatedPose>::IntegrationBundle;
-
-  MOCHI_STRUCT_BEGIN(mochi::CIntegrationArticulatedReducedPose);
-  MOCHI_ATTRIBUTE(CaptureState);
-  MOCHI_BASE_CLASS(IntegrationBundle<ArticulatedPose>);
-  MOCHI_STRUCT_END();
-};
+MOCHI_DEFINE_INTEGRATION_COMPONENT(CIntegrationArticulatedReducedPose, ArticulatedPose);
 
 /// @brief Component for time integration of articulated joint velocities.
 struct CIntegrationArticulatedJointVels : public NoCopy {
   CIntegrationArticulatedJointVels() = default;
   explicit CIntegrationArticulatedJointVels(int numLinks) : value(numLinks) {}
-  DynamicArray<IntegrationRigidVels> value;
+  DynamicArray<IntegrationBundle<RigidBodyVelContainer>> value;
 
   MOCHI_STRUCT_BEGIN(mochi::CIntegrationArticulatedJointVels);
   MOCHI_ATTRIBUTE(CaptureState);
