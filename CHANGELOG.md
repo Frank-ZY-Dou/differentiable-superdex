@@ -14,7 +14,7 @@ releases on that base; these distributions are built from this repository, not f
   and articulated colliders included) and node-to-rigid constraints, with gradients for initial
   states, per-step controller targets and external forces, gravity, contact materials, densities
   and soft material parameters; every path is checked against independent finite differences in
-  `superdex_physics/wheels/superdex-physics/test/diffsim` (135 tests) and the C++ suites.
+  `superdex_physics/wheels/superdex-physics/test/diffsim` (142 tests) and the C++ suites.
 - Adjoint correctness fixes: rod and soft residual sizing across assemblies, inner-solver
   convergence norm, relative outer tolerance with the true residual reported, stage-start contact
   Jacobians for deformable-vs-dynamic contact, exact adjoints across steps of different sizes
@@ -58,6 +58,13 @@ releases on that base; these distributions are built from this repository, not f
   box's samples against the cube's mapped SDF) agrees with finite differences to 4e-6 (1e-3 with
   the current mapping in place of the stage-start one), two stacked soft cubes to 2e-7; before,
   such scenes were rejected. Point-cloud (shell, rod) and ROM colliders stay rejected.
+- Triangle-mesh colliders (`ColliderType.MESH`, closest-point queries) are differentiable: the
+  query computes the signed distance's Hessian by the closest feature (zero on a face,
+  `s (I - t t^T - g g^T) / rho` on an edge, `s (I - g g^T) / rho` at a node), which the
+  previous-state assembly and the contact-force adjoints need; `make_scene_differentiable` no
+  longer refuses them. A rigid cube sliding on a static mesh box agrees with finite differences to
+  5e-7, the chain pushing a mesh-collider cube to 1e-4, the contact-force adjoint against a mesh
+  wall to 1e-6.
 - Examples: `example_diffsim_robot_video.py` (reach, push, soft push, two-cube push, push with a
   feedback policy trained on top of an optimized open-loop plan on three cube starts against an
   open-loop baseline, gripper grasp, soft grasp, five-finger hand grasp, tendon finger, cable haul).

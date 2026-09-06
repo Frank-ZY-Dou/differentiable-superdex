@@ -1532,17 +1532,20 @@ class EngineContactForceAdjointTest(unittest.TestCase):
         )
         self.assertLessEqual(rel, 1e-6, rel)
 
-    def test_static_grid_sdf_collider_is_exact(self) -> None:
+    def test_static_grid_sdf_and_mesh_colliders_are_exact(self) -> None:
         """A flying cube (pushed and tilted by external forces) hitting a static cube: the
-        contact meets the collider's grid SDF near its edges, where the interpolated gradient
-        turns (measured 3.7% before the Hessian term, 3e-7 / 1e-8 after)."""
-        def build(friction):
+        contact meets the collider near its edges, where the gradient of the signed distance
+        turns - the interpolated gradient of a grid SDF (measured 3.7% before the Hessian
+        term, 3e-7 / 1e-8 after) and the closest-feature gradient of a triangle-mesh collider,
+        whose Hessian is analytic by feature."""
+        def build(friction, collider_type):
             contact = scenes.contact_params(friction)
             scene = physics.create_scene("wall")
             scene.set_gravity([0.0, 0.0, -9.81])
             half = float(np.abs(scenes.CUBE_COORDS).max())
             scene.create_rigid_actor(
                 name="wall", shape=scenes.cube_shape(), is_static=True, contact=contact,
+                collider_type=collider_type,
                 world_from_local=physics.TransformRT([2 * half + 0.004, 0.0, 0.0]),
             )
             cube = scene.create_rigid_actor(name="cube", shape=scenes.cube_shape(), density=1000.0, contact=contact)
@@ -1551,15 +1554,17 @@ class EngineContactForceAdjointTest(unittest.TestCase):
             return scene, cube, cube
 
         dofs = np.arange(6, dtype=np.int32)
-        for friction in ("none", "coulomb"):
-            forces = np.zeros((self.NUM_STEPS, 6))
-            forces[:, 0] = 60.0
-            forces[:, 4] = 3.0
-            rel = self._engine_vs_kinematic(
-                lambda friction=friction: build(friction), "cube",
-                lambda a, u: a.set_external_forces_on_dofs(dofs, np.ascontiguousarray(u)), forces, True,
-            )
-            self.assertLessEqual(rel, 1e-6, (friction, rel))
+        for collider_type in (physics.ColliderType.SDF, physics.ColliderType.MESH):
+            for friction in ("none", "coulomb"):
+                forces = np.zeros((self.NUM_STEPS, 6))
+                forces[:, 0] = 60.0
+                forces[:, 4] = 3.0
+                rel = self._engine_vs_kinematic(
+                    lambda friction=friction, collider_type=collider_type: build(friction, collider_type),
+                    "cube",
+                    lambda a, u: a.set_external_forces_on_dofs(dofs, np.ascontiguousarray(u)), forces, True,
+                )
+                self.assertLessEqual(rel, 1e-6, (collider_type, friction, rel))
 
     def test_moving_collider_is_exact(self) -> None:
         """A rigid pusher (pushed and tilted by external forces) against the target cube, with

@@ -55,8 +55,9 @@ Supported: rigid, articulated (with pose controllers), soft (tetrahedral FEM) an
 contact between them and against static colliders (a soft or rod actor collides with rigid and
 articulated colliders through its surface samples, and a soft actor created with an SDF collider
 through `physics.experimental.create_soft_actor` is also a collider for rigid bodies and other
-soft actors: the adjoint differentiates its stage-start mapping; mesh and point-cloud colliders
-are rejected in differentiable scenes); node-to-rigid constraints. `make_scene_differentiable`
+soft actors: the adjoint differentiates its stage-start mapping; triangle-mesh colliders
+(`ColliderType.MESH`) provide the signed distance's Hessian by the closest feature; point-cloud
+colliders are rejected in differentiable scenes); node-to-rigid constraints. `make_scene_differentiable`
 switches the solver to the settings the adjoint needs (explicit contact normals, exact
 gradients of the contact merit, Armijo line search, friction continuation) and disables
 recentering of soft actors. Use double precision (`SUPERDEX_PRECISION=double`): the driver
@@ -200,9 +201,10 @@ the same way, and the adjoint operator carries the moving-chart term of external
 rigid bodies, so torque gradients are exact to 1.6e-7 at 0.3 N m and 3e-5 at 1.2 N m on a 0.2 m
 cube; the contact-force query adjoint is exact against static and moving colliders alike,
 checked against the kinematic identity of a free body); the
-stiffness damping of soft materials, point-cloud colliders (shells and rods acting as colliders)
-and mesh colliders (no SDF Hessians) are not differentiable, and the adjoint of a contact-force
-query on an actor touching a deformable collider is refused; a soft body pressed and dragged by a link can trap the forward Newton solve at
+stiffness damping of soft materials and point-cloud colliders (shells and rods acting as
+colliders, no SDF Hessians) are not differentiable, the adjoint of a contact-force query on an
+actor touching a deformable collider is refused, and the rod-cube contact scenes carry a
+1e-4-level approximation on the rod side (documented in their tests); a soft body pressed and dragged by a link can trap the forward Newton solve at
 isolated steps, which the driver's substepping resolves (see the examples' docstrings). Losses
 through frictional contact are piecewise smooth: at steps where the forward Newton solve is
 nearly degenerate (100+ iterations to a 1e-9 residual, an arm pushing a cube over the ground)

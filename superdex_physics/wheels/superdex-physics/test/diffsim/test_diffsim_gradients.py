@@ -255,6 +255,21 @@ class DiffsimGradientTest(unittest.TestCase):
                 rel_errors = self._chain_control_gradient_check(scene, chain, cube)
                 self.assertLessEqual(max(rel_errors.values()), 1e-4, rel_errors)
 
+    def test_chain_pushing_mesh_collider_cube(self):
+        """The link's samples against the pushed cube's triangle-mesh collider (a dynamic mesh
+        collider: its closest-feature Hessian enters the previous-state assembly through the
+        explicit stage-start normal), with viscous friction as in the SDF edge-region test."""
+        viscous = physics.ContactParams(
+            penalty_coefficient=1e8,
+            coulomb_friction_coefficient=0.0,
+            viscous_friction_coefficient=0.1,
+        )
+        scene, chain, cube = scenes.chain_pushing_cube_with_params(
+            viscous, cube_collider_type=physics.ColliderType.MESH
+        )
+        rel_errors = self._chain_control_gradient_check(scene, chain, cube)
+        self.assertLessEqual(max(rel_errors.values()), 1e-4, rel_errors)
+
     # -- initial angular velocity of a free rigid body ------------------------
 
     def test_initial_angular_velocity_gradient_is_exact(self) -> None:
@@ -343,6 +358,22 @@ class DiffsimGradientTest(unittest.TestCase):
     def test_rigid_free_rotation(self) -> None:
         scene, cube = scenes.rigid_free()
         self._check(scene, [QuaternionErrorLoss(cube)], TOL_SMOOTH)
+
+    # -- a static box whose collider is its triangle mesh (closest-point queries) --
+    #
+    # The mesh collider provides the signed distance's Hessian by the closest feature
+    # (zero on a face, s (I - t t^T - g g^T) / rho on an edge, s (I - g g^T) / rho at a
+    # node; 2026-09-05), which the previous-state assembly (the derivative of the explicit
+    # stage-start normal) and the contact-force adjoints need. The sliding cube starts
+    # off-center so that its samples reach the box's edges.
+
+    def test_rigid_on_mesh_box_frictionless(self) -> None:
+        scene, cube = scenes.rigid_on_mesh_box("none")
+        self._check(scene, [TranslationErrorLoss(cube)], TOL_CONTACT)
+
+    def test_rigid_on_mesh_box_coulomb_friction(self) -> None:
+        scene, cube = scenes.rigid_on_mesh_box("coulomb")
+        self._check(scene, [TranslationErrorLoss(cube)], TOL_CONTACT)
 
     def test_rigid_on_plane_frictionless(self) -> None:
         scene, cube = scenes.rigid_on_plane("none")

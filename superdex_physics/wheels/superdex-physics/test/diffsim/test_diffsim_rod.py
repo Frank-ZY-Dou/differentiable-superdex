@@ -520,13 +520,58 @@ class RodSupportBoundaryTest(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "collider"):
             self._rod_onto_cube_backward(rod_as_collider=True)
 
-    def test_mesh_collider_is_rejected(self) -> None:
-        # Mesh colliders provide no SDF Hessian (the explicit stage-start normal's
-        # derivative), unlike sphere, box, plane and grid-SDF colliders; the
-        # differentiable scene's stage-start contact query requests Hessians from
-        # every collider, so make_scene_differentiable refuses mesh colliders.
-        with self.assertRaisesRegex(Exception, "[Mm]esh collider"):
-            self._rod_onto_cube_backward(cube_collider=physics.ColliderType.MESH)
+    def test_mesh_collider_cube_velocity_gradient(self) -> None:
+        """The rod's samples against the cube's triangle-mesh collider (closest-point queries,
+        the signed distance's Hessian by the closest feature since 2026-09-05; mesh colliders
+        were refused before): the gradient of the rod's tip position with respect to the
+        cube's initial velocity against central FD, as in RodDynamicContactAdjointTest.
+        Measured 1.2e-4 relative (x 1.1e-4, y 1.4e-5, z 7e-4 on a component ten times
+        smaller; the difference quotients agree to 1e-5 from eps 1e-5 to 1e-7), against
+        3e-5 with the box collider of the same cube (x 2.4e-5, z 1.7e-4): the rod-cube
+        contact scenes carry an approximation of this order on the rod side (see
+        scenes.rod_onto_cube), and a rigid cube on a static mesh box or the chain pushing
+        a mesh-collider cube are exact to 5e-7 / 1e-4 (test_diffsim_gradients)."""
+        dt, num_steps, goal = 0.005, 20, np.array([0.3, 0.0, 0.1])
+        v0_cube = np.array([0.3, 0.0, 0.0])
+        scene, rod, cube = scenes.rod_onto_cube(
+            cube_velocity=tuple(v0_cube), cube_collider=physics.ColliderType.MESH
+        )
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        result = DifferentiableRollout(scene, dt=dt, num_steps=num_steps).run(
+            apply_inputs=lambda step: None, terminal_losses=[_TipLoss(rod, 6, goal)]
+        )
+        self.assertTrue(result.fd_valid, result.flagged_steps)
+        grad_cube = result.gradients["cube"].initial_velocity[:3]
+
+        def rollout_loss(v_cube):
+            sc, rd, cb = scenes.rod_onto_cube(
+                cube_velocity=tuple(v_cube), cube_collider=physics.ColliderType.MESH
+            )
+            try:
+                configure_for_differentiability(sc)
+                loss = _TipLoss(rd, 6, goal)
+                for _ in range(num_steps):
+                    sc.step(dt)
+                self.assertLess(_node_position(rd, 3)[2], 0.205, "the rod must reach the cube")
+                return loss.value()
+            finally:
+                physics.destroy_scene(sc)
+
+        fd_cube = np.zeros(3)
+        for k in range(3):
+            fds = []
+            for eps in (1e-5, 1e-6):
+                dv = np.zeros(3)
+                dv[k] = eps
+                fds.append((rollout_loss(v0_cube + dv) - rollout_loss(v0_cube - dv)) / (2.0 * eps))
+            fd_cube[k] = fds[0]
+            if abs(fds[0]) > 1e-8:
+                self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), 1e-4, "rough FD")
+        self.assertGreater(np.linalg.norm(fd_cube), 0.0)
+        rel = np.linalg.norm(grad_cube - fd_cube) / np.linalg.norm(fd_cube)
+        self.assertLessEqual(rel, 3e-4, (grad_cube, fd_cube))
+        self.assertLessEqual(abs(grad_cube[0] - fd_cube[0]) / abs(fd_cube[0]), 2e-4, (grad_cube, fd_cube))
 
 
 if __name__ == "__main__":

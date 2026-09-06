@@ -338,18 +338,23 @@ def chain_pushing_cube_with_params(
     ground_cp=None,
     cube_collider: bool = True,
     link_collider: bool = True,
+    cube_collider_type=None,
 ):
     """:func:`chain_pushing_cube` with explicit contact parameters: ``cp`` for every
     actor unless overridden per actor (a contact pair combines both owners'
     parameters by geometric mean, so a zero coefficient on one owner makes the
     pair frictionless). ``cube_collider`` / ``link_collider`` select which body
     owns an SDF collider, i.e. whose surface the other body's samples are tested
-    against (both by default)."""
+    against (both by default); ``cube_collider_type`` replaces the cube's SDF
+    collider by another type (e.g. ``ColliderType.MESH``, the triangle mesh with
+    closest-point queries)."""
     chain_cp = cp if chain_cp is None else chain_cp
     cube_cp = cp if cube_cp is None else cube_cp
     ground_cp = cp if ground_cp is None else ground_cp
     cube_collider_type = (
-        physics.ColliderType.SDF if cube_collider else physics.ColliderType.NONE
+        (physics.ColliderType.SDF if cube_collider_type is None else cube_collider_type)
+        if cube_collider
+        else physics.ColliderType.NONE
     )
     link_collider_type = (
         physics.ColliderType.SDF if link_collider else physics.ColliderType.NONE
@@ -663,6 +668,34 @@ def soft_cube_under_rigid(friction: str = "rich", rigid_velocity=(0.2, 0.0, 0.0)
     return scene, soft, rigid
 
 
+def rigid_on_mesh_box(friction: str = "coulomb", initial_velocity=(0.5, 0.0, 0.0)):
+    """A dynamic cube sliding on a static box whose collider is the triangle mesh itself
+    (``ColliderType.MESH``: closest-point queries with pseudo-normal signs, the signed
+    distance's Hessian by the closest feature) instead of a grid SDF. The cube starts 1 mm
+    into the box's top face, off-center so that its samples reach the box's edges. Returns
+    (scene, cube)."""
+    scene = physics.create_scene(f"diffsim_rigid_on_mesh_box_{friction}")
+    scene.set_gravity(GRAVITY)
+    cp = contact_params(friction)
+    scene.create_rigid_actor(
+        name="box",
+        shape=cube_shape(),
+        is_static=True,
+        contact=cp,
+        collider_type=physics.ColliderType.MESH,
+        world_from_local=physics.TransformRT([0.0, 0.0, -0.1]),
+    )
+    cube = scene.create_rigid_actor(
+        name="cube",
+        shape=cube_shape(),
+        density=1000.0,
+        contact=cp,
+        world_from_local=physics.TransformRT([0.06, 0.0, 0.099]),
+    )
+    cube.set_velocity(list(initial_velocity), [0.0, 0.0, 0.0])
+    return scene, cube
+
+
 def _soft_with_sdf_collider(scene, name, cp, position):
     """A soft cube that is also an SDF collider (its rest-space grid SDF mapped through the
     deformation), created through the experimental API: soft actors created with
@@ -741,7 +774,7 @@ def rod_onto_cube(
     2026-09-02). Rods are no colliders by default; with ``rod_as_collider`` the
     rod gets a point-cloud collider that the cube's samples test against (that
     direction has no adjoint). ``cube_collider`` selects the cube's collider
-    type (MESH colliders have no SDF Hessian). Returns (scene, rod, cube)."""
+    type (BOX, SDF or MESH, all with SDF Hessians). Returns (scene, rod, cube)."""
     scene = physics.create_scene(f"diffsim_rod_onto_cube_{friction}")
     scene.set_gravity(GRAVITY)
     cp = contact_params(friction)

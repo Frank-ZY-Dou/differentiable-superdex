@@ -3398,17 +3398,11 @@ void MakeSceneDifferentiableInternal(Scene* scene, Error& error) {
   sceneImpl->ForEachActor([&](Actor* actor) {
     auto e = GetEntity(reg, actor->GetHandle(), error);
     MOCHI_ERROR_RETURN(error);
-    // The stage-start contact query of a differentiable scene computes SDF Hessians (the
-    // derivative of the explicit stage-start normal in the previous-state assembly), which mesh
-    // colliders do not provide (the query asserts); sphere, box, plane and grid-SDF colliders do.
-    if (auto const* colliderInfo = reg.try_get<CColliderInfo const>(e);
-        colliderInfo && colliderInfo->type == ColliderType::Mesh) {
-      MOCHI_ERROR_SET(
-          error,
-          "Mesh colliders are not supported in differentiable scenes (no SDF Hessians for the "
-          "stage-start contact query). Use a box, sphere, plane or SDF collider.");
-      return;
-    }
+    // The contact queries of a differentiable scene compute SDF Hessians (the derivative of the
+    // explicit stage-start normal in the previous-state assembly, the penalty force's derivative
+    // in the contact-force adjoints): sphere, box, plane, grid-SDF, soft-body SDF and mesh
+    // colliders provide them (the mesh collider's by the closest feature); point-cloud colliders
+    // do not, and are refused where they matter (BackPropagate).
     if (actor->IsStatic() || actor->GetType() == ActorType::Rigid) {
       return;
     } else if (actor->GetType() == ActorType::Articulated) {

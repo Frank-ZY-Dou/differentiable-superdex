@@ -203,7 +203,8 @@ bool MeshColliderBvh<Bv>::QueryPoint(
     ContactDetectionParams const& params,
     Vec4r& outPos,
     real& outSdf,
-    Vec4r& outSdfGrad) const {
+    Vec4r& outSdfGrad,
+    Matrix3x3r* outSdfHess) const {
   // Find closest element to point in collider.
   // Disregard both sign and parameterization at this point - We will need to recover them
   // afterwards when testing the specific scenario we're dealing with.
@@ -291,6 +292,34 @@ bool MeshColliderBvh<Bv>::QueryPoint(
       }
     }
 
+    // Hessian of the signed distance by the closest feature (see the declaration). The
+    // feature is read from the barycentric coordinates like the pseudo-normal above.
+    if (outSdfHess) {
+      Matrix3x3r hess = {};
+      if (std::abs(distance) >= kEps) {
+        Real3 const par3 = ToReal3(par);
+        bool const bA = par3[0] > kEps;
+        bool const bB = par3[1] > kEps;
+        bool const bC = par3[2] > kEps;
+        int const onFeature = int(bA) + int(bB) + int(bC);
+        if (onFeature < 3) {
+          real const rho = std::abs(distance);
+          Real3 const g = ToReal3(Normalize<3>(position - projPos));
+          Real3 t = {};
+          if (onFeature == 2) {
+            Vec4r const edge = (bA && bB) ? (B - A) : ((bB && bC) ? (C - B) : (A - C));
+            t = ToReal3(Normalize<3>(edge));
+          }
+          real const scale = signParams.outSign / rho;
+          for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+              hess[r][c] = scale * ((r == c ? 1_r : 0_r) - g[r] * g[c] - t[r] * t[c]);
+            }
+          }
+        }
+      }
+      *outSdfHess = hess;
+    }
     // Copy result
     outSdf = distance;
     outPos = position;
@@ -834,24 +863,32 @@ void mochi::FindPointContactsT<MeshCollider>(
   MOCHI_ASSERT_VERBOSE(collider, "MeshCollider is null");
   MOCHI_ASSERT_VERBOSE(collider->IsInitialized(), "MeshCollider is not initialized");
   MOCHI_ASSERT_VERBOSE(outIndices.empty(), "Expected empty contact detection result.");
-  MOCHI_ASSERT(
-      !params.computeSdfHessian,
-      "SDF Hessians (needed by the adjoint of a differentiable scene) are not implemented for mesh "
-      "colliders.");
 
   auto const colliderFromPoints = Invert(pointsFromCollider);
 
   // Query MeshCollider for each point
   outIsSdfGradUnitary = true;
+  outSdf.hasHessian = params.computeSdfHessian;
   for (int i = 0; i < isize(points); ++i) {
     Vec4r posColliding = {};
     real sdf = {};
     Vec4r sdfGrad = {};
+    Matrix3x3r sdfHess = {};
     Vec4r pointInCollider = colliderFromPoints.TransformPoint(ToSimd(points[i], 1_r));
-    if (collider->QueryPoint(pointInCollider, params, posColliding, sdf, sdfGrad)) {
+    if (collider->QueryPoint(
+            pointInCollider,
+            params,
+            posColliding,
+            sdf,
+            sdfGrad,
+            params.computeSdfHessian ? &sdfHess : nullptr)) {
       outIndices.push_back(i);
       outContacts.push_back(ToReal3(posColliding));
-      outSdf.push_back(sdf, ToReal3(sdfGrad));
+      if (params.computeSdfHessian) {
+        outSdf.push_back(sdf, ToReal3(sdfGrad), sdfHess);
+      } else {
+        outSdf.push_back(sdf, ToReal3(sdfGrad));
+      }
     }
   }
 }

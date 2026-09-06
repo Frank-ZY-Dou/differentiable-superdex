@@ -1560,12 +1560,18 @@ class MeshColliderBvh {
   }
 
   // Main collision detection query
+  // Signed distance (negative inside a closed mesh), its gradient and, when requested, its
+  // Hessian by the closest feature: zero on a face, s (I - t t^T - g g^T) / rho on an edge with
+  // unit direction t, s (I - g g^T) / rho at a node, with rho the unsigned distance, g the unit
+  // vector from the closest point to the queried point and s the sign; zero within kEps of the
+  // surface, where the gradient is the feature's pseudo-normal.
   bool QueryPoint(
       Vec4r position,
       ContactDetectionParams const& params,
       Vec4r& outPos,
       real& outSdf,
-      Vec4r& outSdfGrad) const;
+      Vec4r& outSdfGrad,
+      Matrix3x3r* outSdfHess = nullptr) const;
 
  protected:
   void RefitGeometry() {
