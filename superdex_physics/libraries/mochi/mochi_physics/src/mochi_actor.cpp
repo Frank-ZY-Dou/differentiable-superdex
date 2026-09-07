@@ -2711,7 +2711,7 @@ static void AccumulateContactForceWorldAdjoints(
     return;
   }
   MOCHI_ASSERT_VERBOSE(
-      numContacts == isize(collisionResult.forcePerUnitArea),
+      numContacts == isize(collisionResult.forceAdjoint),
       "Expected prepared force adjoints for every contact point.");
   MOCHI_ASSERT(
       collisionResult.jacColliderFromWorld.size() == 1 ||
@@ -2727,7 +2727,7 @@ static void AccumulateContactForceWorldAdjoints(
         DotMatVec3x3(collisionResult.jacColliderFromWorld[iJac], gradForce);
     // Multiply by the contact weight of the colliding actor's sample
     int const sample = collisionResult.sampleIndices[i];
-    collisionResult.forcePerUnitArea[i] +=
+    collisionResult.forceAdjoint[i] +=
         ToReal3(collidingSamples.weights[sample] * gradForceCollider);
   }
 }

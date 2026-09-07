@@ -205,7 +205,11 @@ def _step_adaptive(
     scene, dt: float, level: int, max_levels: int, residual_tolerance: float,
     step: int, on_substep, pre,
 ) -> list[float]:
-    scene.step(dt)
+    try:
+        scene.step(dt)
+    except BaseException:
+        scene.release_state(pre)
+        raise
     if forward_solve_failed(scene, residual_tolerance):
         stats = scene.get_solver_stats()
         if level >= max_levels:
@@ -359,6 +363,12 @@ class DifferentiableRollout:
         to ``max_substep_levels`` halvings, and :class:`ForwardSolveError` is
         raised if the finest level fails too. With the default 0 the forward
         rollout never inspects convergence.
+
+        ``truncation_window`` limits the reverse sweep to the last that many
+        steps (truncated backpropagation through time): the input gradients of
+        the earlier steps stay zero and the initial-state gradients are
+        withheld, while the reported loss still sums the running costs of every
+        step - the window changes the gradient, never the objective.
         """
         if num_steps <= 0:
             raise ValueError("num_steps must be positive")
@@ -387,7 +397,8 @@ class DifferentiableRollout:
 
     # -- pieces ------------------------------------------------------------
 
-    def _forward(self, apply_inputs) -> list[_StepRecord]:
+    def _forward(self, apply_inputs, on_step_end=None) -> list[_StepRecord]:
+        """The forward rollout; ``on_step_end(step)`` runs on each step's final state."""
         records: list[_StepRecord] = []
         try:
             for step in range(self.num_steps):
@@ -395,19 +406,26 @@ class DifferentiableRollout:
                     apply_inputs(step)
                 if self.max_substep_levels == 0:
                     pre = self.scene.capture_state()
-                    self.scene.step(self.dt)
-                    records.append(_StepRecord(step, self.dt, pre, self.scene.capture_state()))
-                    continue
-                step_with_substeps(
-                    self.scene,
-                    self.dt,
-                    self.max_substep_levels,
-                    self.substep_residual_tolerance,
-                    step=step,
-                    on_substep=lambda pre, post, sub_dt, step=step: records.append(
-                        _StepRecord(step, sub_dt, pre, post)
-                    ),
-                )
+                    try:
+                        self.scene.step(self.dt)
+                        post = self.scene.capture_state()
+                    except BaseException:
+                        self.scene.release_state(pre)
+                        raise
+                    records.append(_StepRecord(step, self.dt, pre, post))
+                else:
+                    step_with_substeps(
+                        self.scene,
+                        self.dt,
+                        self.max_substep_levels,
+                        self.substep_residual_tolerance,
+                        step=step,
+                        on_substep=lambda pre, post, sub_dt, step=step: records.append(
+                            _StepRecord(step, sub_dt, pre, post)
+                        ),
+                    )
+                if on_step_end is not None:
+                    on_step_end(step)
         except BaseException:
             self._release(records)
             raise
@@ -485,9 +503,27 @@ class DifferentiableRollout:
             raise ValueError("provide terminal_losses and/or step_losses")
         terminal_losses = list(terminal_losses or [])
 
-        records = self._forward(apply_inputs)
+        # The running costs are evaluated live, on each step's final state (the objective is
+        # the whole trajectory's whatever the truncation window); the sweep only accumulates
+        # their gradients.
+        running_total = [0.0]
 
-        loss_value = sum(loss.value() for loss in terminal_losses)
+        def on_step_end(step: int) -> None:
+            if step_losses is not None:
+                running_total[0] += sum(loss.value() for loss in step_losses(step))
+
+        records = self._forward(apply_inputs, on_step_end)
+        try:
+            return self._sweep(records, terminal_losses, step_losses, running_total[0])
+        finally:
+            # Every capture is released whatever raised: a loss, the adjoint, a reader.
+            self._release(records)
+
+    def _sweep(
+        self, records: list[_StepRecord], terminal_losses: list, step_losses, running_total: float
+    ) -> RolloutResult:
+        """The reverse adjoint sweep over ``records`` (owned by the caller)."""
+        loss_value = sum(loss.value() for loss in terminal_losses) + running_total
 
         grads = {
             entry.name: ActorGradients(
@@ -526,17 +562,18 @@ class DifferentiableRollout:
         diffsim.reset_back_propagation(self.scene)
         for k in range(len(records) - 1, -1, -1):
             record = records[k]
-            if record.step < first_step - 1:
-                break
             last_of_step = k == len(records) - 1 or records[k + 1].step != record.step
             first_of_step = k == 0 or records[k - 1].step != record.step
+            if record.step < first_step - 1:
+                # Before the truncation window: no adjoint (the running costs of these steps
+                # were summed during the forward rollout).
+                break
             diffsim.prepare_back_propagate(self.scene, record.post, record.pre)
             if k == len(records) - 1:
                 for loss in terminal_losses:
                     loss.accumulate_output_grad()
             if step_losses is not None and last_of_step:
                 for loss in step_losses(record.step):
-                    loss_value += loss.value()
                     loss.accumulate_output_grad()
             diffsim.back_propagate(self.scene)
             steps_swept += 1
@@ -568,8 +605,6 @@ class DifferentiableRollout:
             else:
                 split_steps.append((record.step, 1))
         split_steps = [entry for entry in split_steps if entry[1] > 1]
-
-        self._release(records)
 
         if self.grad_clip_norm is not None:
             for out in grads.values():

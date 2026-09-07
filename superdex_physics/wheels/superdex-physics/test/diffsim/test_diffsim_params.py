@@ -50,8 +50,11 @@ import numpy as np
 import superdex.physics as physics
 
 from . import scenes
+from superdex.physics.diffsim_rollout import DifferentiableRollout
+
 from .harness import (
     ArticulatedPoseErrorLoss,
+    ContactForceLoss,
     TranslationErrorLoss,
     configure_for_differentiability,
     diffsim,
@@ -701,3 +704,177 @@ class DensityGradientTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _stacked_contact_scene():
+    """Two cubes stacked off-center on the ground, the top one sliding, every differentiated
+    parameter active on both cubes: a dynamic contact pair with two owners besides the static
+    ground. Returns (scene, bottom, top)."""
+    scene = physics.create_scene("contact_params_stacked")
+    scene.set_gravity([0.0, 0.0, -9.81])
+    cp = physics.ContactParams(
+        penalty_coefficient=1e8,
+        coulomb_friction_coefficient=0.4,
+        viscous_friction_coefficient=0.1,
+        normal_viscous_damping_coefficient=5.0,
+    )
+    scene.create_rigid_actor(
+        name="ground",
+        shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+        is_static=True,
+        contact=cp,
+    )
+    bottom = scene.create_rigid_actor(
+        name="bottom",
+        shape=scenes.cube_shape(),
+        density=1000.0,
+        contact=cp,
+        world_from_local=physics.TransformRT([0.0, 0.0, 0.099]),
+    )
+    top = scene.create_rigid_actor(
+        name="top",
+        shape=scenes.cube_shape(),
+        density=1000.0,
+        contact=cp,
+        world_from_local=physics.TransformRT([0.03, 0.0, 0.298]),
+    )
+    top.set_velocity([0.3, 0.0, 0.0], [0.0, 0.0, 0.0])
+    return scene, bottom, top
+
+
+def fd_running_contact_grads(scene, loss, actor, state_init) -> np.ndarray:
+    """Central differences of the running loss (summed over the steps) over set_contact_params."""
+    fd = np.zeros(len(CONTACT_PARAM_FIELDS))
+    for f_i, field in enumerate(CONTACT_PARAM_FIELDS):
+        base = getattr(actor.get_contact_params(), field)
+        eps = FD_EPS * (1.0 + abs(base))
+        values = []
+        for sign in (+1.0, -1.0):
+            scene.restore_state(state_init, False)
+            perturbed = actor.get_contact_params()
+            setattr(perturbed, field, base + sign * eps)
+            actor.set_contact_params(perturbed)
+            total = 0.0
+            for _ in range(NUM_STEPS):
+                scene.step(DT)
+                total += loss.value()
+            values.append(total)
+            restored = actor.get_contact_params()
+            setattr(restored, field, base)
+            actor.set_contact_params(restored)
+        fd[f_i] = (values[0] - values[1]) / (2.0 * eps)
+    return fd
+
+
+class ContactForceLossParamsTest(unittest.TestCase):
+    """Contact-parameter gradients of contact-FORCE losses against central finite differences.
+
+    A contact-force query F = sum_s w_s J_s^T f_s(p_s; theta) depends on the contact parameters
+    directly, at fixed states, besides the state path the adjoint solve covers. Until 2026-09-07
+    the direct term was missing (finding 2 of the release review: the Coulomb gradient of a
+    sliding cube's terminal force loss was 222.8 against 1476.2 by finite differences, the
+    penalty gradient off by a factor 50; the positional-loss parameter tests and the state-only
+    force tests never combine a force loss with parameter gradients). The engine now takes it
+    from the queried forces the perturbed residual assemblies store, dotted with the per-contact
+    force adjoints, right after the adjoint solve. The comparisons are per field (the scales
+    differ by ten orders of magnitude); the tolerances hold ten times the measured worst case.
+
+    A running force loss needs the queried force of every restored step: the engine's queries
+    are outputs of a step, not state, and until 2026-09-07 a restored step still reported the
+    last forward step's force (the running loss at step 0 of six read the force of step 5,
+    and its gradient was 46% off). The back-propagation preparation now assembles the
+    prepared state once and refreshes the queries, so losses read the restored step's values.
+    """
+
+    def _compare(self, adjoint, fd, tol, label) -> None:
+        self.assertTrue(np.any(np.abs(fd) > 0.0), f"{label}: vacuous")
+        for f_i, field in enumerate(CONTACT_PARAM_FIELDS):
+            denom = max(abs(adjoint[f_i]), abs(fd[f_i]))
+            if denom <= 1e-13:
+                continue
+            rel = abs(adjoint[f_i] - fd[f_i]) / denom
+            self.assertLessEqual(
+                rel, tol, f"{label} {field}: adjoint={adjoint[f_i]:.6e}, fd={fd[f_i]:.6e}"
+            )
+
+    def test_static_ground_terminal_force_loss(self) -> None:
+        scene, cube, _ground = _rich_contact_scene()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        loss = ContactForceLoss(cube)
+        state_init = scene.capture_state()
+        grads = adjoint_contact_grads(scene, [loss], {"cube": cube})
+        fd = fd_contact_grads(scene, [loss], cube, state_init)
+        scene.release_all_states()
+        self._compare(grads["cube"], fd, 1e-3, "cube on the ground")
+
+    def test_dynamic_pair_both_owners(self) -> None:
+        """The force on the top cube or on the bottom one (which also touches the ground), against
+        the parameters of both owners of the cube-cube pair."""
+        for queried in ("top", "bottom"):
+            scene, bottom, top = _stacked_contact_scene()
+            self.addCleanup(physics.destroy_scene, scene)
+            configure_for_differentiability(scene)
+            actors = {"bottom": bottom, "top": top}
+            loss = ContactForceLoss(actors[queried])
+            state_init = scene.capture_state()
+            grads = adjoint_contact_grads(scene, [loss], actors)
+            for owner, actor in actors.items():
+                fd = fd_contact_grads(scene, [loss], actor, state_init)
+                # Measured worst 1.1e-3, on the smallest entry of the sixteen (the bottom
+                # cube's damping coefficient under its own force loss, 2.1e-2 next to entries of
+                # 1e2), whose difference quotients themselves spread 2% between eps 1e-7 and
+                # 1e-6; the fifteen others agree to 1e-4.
+                self._compare(grads[owner], fd, 5e-3, f"force on {queried}, {owner} parameters")
+            scene.release_all_states()
+
+    def test_static_ground_running_force_loss(self) -> None:
+        scene, cube, _ground = _rich_contact_scene()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        loss = ContactForceLoss(cube)
+        state_init = scene.capture_state()
+        DifferentiableRollout(scene, dt=DT, num_steps=NUM_STEPS).run(step_losses=lambda step: [loss])
+        adjoint = np.zeros(len(CONTACT_PARAM_FIELDS))
+        diffsim.set_contact_params_backward(cube, adjoint)
+        fd = fd_running_contact_grads(scene, loss, cube, state_init)
+        scene.release_all_states()
+        self._compare(adjoint, fd, 1e-3, "running force loss")
+
+    def test_small_positive_coefficients_stay_in_domain(self) -> None:
+        """A positive Coulomb coefficient below the finite-difference step (1e-8) of the engine's
+        parameter derivatives: the step used to be additive, so the lower sample was negative
+        and the pair's geometric mean took the square root of a negative product (finding 3 of
+        the release review: 8.995 against 6.361, 41% off, for mu = 1e-8). The step is now
+        multiplicative for positive values, so any positive value stays in the domain and the
+        difference quotient is second-order accurate; measured 1.25e-5 for mu = 1e-2 to 1e-8
+        against difference quotients at 1e-2 mu and 5e-3 mu (self-consistent to 1e-5)."""
+        for mu in (1e-2, 1e-4, 1e-6, 1e-8):
+            scene, cube = scenes.rigid_on_plane("coulomb")
+            self.addCleanup(physics.destroy_scene, scene)
+            configure_for_differentiability(scene)
+            params = cube.get_contact_params()
+            params.coulomb_friction_coefficient = mu
+            cube.set_contact_params(params)
+            state_init = scene.capture_state()
+            loss = TranslationErrorLoss(cube)
+            DifferentiableRollout(scene, dt=DT, num_steps=2).run(terminal_losses=[loss])
+            adjoint = np.zeros(len(CONTACT_PARAM_FIELDS))
+            diffsim.set_contact_params_backward(cube, adjoint)
+            self.assertTrue(np.all(np.isfinite(adjoint)))
+            fds = []
+            for h in (1e-2 * mu, 5e-3 * mu):
+                values = []
+                for sign in (+1.0, -1.0):
+                    scene.restore_state(state_init, False)
+                    perturbed = cube.get_contact_params()
+                    perturbed.coulomb_friction_coefficient = mu + sign * h
+                    cube.set_contact_params(perturbed)
+                    for _ in range(2):
+                        scene.step(DT)
+                    values.append(loss.value())
+                fds.append((values[0] - values[1]) / (2.0 * h))
+            scene.release_all_states()
+            self.assertGreater(abs(fds[0]), 1e-6, f"mu={mu}: vacuous")
+            self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), 1e-4, (mu, fds))
+            self.assertLessEqual(abs(adjoint[1] - fds[0]) / abs(fds[0]), 1e-4, (mu, adjoint[1], fds))

@@ -56,6 +56,30 @@ releases on that base; these distributions are built from this repository, not f
   resting on a soft cube agrees with the kinematic identity to 1e-5 in both configurations, a
   cube a rod is dropped on likewise, and a tactile policy on the box passes its
   finite-difference check. Contacts with point-cloud colliders are refused explicitly.
+- Release-review fixes (2026-09-07, six findings reproduced against the tree above): (1) a
+  contact arriving on a soft-body SDF collider in a differentiable scene aborted the process (the
+  stage-start fill of a contact missing at the stage start copied current SDF Hessians a forward
+  step never computes); the fill now stores a zero stage-start Hessian, the filled-in normal being
+  the current one, and a box dropped onto a soft cube is checked against finite differences
+  across the onset. (2) Contact-force losses now reach the contact parameters directly: the
+  query `F = sum_s w_s J_s^T f_s(p_s; theta)` depends on the parameters at fixed states, a term
+  the state adjoint does not carry (the Coulomb gradient of a sliding cube's force loss was 85%
+  too small); the engine differentiates the forces the perturbed residual assemblies store,
+  right after the adjoint solve, with the per-contact force adjoints now held apart from the
+  forces (`ContactDetectionResult::forceAdjoint`). Checked on the ground, on a two-owner
+  cube-cube pair and for a running force loss. (3) Contact-parameter derivatives perturb positive
+  coefficients multiplicatively, so a coefficient below the finite-difference step (1e-8) no
+  longer samples the negative side of the pair's geometric mean (41% off at mu = 1e-8; now
+  1e-5 down to 1e-8). (4) The rollout and policy drivers release every captured state when a
+  loss, the adjoint or a native step error raises. (5) `truncation_window` truncates the reverse
+  sweep only: the running costs are evaluated live during the forward rollout and the reported
+  loss sums every step's. (6) The torch bridges refuse the single-precision engine at
+  construction instead of returning float32-accurate gradients as float64 tensors. Found while
+  fixing (2): the engine's queries (contact forces, contact points) are outputs of a step, not
+  state, so after a state restore they still reported the last forward step - a running
+  contact-force loss read the final step's force at every step of the sweep (46% off in the
+  gradient). The back-propagation preparation now assembles the prepared state once and
+  refreshes the queries, which then match the live values bit for bit.
 - Deformable (soft-body SDF) colliders are differentiable: mapped SDF colliders provide SDF
   Hessians, the stage-start query stores the Jacobians of the collider's stage-start mapping
   (`jacWorldFromDofsStageStart`), and both the colliding-side and the collider-side contact

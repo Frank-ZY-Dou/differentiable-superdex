@@ -717,6 +717,85 @@ class DeformableColliderGradientTest(unittest.TestCase):
         self.assertTrue(result.fd_valid, result.flagged_steps)
         self.assertGreater(float(np.abs(result.gradients["jelly"].initial_velocity).max()), 0.0)
 
+    def _drop_loss_rollout(self, forces, num_steps):
+        """Loss of the box's final position when dropped onto the soft collider from 5 cm above
+        it at 1 m/s, under per-step external forces; fresh scene."""
+        scene, soft, rigid = scenes.rigid_on_soft_collider("coulomb")
+        try:
+            _configure(scene)
+            rigid.set_center_of_mass_transform(physics.TransformRT([0.03, 0.0, 0.35]))
+            rigid.set_velocity([0.0, 0.0, -1.0], [0.0, 0.0, 0.0])
+            loss = TranslationErrorLoss(rigid, ref=np.array([0.05, 0.0, 0.29]))
+            dofs = np.arange(6, dtype=np.int32)
+            for step in range(num_steps):
+                rigid.set_external_forces_on_dofs(dofs, np.ascontiguousarray(forces[step]))
+                scene.step(self.dt)
+            return loss.value()
+        finally:
+            physics.destroy_scene(scene)
+
+    def test_contact_onset_on_a_soft_collider(self) -> None:
+        """A box dropped onto the soft collider (5 cm above it at 1 m/s, landing during the
+        fifth step): the contact samples that map into the collider at the current state but
+        not at the stage start of the step get filled-in stage-start data from the current
+        state. Until 2026-09-07 that fill asserted on the current SDF Hessians, which a forward
+        step of a differentiable scene does not compute (finding 1 of the release review: the
+        process aborted at the fifth step; the resting-contact fixtures never arrive). The fill
+        now sets a zero stage-start Hessian for those contacts (the filled normal is the current
+        one and does not depend on the stage-start position). The forward runs, and the
+        gradients of the box's final position w.r.t. its per-step forces before, during and
+        after the onset agree with central FD at eps 1e-6 (self-consistent with eps 1e-7):
+        measured 1e-6 to 4e-5 relative on the entries above 1e-7, and within 8e-11 absolute
+        below (the difference quotients of this loss of order 1e-2 carry about 1e-10 of
+        rounding at eps 1e-6, which is what the near-zero entries the scene's symmetry leaves
+        compare against)."""
+        num_steps = 10
+        forces = np.zeros((num_steps, 6))
+        forces[:, 0] = np.linspace(1.0, 4.0, num_steps)
+        forces[:, 4] = 0.2
+        scene, soft, rigid = scenes.rigid_on_soft_collider("coulomb")
+        self.addCleanup(physics.destroy_scene, scene)
+        _configure(scene)
+        rigid.set_center_of_mass_transform(physics.TransformRT([0.03, 0.0, 0.35]))
+        rigid.set_velocity([0.0, 0.0, -1.0], [0.0, 0.0, 0.0])
+        checker = PenetrationChecker(scene)
+        loss = TranslationErrorLoss(rigid, ref=np.array([0.05, 0.0, 0.29]))
+        dofs = np.arange(6, dtype=np.int32)
+
+        def apply(step):
+            rigid.set_external_forces_on_dofs(dofs, np.ascontiguousarray(forces[step]))
+            if step > 0:
+                checker.record(step)
+
+        result = DifferentiableRollout(scene, dt=self.dt, num_steps=num_steps).run(
+            apply_inputs=apply, terminal_losses=[loss]
+        )
+        self.assertTrue(result.fd_valid, result.flagged_steps)
+        self.assertIn("jelly / rigid", checker.report(4), "the box must land on the soft cube")
+        self.assertAlmostEqual(self._drop_loss_rollout(forces, num_steps), result.loss, delta=1e-12)
+        grad = result.gradients["rigid"].external_forces
+        adjoint, fd = [], []
+        for step in (0, 4, 6, num_steps - 1):
+            for dof in range(6):
+                fds = []
+                for eps in (1e-6, 1e-7):
+                    pair = []
+                    for sign in (+1.0, -1.0):
+                        perturbed = forces.copy()
+                        perturbed[step, dof] += sign * eps
+                        pair.append(self._drop_loss_rollout(perturbed, num_steps))
+                    fds.append((pair[0] - pair[1]) / (2.0 * eps))
+                if abs(fds[0]) > 1e-6:
+                    # The same tolerance as the comparison below: with worker threads the
+                    # reductions of the two rollouts of a difference quotient are not ordered
+                    # alike, which is a few 1e-10 on these quotients.
+                    self.assertLessEqual(abs(fds[0] - fds[1]), 1e-4 * abs(fds[0]) + 1e-9, (step, dof, fds))
+                adjoint.append(grad[dof, step])
+                fd.append(fds[0])
+        adjoint, fd = np.array(adjoint), np.array(fd)
+        self.assertGreater(float(np.abs(fd).max()), 1e-6, "vacuous: the forces do not move the loss")
+        np.testing.assert_allclose(adjoint, fd, rtol=1e-4, atol=1e-9)
+
     def _stack_loss_rollout(self, friction, v_top, v_bottom, num_steps):
         scene, bottom, top = scenes.soft_on_soft(friction)
         try:

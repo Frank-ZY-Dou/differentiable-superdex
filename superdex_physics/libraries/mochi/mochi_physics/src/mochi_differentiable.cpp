@@ -28,6 +28,7 @@
 #include "mochi_solve.h"
 #include "mochi_step.h"
 
+#include <unordered_map>
 #include <mochi_physics/diffsim/mochi_diffsim_types.h>
 
 #include <mochi_core/solvers/linear_solver.h>
@@ -844,14 +845,21 @@ static void PrepareBackPropagationIslandAsync(
   solver::PreFirstStageLocalPipeline(reg, descendants);
   solver::PreStageLocalPipeline(reg, descendants, problem);
 
-  // Run collision detection if some actor has contact queries enabled (the contact containers
-  // then carry the forward forces, which back-propagation reuses for the force adjoints)
+  // If some actor has contact queries enabled, run collision detection over the full island
+  // (the queried actors may act as colliders) and one assembly at the prepared state: the
+  // assembly stores the forces of the queried pairs in the contact containers, from which
+  // PrepareBackPropagation refreshes the queries. The engine's queries are outputs of a step,
+  // not state: after a state restore they still report the last forward step, so a loss on a
+  // restored step (a running contact-force loss) would read the wrong force. The assembly's
+  // forces equal the forward step's (same state, same detection). The dresidual part
+  // initializes the fresh problem's per-actor storage, which a residual assembly needs.
   if (std::any_of(descendants.actors.begin(), descendants.actors.end(), [&](auto const& e) {
         return reg.any_of<TagQueryActiveContacts>(e);
       })) {
-    // We must visit the full island, to account for cases where the queried actors act as
-    // colliders.
-    solver::UpdateDerivedStateBeforeAssembly(reg, GradTarget::Current, descendants);
+    GetSolutions(problem.solution, reg, descendants.actors, /*baseOffset*/ 0);
+    AssemblyParams const params = {
+        .assemObj = false, .assemRes = true, .assemDRes = true, .psdDRes = true};
+    solver::AssembleIslandPipeline(reg, island, params, problem);
   }
 }
 
@@ -871,8 +879,30 @@ void mochi::PrepareBackPropagation(entt::registry& reg) {
   eachTask.Wait();
   reg.unset<TagAdjointContactDetection>();
 
+  // The queries (contact forces, contact points, ...) of the prepared state, from the forces
+  // the islands' assemblies stored (see PrepareBackPropagationIslandAsync).
+  UpdateAllActorQueries(reg);
+
   ecs::InvokeForEachGlobal(&PrepareContactForceAdjoints, reg);
+
+  // The contact-parameter gradient components of the islands' contact owners, created here,
+  // sequentially: the island solves (running in parallel) accumulate the direct term of the
+  // contact-force adjoints into them, and the parameter stage the state path.
+  reg.view<CIslandDescendants const>().each([&](CIslandDescendants const& descendants) {
+    for (auto const e : descendants.actors) {
+      if (reg.try_get<CContactParams const>(e) != nullptr &&
+          reg.try_get<CDiffContactParamsGrad>(e) == nullptr) {
+        reg.emplace<CDiffContactParamsGrad>(e);
+      }
+    }
+  });
 }
+
+static void AccumulateContactForceParameterGradientsIsland(
+    entt::registry& reg,
+    entt::entity island,
+    CIslandDescendants const& descendants,
+    SnleProblem<real>& problemForward);
 
 static void BackPropagationSolveIslandAsync(
     entt::registry& reg,
@@ -955,6 +985,9 @@ static void BackPropagationSolveIslandAsync(
         AsConstView(previousGrad),
         stepCounter);
   }
+
+  // 5. The direct term of the contact-force adjoints in the contact parameters.
+  AccumulateContactForceParameterGradientsIsland(reg, island, descendants, problemForward);
 }
 
 bool mochi::IsSoftMaterialGradientSupported(CSoftMaterialParams const& material) {
@@ -1021,6 +1054,253 @@ static void StackForceAdjoint(
 // which parallel island tasks must not race on. Parameters covered: the scene gravity
 // vector and, per contact-parameter owner (actors and nested links), the contact
 // parameters listed in kNumContactParamGradients order.
+// Visits every contact-detection result of the island that carries contact-force adjoints
+// (the collisions of the queried actors, and the collisions of other actors against a queried
+// collider), each once, with the pair's identity (colliding actor, collider).
+template <typename Fn>
+static void ForEachQueriedCollisionResult(
+    entt::registry& reg,
+    CIslandDescendants const& descendants,
+    Fn&& fn) {
+  for (auto const e : descendants.actors) {
+    if (!reg.all_of<TagQueryActiveContacts>(e)) {
+      continue;
+    }
+    if (auto* collisions =
+            reg.try_get<CActiveCollisions<ContactType::Async, TimeStep::Current>>(e)) {
+      for (auto& collision : *collisions) {
+        fn(e, collision.colliderEntity, collision.collisionResult);
+      }
+    }
+    if (auto* collisions =
+            reg.try_get<CActiveCollisions<ContactType::Sync, TimeStep::Current>>(e)) {
+      for (auto& collision : *collisions) {
+        fn(e, collision.colliderEntity, collision.collisionResult);
+      }
+    }
+    if (auto* colliderJacs = reg.try_get<CCollJacs<CollRole::Collider>>(e)) {
+      for (auto& jac : *colliderJacs) {
+        // The results of a queried colliding actor are visited through its own collisions.
+        if (!reg.all_of<TagQueryActiveContacts>(jac.otherEntity)) {
+          fn(jac.otherEntity, e, *jac.query);
+        }
+      }
+    }
+  }
+}
+
+// The per-contact force adjoints of one contact pair, copied out of the contact containers:
+// every assembly at a changed solution reruns collision detection, which rebuilds the
+// containers (the adjoint solve's finite-difference products do), so the direct parameter
+// term below matches the adjoints to the rebuilt contacts by sample index.
+struct ContactForceAdjointStashEntry {
+  entt::entity colliding = entt::null;
+  entt::entity collider = entt::null;
+  std::vector<int> sampleIndices;
+  std::vector<Real3> adjoints;
+};
+
+// Registry context: the stash of every island with contact-force adjoints, built by
+// BackPropagationSolve before the island solves and read by them.
+struct CtxContactForceAdjointStash {
+  std::unordered_map<entt::entity, std::vector<ContactForceAdjointStashEntry>> byIsland;
+};
+
+static void StashContactForceAdjoints(entt::registry& reg) {
+  auto& stash = reg.ctx_or_set<CtxContactForceAdjointStash>();
+  stash.byIsland.clear();
+  reg.view<CIslandDescendants const>().each(
+      [&](entt::entity island, CIslandDescendants const& descendants) {
+        std::vector<ContactForceAdjointStashEntry> entries;
+        ForEachQueriedCollisionResult(
+            reg,
+            descendants,
+            [&](entt::entity colliding, entt::entity collider, ContactDetectionResult const& result) {
+              bool any = false;
+              for (auto const& adjoint : result.forceAdjoint) {
+                any = any || adjoint[0] != 0_r || adjoint[1] != 0_r || adjoint[2] != 0_r;
+              }
+              if (!any) {
+                return;
+              }
+              MOCHI_ASSERT(
+                  isize(result.forceAdjoint) == isize(result.sampleIndices),
+                  "Unexpected number of contact-force adjoints.");
+              ContactForceAdjointStashEntry entry;
+              entry.colliding = colliding;
+              entry.collider = collider;
+              entry.sampleIndices.assign(
+                  result.sampleIndices.begin(), result.sampleIndices.end());
+              entry.adjoints.assign(result.forceAdjoint.begin(), result.forceAdjoint.end());
+              entries.push_back(std::move(entry));
+            });
+        if (!entries.empty()) {
+          stash.byIsland[island] = std::move(entries);
+        }
+      });
+}
+
+// The contact-detection result of the pair (colliding, collider) in the current containers.
+static ContactDetectionResult const* FindCollisionResult(
+    entt::registry& reg,
+    entt::entity colliding,
+    entt::entity collider) {
+  if (auto* collisions =
+          reg.try_get<CActiveCollisions<ContactType::Async, TimeStep::Current>>(colliding)) {
+    for (auto& collision : *collisions) {
+      if (collision.colliderEntity == collider) {
+        return &collision.collisionResult;
+      }
+    }
+  }
+  if (auto* collisions =
+          reg.try_get<CActiveCollisions<ContactType::Sync, TimeStep::Current>>(colliding)) {
+    for (auto& collision : *collisions) {
+      if (collision.colliderEntity == collider) {
+        return &collision.collisionResult;
+      }
+    }
+  }
+  return nullptr;
+}
+
+// Sum_s lambda_s . f_s over the stashed contacts of the island: the contact-force adjoints
+// against the forces the last residual assembly stored (forcePerUnitArea), matched by sample
+// index (a sample at the margin of the detection tolerance may enter or leave with a perturbed
+// penalty coefficient; its force is zero there).
+static real DotContactForceAdjoints(
+    entt::registry& reg,
+    std::vector<ContactForceAdjointStashEntry> const& entries) {
+  real sum = 0_r;
+  std::unordered_map<int, int> positions;
+  for (auto const& entry : entries) {
+    ContactDetectionResult const* result = FindCollisionResult(reg, entry.colliding, entry.collider);
+    MOCHI_ASSERT(result != nullptr, "A queried contact pair disappeared from the containers.");
+    MOCHI_ASSERT(
+        isize(result->forcePerUnitArea) == isize(result->sampleIndices),
+        "The residual assembly did not store the forces of a queried contact pair.");
+    positions.clear();
+    for (int j = 0; j < isize(result->sampleIndices); ++j) {
+      positions[result->sampleIndices[j]] = j;
+    }
+    for (int i = 0; i < isize(entry.sampleIndices); ++i) {
+      auto const found = positions.find(entry.sampleIndices[i]);
+      if (found == positions.end()) {
+        continue;
+      }
+      sum += Get0(VDot<3>(
+          ToSimd(entry.adjoints[i]), ToSimd(result->forcePerUnitArea[found->second])));
+    }
+  }
+  return sum;
+}
+
+// The finite-difference step of a contact parameter. A contact pair combines both owners'
+// values by geometric mean (CombineContactParams); the dissipative coefficients (Coulomb,
+// viscous, normal damping) must be non-negative and the penalty coefficient is strictly
+// positive. A positive coefficient c is perturbed multiplicatively, c e^{+-eps}, which never
+// leaves the admissible domain however small c is, and the central difference quotient in
+// log c is divided by c: the pair's coefficient Sqrt(c c') is smooth in log c, so the estimate
+// is second-order accurate at any positive value (an additive step of the order of c evaluated
+// the negative side of a small c - 41% off at c = 1e-8 - and for c of order one the two steps
+// coincide). At a zero-valued owner coefficient the loss is a square-root cusp in that
+// coefficient when the partner's is positive (derivative +inf) and flat when it is zero; the
+// right-sided difference quotient at the finite-difference step is used there instead: it is
+// exactly zero for a zero partner and grows like 1 / Sqrt(step) otherwise - a finite, correctly
+// signed push for optimizers constrained to non-negative coefficients (test_diffsim_params.py
+// pins both behaviors).
+struct ContactParamPerturbation {
+  real saved;
+  real plus;
+  real minus;
+  real scale; // the difference quotient's factor: d/dc = scale * (f(plus) - f(minus))
+  ContactParamPerturbation(real value, real epsFiniteDiff) : saved(value) {
+    if (value > 0_r) {
+      plus = value * std::exp(epsFiniteDiff);
+      minus = value * std::exp(-epsFiniteDiff);
+      scale = 1_r / (2_r * epsFiniteDiff * value);
+    } else {
+      real const eps = epsFiniteDiff * (1_r - value);
+      plus = value + eps;
+      minus = value;
+      scale = 1_r / eps;
+    }
+  }
+};
+
+static void ContactParamFields(
+    CContactParams& contactParams,
+    real* (&outFields)[kNumContactParamGradients]) {
+  outFields[0] = &contactParams.penaltyCoefficient;
+  outFields[1] = &contactParams.coulombFrictionCoefficient;
+  outFields[2] = &contactParams.viscousFrictionCoefficient;
+  outFields[3] = &contactParams.normalViscousDampingCoefficient;
+}
+
+// The contact-force adjoints reach the contact parameters directly, at fixed states: a query
+// F = Sum_s w_s J_s^T f_s(p_s; theta) on an actor of the island depends on the pair parameters
+// besides the state path the adjoint solve covers. Every residual assembly stores the forces of
+// the queried pairs (forcePerUnitArea), so central differences of the assembly in each owner's
+// parameters give Sum_s lambda_s . df_s/dtheta, with lambda_s the per-contact force adjoints
+// (forceAdjoint, stashed by BackPropagationSolve before the solves rebuild the containers).
+// Evaluated right after the island's solve, at the exact step states. (Until 2026-09-07 this
+// term was missing: the Coulomb gradient of a sliding cube's contact-force loss was 85% too
+// small.)
+static void AccumulateContactForceParameterGradientsIsland(
+    entt::registry& reg,
+    entt::entity island,
+    CIslandDescendants const& descendants,
+    SnleProblem<real>& problemForward) {
+  MOCHI_PROFILE_SCOPE();
+  auto const* stash = reg.try_ctx<CtxContactForceAdjointStash const>();
+  if (stash == nullptr) {
+    return;
+  }
+  auto const found = stash->byIsland.find(island);
+  if (found == stash->byIsland.end()) {
+    return;
+  }
+  std::vector<ContactForceAdjointStashEntry> const& entries = found->second;
+  auto const& solverParams = reg.ctx<CBackPropagationSolverParams const>();
+  AssemblyParams params = {.assemObj = false, .assemRes = true, .assemDRes = false};
+  problemForward.SetAssemblyFunction(
+      [&](SnleProblem<real>& problem, AssemblyParams const& /* params */) {
+        solver::AssembleIslandPipeline(reg, island, params, problem);
+      });
+  MOCHI_FILO_STACK_ALLOCATOR(allocator, 256 * sizeof(real));
+  ColumnVector<real> delta(problemForward.GetDofsSize(), &allocator);
+  delta.SetZero();
+  // The zero increment re-anchors the actors at the exact solution (the products of the solve
+  // left them at their last perturbed evaluation point); the parameter perturbations below
+  // never move the state.
+  auto evalForces = [&]() {
+    solver::PostNewIncrementLocalPipeline(reg, island, delta, problemForward.solution);
+    problemForward.InvalidateCachedData();
+    problemForward.UpdateResidual();
+    return DotContactForceAdjoints(reg, entries);
+  };
+  for (auto const e : descendants.actors) {
+    auto* contactParams = reg.try_get<CContactParams>(e);
+    if (contactParams == nullptr) {
+      continue;
+    }
+    auto& outContactGrad = reg.get<CDiffContactParamsGrad>(e); // created by PrepareBackPropagation
+    real* fields[kNumContactParamGradients];
+    ContactParamFields(*contactParams, fields);
+    for (int f = 0; f < kNumContactParamGradients; ++f) {
+      ContactParamPerturbation const step(*fields[f], solverParams.epsFiniteDiff);
+      *fields[f] = step.plus;
+      real const forcesPlus = evalForces();
+      *fields[f] = step.minus;
+      real const forcesMinus = evalForces();
+      *fields[f] = step.saved;
+      outContactGrad.value[f] += step.scale * (forcesPlus - forcesMinus);
+    }
+  }
+  // Leave the actors at the exact solution and the containers with the unperturbed forces.
+  evalForces();
+}
+
 static void AccumulateParameterGradientsIsland(
     entt::registry& reg,
     entt::entity island,
@@ -1118,40 +1398,27 @@ static void AccumulateParameterGradientsIsland(
   }
   gravity.accel = savedAccel;
 
-  // Contact parameters, per owner (standalone actors and nested links alike). The
-  // dissipative coefficients (Coulomb, viscous, normal damping) must be non-negative, and a
-  // contact pair combines both owners' values by geometric mean (CombineContactParams). At a
-  // zero-valued owner coefficient the loss is therefore a square-root cusp in that
-  // coefficient when the partner's is positive (derivative +inf) and flat when it is zero;
-  // a central difference would evaluate the negative side (Sqrt of a negative product). The
-  // right-sided difference quotient at the finite-difference step is used there instead: it
-  // is exactly zero for a zero partner and grows like 1 / Sqrt(step) otherwise - a finite,
-  // correctly signed push for optimizers constrained to non-negative coefficients (see
-  // test_diffsim_params.py, which pins both behaviors). The penalty coefficient is always
-  // strictly positive.
+  // Contact parameters, per owner (standalone actors and nested links alike): the state path
+  // -lambda^T dR/dtheta, with the perturbation rule of ContactParamPerturbation. The direct
+  // dependence of contact-force queries on the parameters is accumulated by
+  // AccumulateContactForceParameterGradientsIsland, right after the adjoint solve.
   for (auto const e : descendants.actors) {
     auto* contactParams = reg.try_get<CContactParams>(e);
     if (contactParams == nullptr) {
       continue;
     }
     auto& outContactGrad = reg.get<CDiffContactParamsGrad>(e); // created above
-    real* const fields[kNumContactParamGradients] = {
-        &contactParams->penaltyCoefficient,
-        &contactParams->coulombFrictionCoefficient,
-        &contactParams->viscousFrictionCoefficient,
-        &contactParams->normalViscousDampingCoefficient,
-    };
+    real* fields[kNumContactParamGradients];
+    ContactParamFields(*contactParams, fields);
     for (int f = 0; f < kNumContactParamGradients; ++f) {
-      real const saved = *fields[f];
-      real const eps = solverParams.epsFiniteDiff * (1_r + std::abs(saved));
-      bool const rightSided = saved <= 0_r;
-      *fields[f] = saved + eps;
+      ContactParamPerturbation const step(*fields[f], solverParams.epsFiniteDiff);
+      *fields[f] = step.plus;
       evalResidual(AsView(residualPlus));
-      *fields[f] = rightSided ? saved : saved - eps;
+      *fields[f] = step.minus;
       evalResidual(AsView(residualMinus));
-      *fields[f] = saved;
+      *fields[f] = step.saved;
       residualPlus -= residualMinus;
-      outContactGrad.value[f] += -lambda.Dot(residualPlus) / (rightSided ? eps : 2_r * eps);
+      outContactGrad.value[f] += -step.scale * lambda.Dot(residualPlus);
     }
   }
 
@@ -1272,6 +1539,9 @@ void mochi::BackPropagationSolve(entt::registry& reg) {
   // Emplace CIslandBackPropSolverStats for all islands.
   reg.view<TagIsland>().each(
       [&](entt::entity island) { reg.emplace_or_replace<CIslandBackPropSolverStats>(island); });
+
+  // The contact-force adjoints leave the contact containers with the first assembly below.
+  StashContactForceAdjoints(reg);
 
   TaskSemaphore eachTask;
   reg.view<CIslandDescendants const>().each(
@@ -1628,7 +1898,7 @@ void mochi::PrepareContactForceAdjoints(
       !farSdfEval, "Far SDF evaluation is not compatible with contact-force queries.");
 
   auto prepareAdjoints = [](ContactDetectionResult& collisionResult) {
-    auto& adjoints = collisionResult.forcePerUnitArea;
+    auto& adjoints = collisionResult.forceAdjoint;
     adjoints.resize_noinit(collisionResult.sampleIndices.size());
     std::fill(adjoints.begin(), adjoints.end(), Real3{});
   };

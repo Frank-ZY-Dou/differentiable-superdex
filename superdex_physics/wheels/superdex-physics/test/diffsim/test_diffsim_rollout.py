@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest import mock
 
 import numpy as np
 import superdex.physics as physics
@@ -794,3 +795,142 @@ class VariableStepSizeTest(unittest.TestCase):
         scene.release_all_states()
         rel = np.linalg.norm(analytic - fd) / np.linalg.norm(fd)
         self.assertLessEqual(rel, self.TOL, f"initial-velocity gradient mismatch: {analytic} vs {fd}")
+
+
+def _live_handles(scene, handles) -> list:
+    """The handles among ``handles`` the scene still holds (a released one raises on restore)."""
+    live = []
+    for handle in handles:
+        try:
+            scene.restore_state(handle, False)
+        except RuntimeError:
+            continue
+        live.append(handle)
+    return live
+
+
+class _RaisingLoss:
+    def __init__(self, where: str):
+        self.where = where
+
+    def value(self) -> float:
+        if self.where == "value":
+            raise RuntimeError("intentional loss error")
+        return 0.0
+
+    def accumulate_output_grad(self) -> None:
+        if self.where == "grad":
+            raise RuntimeError("intentional gradient error")
+
+
+class SnapshotLifetimeTest(unittest.TestCase):
+    """Every state the driver captures is released when the run fails, whatever raised.
+
+    Until 2026-09-07 the captures were released on the success path only (finding 4 of the
+    release review): a loss raising in ``value()`` or ``accumulate_output_grad()``, or the
+    adjoint itself, left every step's pre and post state alive - eight handles for four steps -
+    and a native error inside ``scene.step`` leaked the step's pre-step capture. Released
+    handles raise on restore, which is how these tests count the survivors; the captures are
+    collected through the scene's ``capture_state``.
+    """
+
+    def _run_failing(self, expected_captures: int, **run_kwargs):
+        scene, cube = scenes.rigid_on_plane("none")
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        captured = []
+        real_capture = type(scene).capture_state
+
+        def capture(self_scene):
+            handle = real_capture(self_scene)
+            captured.append(handle)
+            return handle
+
+        with mock.patch.object(type(scene), "capture_state", capture):
+            with self.assertRaises(RuntimeError):
+                DifferentiableRollout(scene, dt=DT, num_steps=4).run(**run_kwargs)
+        self.assertEqual(len(captured), expected_captures)
+        self.assertEqual(_live_handles(scene, captured), [])
+
+    def test_failing_terminal_loss_value(self) -> None:
+        self._run_failing(8, terminal_losses=[_RaisingLoss("value")])
+
+    def test_failing_output_gradient(self) -> None:
+        self._run_failing(8, terminal_losses=[_RaisingLoss("grad")])
+
+    def test_failing_step_loss_value(self) -> None:
+        # Running costs are evaluated live: the second step's loss raises inside the forward
+        # rollout, after the captures of two steps.
+        self._run_failing(4, step_losses=lambda step: [_RaisingLoss("value" if step == 1 else "none")])
+
+    def test_failing_step_loss_gradient(self) -> None:
+        self._run_failing(8, step_losses=lambda step: [_RaisingLoss("grad" if step == 1 else "none")])
+
+    def test_native_step_error_releases_the_pre_step_capture(self) -> None:
+        scene, cube = scenes.rigid_on_plane("none")
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        captured = []
+        real_capture = type(scene).capture_state
+
+        def capture(self_scene):
+            handle = real_capture(self_scene)
+            captured.append(handle)
+            return handle
+
+        real_step = type(scene).step
+        calls = []
+
+        def step(self_scene, dt):
+            calls.append(dt)
+            if len(calls) == 3:
+                raise RuntimeError("intentional native step error")
+            return real_step(self_scene, dt)
+
+        loss = TranslationErrorLoss(cube)
+        with mock.patch.object(type(scene), "capture_state", capture), mock.patch.object(
+            type(scene), "step", step
+        ):
+            with self.assertRaises(RuntimeError):
+                DifferentiableRollout(scene, dt=DT, num_steps=4).run(terminal_losses=[loss])
+        self.assertEqual(len(captured), 5)  # two full steps and the failing step's pre-state
+        self.assertEqual(_live_handles(scene, captured), [])
+
+
+class TruncationObjectiveTest(unittest.TestCase):
+    """``truncation_window`` truncates the reverse sweep, not the objective: until 2026-09-07 the
+    running costs were summed while sweeping, so a window of 2 over 6 steps of a constant cost
+    1 reported 2 instead of 6 (finding 5 of the release review), and a gradient option changed
+    the value being optimized."""
+
+    class _ConstantLoss:
+        def value(self) -> float:
+            return 1.0
+
+        def accumulate_output_grad(self) -> None:
+            pass
+
+    def test_constant_running_cost(self) -> None:
+        for window, swept in ((None, NUM_STEPS), (2, 2)):
+            scene, cube = scenes.rigid_on_plane("none")
+            self.addCleanup(physics.destroy_scene, scene)
+            configure_for_differentiability(scene)
+            result = DifferentiableRollout(
+                scene, dt=DT, num_steps=NUM_STEPS, truncation_window=window
+            ).run(step_losses=lambda step: [self._ConstantLoss()])
+            self.assertEqual(result.steps_swept, swept)
+            self.assertEqual(result.loss, float(NUM_STEPS))
+
+    def test_running_loss_value_is_window_independent(self) -> None:
+        losses = []
+        for window in (None, 2):
+            scene, cube = scenes.rigid_free()
+            self.addCleanup(physics.destroy_scene, scene)
+            configure_for_differentiability(scene)
+            loss = TranslationErrorLoss(cube)
+            result = DifferentiableRollout(
+                scene, dt=DT, num_steps=NUM_STEPS, truncation_window=window
+            ).run(step_losses=lambda step: [loss])
+            losses.append(result.loss)
+        self.assertGreater(losses[0], 0.0)
+        self.assertAlmostEqual(losses[0], losses[1], delta=1e-12 * losses[0])

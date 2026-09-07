@@ -69,8 +69,10 @@ Design and contract:
   "loss only".
 - Tensors must be CPU ``float64`` with the exact documented shape - anything
   else raises. The engine simulates in double precision
-  (``SUPERDEX_PRECISION=double``); mixed precision would silently degrade the
-  gradients, so it is rejected rather than converted.
+  (``SUPERDEX_PRECISION=double``, the ``superdex-physics-fp64`` package); the
+  bridges refuse the single-precision engine at construction, and mixed
+  precision would silently degrade the gradients, so it is rejected rather
+  than converted.
 - A group declared at construction requires its tensor at every call, and a
   tensor for an undeclared group is rejected: there are no implicit defaults.
 - Losses follow the ``diffsim_rollout`` protocol (``value()`` and
@@ -198,6 +200,18 @@ def _soft_material_set(params, field: str, value: float) -> None:
         setattr(params, field, value)
 
 
+def _require_double_precision() -> None:
+    """The bridge's tensors are float64 because the engine simulates in double precision;
+    the single-precision build would return float32-accurate gradients as float64 tensors."""
+    if not physics.uses_double_precision():
+        raise RuntimeError(
+            "diffsim_torch requires the double-precision engine: install superdex-physics-fp64 "
+            "and set SUPERDEX_PRECISION=double before importing superdex.physics (the "
+            "single-precision build's gradients carry float32 accuracy and cannot be presented "
+            "as float64 tensors)."
+        )
+
+
 def _as_numpy(name: str, value: torch.Tensor, shape: tuple[int, ...]) -> np.ndarray:
     if not isinstance(value, torch.Tensor):
         raise TypeError(f"{name} must be a torch.Tensor, got {type(value).__name__}")
@@ -270,6 +284,7 @@ class TorchRollout:
         max_substep_levels: int = 0,
         substep_residual_tolerance: float | None = None,
     ):
+        _require_double_precision()
         if not terminal_losses and step_losses is None:
             raise ValueError("provide terminal_losses and/or step_losses")
         self.scene = scene
@@ -798,6 +813,7 @@ class PolicyRollout:
         max_substep_levels: int = 0,
         substep_residual_tolerance: float | None = None,
     ):
+        _require_double_precision()
         if not terminal_losses and step_losses is None:
             raise ValueError("provide terminal_losses and/or step_losses")
         if history < 1:
@@ -958,8 +974,13 @@ class PolicyRollout:
                 self._apply_controls(u_t.detach().numpy())
                 if driver.max_substep_levels == 0:
                     pre = scene.capture_state()
-                    scene.step(self.dt)
-                    records.append(_StepRecord(step, self.dt, pre, scene.capture_state()))
+                    try:
+                        scene.step(self.dt)
+                        post = scene.capture_state()
+                    except BaseException:
+                        scene.release_state(pre)
+                        raise
+                    records.append(_StepRecord(step, self.dt, pre, post))
                 else:
                     step_with_substeps(
                         scene,
@@ -975,73 +996,76 @@ class PolicyRollout:
         except BaseException:
             driver._release(records)
             raise
-        loss_value = sum(loss.value() for loss in self._terminal_losses)
+        try:
+            loss_value = sum(loss.value() for loss in self._terminal_losses)
 
-        # Reverse sweep. pending[k] is the gradient to inject at the state after step k
-        # (the observation the policy used for later steps); the initial state (k = -1) is
-        # a constant.
-        pending: dict[int, np.ndarray] = {}
-        param_grads = [np.zeros(p.shape) for p in params]
-        fd_valid = True
-        max_residual = 0.0
-        steps_swept = 0
-        lambda_u = np.zeros(self.control_size)  # the current step's control gradient
-        diffsim.reset_back_propagation(scene)
-        for i in range(len(records) - 1, -1, -1):
-            record = records[i]
-            last_of_step = i == len(records) - 1 or records[i + 1].step != record.step
-            first_of_step = i == 0 or records[i - 1].step != record.step
-            diffsim.prepare_back_propagate(scene, record.post, record.pre)
-            if i == len(records) - 1:
-                for loss in self._terminal_losses:
-                    loss.accumulate_output_grad()
-            if last_of_step:
-                if self._step_losses is not None:
-                    for loss in self._step_losses(record.step):
-                        loss_value += loss.value()
+            # Reverse sweep. pending[k] is the gradient to inject at the state after step k
+            # (the observation the policy used for later steps); the initial state (k = -1) is
+            # a constant.
+            pending: dict[int, np.ndarray] = {}
+            param_grads = [np.zeros(p.shape) for p in params]
+            fd_valid = True
+            max_residual = 0.0
+            steps_swept = 0
+            lambda_u = np.zeros(self.control_size)  # the current step's control gradient
+            diffsim.reset_back_propagation(scene)
+            for i in range(len(records) - 1, -1, -1):
+                record = records[i]
+                last_of_step = i == len(records) - 1 or records[i + 1].step != record.step
+                first_of_step = i == 0 or records[i - 1].step != record.step
+                diffsim.prepare_back_propagate(scene, record.post, record.pre)
+                if i == len(records) - 1:
+                    for loss in self._terminal_losses:
                         loss.accumulate_output_grad()
-                if record.step in pending:
-                    self._inject_observation_grad(pending.pop(record.step))
-            diffsim.back_propagate(scene)
-            steps_swept += 1
-            stats = diffsim.get_back_propagation_scene_stats(scene)
-            fd_valid = fd_valid and stats.finite_diff_valid
-            max_residual = max(max_residual, stats.residual_norm)
-            if last_of_step:
-                lambda_u = np.zeros(self.control_size)
-            self._accumulate_force_grad(lambda_u)
-            if first_of_step:
-                self._read_target_grad(lambda_u)
-                obs_t, u_t = graphs[record.step]
-                grads = torch.autograd.grad(
-                    u_t,
-                    [obs_t, *params],
-                    grad_outputs=torch.tensor(lambda_u, dtype=torch.float64),
-                    allow_unused=True,
-                )
-                for accum, g in zip(param_grads, grads[1:]):
-                    if g is not None:
-                        accum += g.detach().numpy()
-                if grads[0] is not None:
-                    obs_grad = grads[0].detach().numpy()
-                    for h in range(self.history):
-                        source = record.step - 1 - h  # the state after step `source`
-                        if source < 0:
-                            continue
-                        block = obs_grad[h * self.observation_size : (h + 1) * self.observation_size]
-                        pending[source] = pending.get(source, 0.0) + block
-        split_steps = []
-        for record in records:
-            if split_steps and split_steps[-1][0] == record.step:
-                split_steps[-1] = (record.step, split_steps[-1][1] + 1)
-            else:
-                split_steps.append((record.step, 1))
-        driver._release(records)
-        self.last_result = PolicyRolloutResult(
-            loss=loss_value,
-            fd_valid=fd_valid,
-            max_adjoint_residual=max_residual,
-            steps_swept=steps_swept,
-            split_steps=[entry for entry in split_steps if entry[1] > 1],
-        )
-        return loss_value, [torch.tensor(g, dtype=torch.float64) for g in param_grads]
+                if last_of_step:
+                    if self._step_losses is not None:
+                        for loss in self._step_losses(record.step):
+                            loss_value += loss.value()
+                            loss.accumulate_output_grad()
+                    if record.step in pending:
+                        self._inject_observation_grad(pending.pop(record.step))
+                diffsim.back_propagate(scene)
+                steps_swept += 1
+                stats = diffsim.get_back_propagation_scene_stats(scene)
+                fd_valid = fd_valid and stats.finite_diff_valid
+                max_residual = max(max_residual, stats.residual_norm)
+                if last_of_step:
+                    lambda_u = np.zeros(self.control_size)
+                self._accumulate_force_grad(lambda_u)
+                if first_of_step:
+                    self._read_target_grad(lambda_u)
+                    obs_t, u_t = graphs[record.step]
+                    grads = torch.autograd.grad(
+                        u_t,
+                        [obs_t, *params],
+                        grad_outputs=torch.tensor(lambda_u, dtype=torch.float64),
+                        allow_unused=True,
+                    )
+                    for accum, g in zip(param_grads, grads[1:]):
+                        if g is not None:
+                            accum += g.detach().numpy()
+                    if grads[0] is not None:
+                        obs_grad = grads[0].detach().numpy()
+                        for h in range(self.history):
+                            source = record.step - 1 - h  # the state after step `source`
+                            if source < 0:
+                                continue
+                            block = obs_grad[h * self.observation_size : (h + 1) * self.observation_size]
+                            pending[source] = pending.get(source, 0.0) + block
+            split_steps = []
+            for record in records:
+                if split_steps and split_steps[-1][0] == record.step:
+                    split_steps[-1] = (record.step, split_steps[-1][1] + 1)
+                else:
+                    split_steps.append((record.step, 1))
+            self.last_result = PolicyRolloutResult(
+                loss=loss_value,
+                fd_valid=fd_valid,
+                max_adjoint_residual=max_residual,
+                steps_swept=steps_swept,
+                split_steps=[entry for entry in split_steps if entry[1] > 1],
+            )
+            return loss_value, [torch.tensor(g, dtype=torch.float64) for g in param_grads]
+        finally:
+            # Every capture is released whatever raised: a loss, the policy, the adjoint.
+            driver._release(records)

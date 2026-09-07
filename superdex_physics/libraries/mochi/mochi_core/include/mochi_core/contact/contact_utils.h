@@ -335,6 +335,16 @@ struct ContactDetectionResult {
   DynamicArray<Real3> forcePerUnitArea = {};
 
   /**
+   * @brief Optional: Adjoint of the loss with respect to forcePerUnitArea for each contact point
+   * (in the collider space of the contact, weighted by the colliding sample's contact weight), as
+   * accumulated by the contact-force query backward of a differentiable scene.
+   * @note Empty or 1-to-1 with sampleIndices; sized and zeroed when a back-propagation is
+   * prepared. Kept apart from forcePerUnitArea, which every residual assembly rewrites with the
+   * forces of the evaluated state and parameters.
+   */
+  DynamicArray<Real3> forceAdjoint = {};
+
+  /**
    * @brief Optional: Integration weight for each contact point on the collider.
    * @note Empty (sentinel meaning all weights = 1) or 1-to-1 with sampleIndices.
    * @note For shell/shell contact, this is the collider node weight; the colliding sample weight is
@@ -368,6 +378,7 @@ struct ContactDetectionResult {
     MOCHI_ASSERT_EMPTY_OR_FULL(jacWorldFromDofs);
     MOCHI_ASSERT_EMPTY_OR_FULL(jacWorldFromDofsStageStart);
     MOCHI_ASSERT_EMPTY_OR_FULL(forcePerUnitArea);
+    MOCHI_ASSERT_EMPTY_OR_FULL(forceAdjoint);
     MOCHI_ASSERT_EMPTY_OR_FULL(colliderIntegrationWeights);
     MOCHI_ASSERT_EMPTY_OR_FULL(colliderFeatureIndices);
 #undef MOCHI_ASSERT_FULL
@@ -390,6 +401,7 @@ struct ContactDetectionResult {
     culledPositionsBuffer.clear();
     culledIndicesBuffer.clear();
     forcePerUnitArea.clear();
+    forceAdjoint.clear();
     colliderIntegrationWeights.clear();
     colliderFeatureIndices.clear();
     isSdfGradUnitary = true;

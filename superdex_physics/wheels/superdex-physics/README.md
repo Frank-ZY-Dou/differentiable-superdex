@@ -61,7 +61,8 @@ colliders are rejected in differentiable scenes); node-to-rigid constraints. `ma
 switches the solver to the settings the adjoint needs (explicit contact normals, exact
 gradients of the contact merit, Armijo line search, friction continuation) and disables
 recentering of soft actors. Use double precision (`SUPERDEX_PRECISION=double`): the driver
-runs on the single-precision build too, but the gradients are then only float32-accurate.
+runs on the single-precision build too, but the gradients are then only float32-accurate, and
+the torch bridges refuse the single-precision engine outright.
 
 A complete example - a cube pushed to a goal by per-step forces found by Adam through the
 simulator (double precision; reaches the goal to within a centimetre and prints the final
@@ -242,7 +243,10 @@ angular velocities for the new size, keeping the angular rate; `get_step_jacobia
 the same way, and the adjoint operator carries the moving-chart term of external torques on
 rigid bodies, so torque gradients are exact to 1e-8 at 0.3 and 1.2 N m on a 0.2 m cube (1e-6
 over five steps); the contact-force query adjoint is exact against static and moving colliders alike,
-checked against the kinematic identity of a free body); the
+checked against the kinematic identity of a free body, and a loss on a contact force reaches the
+contact parameters of both owners of a pair, the direct dependence of the queried forces on the
+parameters included; positive contact coefficients of any size get an in-domain derivative, the
+multiplicative finite-difference step keeping the pair's geometric mean real); the
 stiffness damping of soft materials and point-cloud colliders (shells and rods acting as
 colliders, no SDF Hessians) are not differentiable, and the contact-force query adjoint refuses
 contacts with point-cloud colliders (soft bodies, shells and rods as the colliding bodies, and a

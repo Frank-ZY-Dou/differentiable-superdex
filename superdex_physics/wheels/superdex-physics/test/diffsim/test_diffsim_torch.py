@@ -1548,8 +1548,12 @@ class EngineContactForceAdjointTest(unittest.TestCase):
                 self.k, self.coefficient = k, coefficient
 
             def value(self) -> float:
+                # Running costs are evaluated live, before the later positions exist; only
+                # the terminal one carries the value.
+                if self.k != n - 1:
+                    return 0.0
                 d = force() - f_ref
-                return 0.5 * float(d @ d) if self.k == n - 1 else 0.0
+                return 0.5 * float(d @ d)
 
             def accumulate_output_grad(self) -> None:
                 grad = np.zeros(7, dtype=real_dtype())
@@ -1718,3 +1722,54 @@ class EngineContactForceAdjointTest(unittest.TestCase):
             build_chain, "chain", lambda a, u: a.set_articulated_target_pose(np.ascontiguousarray(u)), targets, False
         )
         self.assertLessEqual(rel_chain, 1e-5, rel_chain)
+
+
+class PolicyRolloutLifetimeTest(unittest.TestCase):
+    """A policy rollout releases every captured state when a loss raises (finding 4 of the
+    release review: the policy driver repeated the rollout driver's success-path-only release)."""
+
+    def test_failing_terminal_loss_releases_every_capture(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, chain = scenes.pendulum(with_controller=True)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        num_dofs = chain.get_num_dofs()
+        policy = torch.nn.Linear(num_dofs, num_dofs).double()
+
+        class RaisingLoss:
+            def value(self) -> float:
+                raise RuntimeError("intentional loss error")
+
+            def accumulate_output_grad(self) -> None:
+                pass
+
+        captured = []
+        real_capture = type(scene).capture_state
+
+        def capture(self_scene):
+            handle = real_capture(self_scene)
+            captured.append(handle)
+            return handle
+
+        rollout = diffsim_torch.PolicyRollout(
+            scene,
+            dt=DT,
+            num_steps=3,
+            policy=policy,
+            observations=[diffsim_torch.ArticulatedPoseObservation(chain)],
+            control_actors=[chain],
+            terminal_losses=[RaisingLoss()],
+        )
+        self.addCleanup(rollout.close)
+        with mock.patch.object(type(scene), "capture_state", capture):
+            with self.assertRaises(RuntimeError):
+                rollout()
+        self.assertEqual(len(captured), 6)
+        live = []
+        for handle in captured:
+            try:
+                scene.restore_state(handle, False)
+            except RuntimeError:
+                continue
+            live.append(handle)
+        self.assertEqual(live, [])

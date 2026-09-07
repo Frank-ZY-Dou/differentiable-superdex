@@ -1105,9 +1105,6 @@ static void EvalStageStartContactWithSingleCollider(
   if (outIndices.size() != outResult.sampleIndices.size()) {
     MOCHI_ASSERT_VERBOSE(outResult.ndofs > 0, "Only mapped colliders may miss results");
     bool const withHessians = outResult.sdfInfoStageStart.hasHessian;
-    MOCHI_ASSERT(
-        !withHessians || outResult.sdfInfo.hasHessian,
-        "Stage-start SDF Hessians cannot be filled for contacts without current Hessians.");
     MOCHI_ASSERT_VERBOSE(
         outResult.posCollidingStageStart.size() == outIndices.size(),
         "Positions and indices size mismatch");
@@ -1168,7 +1165,12 @@ static void EvalStageStartContactWithSingleCollider(
           sdfGradTemp[i] = outResult.sdfInfo.grad[i];
           jacColliderFromWorldTemp[i] = outResult.jacColliderFromWorld[i];
           if (withHessians) {
-            sdfHessTemp[i] = outResult.sdfInfo.hess[i];
+            // The filled-in normal is the current one, so it does not depend on the stage-start
+            // position: its stage-start Hessian is zero (the dissipative terms it would scale
+            // are cancelled by the infinite stage-start distance anyway). The current Hessians
+            // are not available here in general: a forward step of a differentiable scene
+            // computes the stage-start ones only (see computeSdfHessian above).
+            sdfHessTemp[i] = Matrix3x3r{};
           }
           if (withDofsJac) {
             jacWorldFromDofsTemp[i] = outResult.jacWorldFromDofs[i];

@@ -87,7 +87,7 @@ static void AccumulateAsyncContactForceAdjoints(
   auto const com = pose.value.VGetTranslation();
   for (auto& collision : activeCollisions) {
     ContactDetectionResult& contactQuery = collision.collisionResult;
-    int const numContacts = isize(contactQuery.forcePerUnitArea);
+    int const numContacts = isize(contactQuery.forceAdjoint);
     if (numContacts <= 0) {
       continue;
     }
@@ -109,7 +109,7 @@ static void AccumulateAsyncContactForceAdjoints(
     // Compute the gradient wrt contact positions. Reuse `force` for storage.
     for (int i = 0; i < numContacts; ++i) {
       collisionResponse.force[i] = ToReal3(
-          DotVecMat3x3(ToSimd(contactQuery.forcePerUnitArea[i]), collisionResponse.dforce[i]));
+          DotVecMat3x3(ToSimd(contactQuery.forceAdjoint[i]), collisionResponse.dforce[i]));
     }
 
     // Accumulation of gradient terms for all contact points.
@@ -165,7 +165,7 @@ static void AccumulateRigidVsMappedColliderForceAdjoints(
     ColumnVectorView<real> outGradA) {
   TimeStep constexpr kTimeStep = GetTimeStep<kGradTarget>();
   bool constexpr kCurrent = kGradTarget == GradTarget::Current;
-  int const numContacts = isize(query.forcePerUnitArea);
+  int const numContacts = isize(query.forceAdjoint);
   auto const& jacs = kCurrent ? query.jacColliderFromWorld : query.jacColliderFromWorldStageStart;
   auto const& dofsJacs = kCurrent ? query.jacWorldFromDofs : query.jacWorldFromDofsStageStart;
   MOCHI_ASSERT(
@@ -203,7 +203,7 @@ static void AccumulateRigidVsMappedColliderForceAdjoints(
         restGradientsTet = dofsJac.element;
         restGradients = map->RestBarycentricGradients(restGradientsTet);
       }
-      Vec4r const lambda = ToSimd(query.forcePerUnitArea[s]);
+      Vec4r const lambda = ToSimd(query.forceAdjoint[s]);
       Real3 const fWorld = ToReal3(DotVecMat3x3(ToSimd(forwardForces[s]), jacs[s]));
       Vec4r const gradient3 = -(restGradients[0] + restGradients[1] + restGradients[2]);
       for (int k = 0; k < 4; ++k) {
@@ -262,10 +262,10 @@ static void AccumulateAllSyncRigidContactForceAdjoints(
 
     // Traverse all its active collisions
     for (auto& coll : *activeCollisions) {
-      // `forcePerUnitArea` is the container for contact-force adjoints, and it is allocated only if
-      // contact queries were enabled for some actor in the contact pair.
+      // `forceAdjoint` holds the contact-force adjoints; it is sized only if contact queries were
+      // enabled for some actor in the contact pair.
       auto& query = coll.collisionResult;
-      int const numContacts = isize(query.forcePerUnitArea);
+      int const numContacts = isize(query.forceAdjoint);
       if (numContacts <= 0) {
         continue;
       }
@@ -298,7 +298,7 @@ static void AccumulateAllSyncRigidContactForceAdjoints(
       // of B also turns the forces: for the left rotation increment delta of B's chart,
       // d(R_B f_s)/d delta = delta x R_B f_s, so the adjoint of lambda . F w.r.t. delta carries
       // Sum_s (R_B f_s) x (w_s lambda) = R_B Sum_s f_s x lambda_s, with lambda_s the weighted
-      // collider-space adjoint held in forcePerUnitArea. The position derivatives below
+      // collider-space adjoint held in forceAdjoint. The position derivatives below
       // (through p_s = R_B^T (x_s - t_B)) do not contain it. Accumulate it before `force` is
       // reused.
       Vec4r rotForceTerm = {};
@@ -307,14 +307,14 @@ static void AccumulateAllSyncRigidContactForceAdjoints(
         forwardForces.resize_noinit(numContacts);
         for (int s = 0; s < numContacts; ++s) {
           forwardForces[s] = response.force[s];
-          rotForceTerm += Cross3(ToSimd(response.force[s]), ToSimd(query.forcePerUnitArea[s]));
+          rotForceTerm += Cross3(ToSimd(response.force[s]), ToSimd(query.forceAdjoint[s]));
         }
       }
 
       // Compute the gradient wrt contact positions. Reuse `force` for storage.
       for (int i = 0; i < numContacts; ++i) {
         response.force[i] =
-            ToReal3(DotVecMat3x3(ToSimd(query.forcePerUnitArea[i]), response.dforce[i]));
+            ToReal3(DotVecMat3x3(ToSimd(query.forceAdjoint[i]), response.dforce[i]));
       }
       if (!colliderIsRigid) {
         AccumulateRigidVsMappedColliderForceAdjoints<kGradTarget>(
@@ -398,7 +398,7 @@ static void AccumulateAllSyncDeformableCollidingForceAdjoints(
     response.Reserve(*activeCollisions, false, true, true);
     for (auto& coll : *activeCollisions) {
       auto& query = coll.collisionResult;
-      int const numContacts = isize(query.forcePerUnitArea);
+      int const numContacts = isize(query.forceAdjoint);
       if (numContacts <= 0) {
         continue;
       }
@@ -440,12 +440,12 @@ static void AccumulateAllSyncDeformableCollidingForceAdjoints(
       Vec4r rotForceTerm = {};
       if constexpr (kCurrent) {
         for (int s = 0; s < numContacts; ++s) {
-          rotForceTerm += Cross3(ToSimd(response.force[s]), ToSimd(query.forcePerUnitArea[s]));
+          rotForceTerm += Cross3(ToSimd(response.force[s]), ToSimd(query.forceAdjoint[s]));
         }
       }
       for (int i = 0; i < numContacts; ++i) {
         response.force[i] =
-            ToReal3(DotVecMat3x3(ToSimd(query.forcePerUnitArea[i]), response.dforce[i]));
+            ToReal3(DotVecMat3x3(ToSimd(query.forceAdjoint[i]), response.dforce[i]));
       }
       // The soft's nodal DoFs, through the samples' Jacobian.
       for (int s = 0; s < numContacts; ++s) {

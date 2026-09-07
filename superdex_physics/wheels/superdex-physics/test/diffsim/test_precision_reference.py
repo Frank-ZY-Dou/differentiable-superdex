@@ -37,6 +37,7 @@ import json
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 import numpy as np
 import superdex.physics as physics
@@ -131,3 +132,66 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+class TorchBridgePrecisionContractTest(unittest.TestCase):
+    """``diffsim_torch`` presents the engine's results as float64 tensors, so both bridges refuse
+    the single-precision engine at construction (finding 6 of the release review: a float64
+    tensor drove the float32 engine and float32-accurate gradients came back as float64, with
+    ``fd_valid`` set). On the single-precision build this is the real refusal; on the
+    double-precision build the check is exercised through a patched precision query, and the
+    real query admits."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        try:
+            import torch  # noqa: F401
+        except ImportError as exc:
+            raise unittest.SkipTest(f"torch is not installed: {exc}")
+        physics.initialize(num_worker_threads=0)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        physics.shutdown()
+
+    def _constructors(self, scene, cube):
+        from superdex.physics import diffsim_torch
+        from .harness import TranslationErrorLoss
+
+        import torch
+
+        loss = TranslationErrorLoss(cube)
+        return [
+            lambda: diffsim_torch.TorchRollout(
+                scene, dt=0.01, num_steps=2, force_actors=[cube], terminal_losses=[loss]
+            ),
+            lambda: diffsim_torch.PolicyRollout(
+                scene,
+                dt=0.01,
+                num_steps=2,
+                policy=torch.nn.Linear(3, 6).double(),
+                observations=[diffsim_torch.TranslationObservation(cube)],
+                force_actors=[cube],
+                terminal_losses=[loss],
+            ),
+        ]
+
+    def test_bridges_refuse_the_single_precision_engine(self) -> None:
+        from . import scenes
+
+        scene, cube = scenes.rigid_free()
+        self.addCleanup(physics.destroy_scene, scene)
+        physics.diffsim.make_scene_differentiable(scene)
+        constructors = self._constructors(scene, cube)
+        if physics.uses_double_precision():
+            for construct in constructors:
+                bridge = construct()
+                bridge.close()
+            with mock.patch.object(physics, "uses_double_precision", return_value=False):
+                for construct in constructors:
+                    with self.assertRaisesRegex(RuntimeError, "double-precision engine"):
+                        construct()
+        else:
+            for construct in constructors:
+                with self.assertRaisesRegex(RuntimeError, "double-precision engine"):
+                    construct()
