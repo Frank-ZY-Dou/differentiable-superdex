@@ -129,6 +129,48 @@ physics.destroy_scene(scene)
 physics.shutdown()
 ```
 
+A closed-loop policy trains the same way. `PolicyRollout` runs a torch policy in the loop and
+returns the loss with the policy parameters' gradients; the observations are the joint poses,
+rigid positions and orientations, soft-body centroids and contact forces of the scene. With
+`chain` an articulated actor whose pose controller pushes `cube` (the two-link chain of the test
+suite, `test/diffsim/scenes.py::chain_pushing_cube`) and `link` its pushing link, a tactile
+fingertip:
+
+```python
+from superdex.physics.diffsim_torch import (
+    ArticulatedPoseObservation, ContactForceObservation, PolicyRollout)
+
+class Policy(torch.nn.Module):
+    """A linear policy; the contact force (tens of newtons) is scaled to units of 100 N."""
+    def __init__(self, n_in, n_out):
+        super().__init__()
+        self.linear = torch.nn.Linear(n_in, n_out).double()
+        self.scale = torch.tensor([0.01] * 3 + [1.0] * (n_in - 3), dtype=torch.float64)
+
+    def forward(self, x):
+        return self.linear(x * self.scale)
+
+observations = [ContactForceObservation(link), ArticulatedPoseObservation(chain)]
+policy = Policy(sum(o.size for o in observations) + 1, chain.get_num_dofs())
+with torch.no_grad():                 # start the feedback at zero; the time feature
+    policy.linear.weight.zero_()      # carries an open-loop push of the first joint
+    policy.linear.weight[0, -1] = -0.8
+    policy.linear.bias.zero_()
+rollout = PolicyRollout(scene, dt=0.01, num_steps=30, policy=policy, observations=observations,
+                        control_actors=[chain], time_feature=True, terminal_losses=[GoalLoss()])
+loss = rollout()    # the forward and the adjoint sweep; every policy parameter gets .grad
+loss.backward()
+```
+
+From this start the cube stops 18 mm short of a goal 8 cm away; a dozen Adam iterations at
+`lr=1e-3` on `policy.parameters()` bring it to 5 mm (the same loop as the example above).
+`ContactForceObservation` registers the engine's total-contact-force query on its actor (a
+rigid body or an articulated link; construct it before the scene's first step) and reads the
+force of the last step; the observation of the initial state is the force of a probe step from
+the initial state, restored afterwards, and is a constant of the rollout. Its gradient is the
+engine's contact-force adjoint, exact against static and moving colliders, soft bodies included
+(`test/diffsim/test_diffsim_torch.py` checks this setup against finite differences).
+
 Every gradient path is validated against central finite differences of the same rollout in
 `superdex_physics/wheels/superdex-physics/test/diffsim` (run from that directory):
 
