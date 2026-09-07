@@ -1725,8 +1725,7 @@ class EngineContactForceAdjointTest(unittest.TestCase):
 
 
 class PolicyRolloutLifetimeTest(unittest.TestCase):
-    """A policy rollout releases every captured state when a loss raises (finding 4 of the
-    release review: the policy driver repeated the rollout driver's success-path-only release)."""
+    """A policy rollout releases every captured state when a loss raises (before 2026-09-07: the policy driver repeated the rollout driver's success-path-only release)."""
 
     def test_failing_terminal_loss_releases_every_capture(self) -> None:
         diffsim_torch = _make_bridge_module()

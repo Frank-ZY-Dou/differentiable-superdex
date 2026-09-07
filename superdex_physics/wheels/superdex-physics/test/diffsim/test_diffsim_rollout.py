@@ -826,8 +826,7 @@ class _RaisingLoss:
 class SnapshotLifetimeTest(unittest.TestCase):
     """Every state the driver captures is released when the run fails, whatever raised.
 
-    Until 2026-09-07 the captures were released on the success path only (finding 4 of the
-    release review): a loss raising in ``value()`` or ``accumulate_output_grad()``, or the
+    Until 2026-09-07 the captures were released on the success path only: a loss raising in ``value()`` or ``accumulate_output_grad()``, or the
     adjoint itself, left every step's pre and post state alive - eight handles for four steps -
     and a native error inside ``scene.step`` leaked the step's pre-step capture. Released
     handles raise on restore, which is how these tests count the survivors; the captures are
