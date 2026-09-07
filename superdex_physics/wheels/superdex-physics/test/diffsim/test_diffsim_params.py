@@ -771,7 +771,7 @@ class ContactForceLossParamsTest(unittest.TestCase):
 
     A contact-force query F = sum_s w_s J_s^T f_s(p_s; theta) depends on the contact parameters
     directly, at fixed states, besides the state path the adjoint solve covers. Until 2026-09-07
-    the direct term was missing (finding 2 of the release review: the Coulomb gradient of a
+    the direct term was missing (before 2026-09-07: the Coulomb gradient of a
     sliding cube's terminal force loss was 222.8 against 1476.2 by finite differences, the
     penalty gradient off by a factor 50; the positional-loss parameter tests and the state-only
     force tests never combine a force loss with parameter gradients). The engine now takes it
@@ -844,8 +844,7 @@ class ContactForceLossParamsTest(unittest.TestCase):
     def test_small_positive_coefficients_stay_in_domain(self) -> None:
         """A positive Coulomb coefficient below the finite-difference step (1e-8) of the engine's
         parameter derivatives: the step used to be additive, so the lower sample was negative
-        and the pair's geometric mean took the square root of a negative product (finding 3 of
-        the release review: 8.995 against 6.361, 41% off, for mu = 1e-8). The step is now
+        and the pair's geometric mean took the square root of a negative product (before 2026-09-07: 8.995 against 6.361, 41% off, for mu = 1e-8). The step is now
         multiplicative for positive values, so any positive value stays in the domain and the
         difference quotient is second-order accurate; measured 1.25e-5 for mu = 1e-2 to 1e-8
         against difference quotients at 1e-2 mu and 5e-3 mu (self-consistent to 1e-5)."""

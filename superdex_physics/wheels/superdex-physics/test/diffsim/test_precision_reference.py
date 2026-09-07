@@ -136,7 +136,7 @@ if __name__ == "__main__":
 
 class TorchBridgePrecisionContractTest(unittest.TestCase):
     """``diffsim_torch`` presents the engine's results as float64 tensors, so both bridges refuse
-    the single-precision engine at construction (finding 6 of the release review: a float64
+    the single-precision engine at construction (before 2026-09-07: a float64
     tensor drove the float32 engine and float32-accurate gradients came back as float64, with
     ``fd_valid`` set). On the single-precision build this is the real refusal; on the
     double-precision build the check is exercised through a patched precision query, and the

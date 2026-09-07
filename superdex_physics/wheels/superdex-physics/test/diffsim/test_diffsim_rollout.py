@@ -900,7 +900,7 @@ class SnapshotLifetimeTest(unittest.TestCase):
 class TruncationObjectiveTest(unittest.TestCase):
     """``truncation_window`` truncates the reverse sweep, not the objective: until 2026-09-07 the
     running costs were summed while sweeping, so a window of 2 over 6 steps of a constant cost
-    1 reported 2 instead of 6 (finding 5 of the release review), and a gradient option changed
+    1 reported 2 instead of 6, and a gradient option changed
     the value being optimized."""
 
     class _ConstantLoss:
@@ -939,7 +939,7 @@ class TruncationObjectiveTest(unittest.TestCase):
 class _CachedTranslationLoss:
     """A running cost that caches its residual in ``value()`` and differentiates from the
     cache: the two-method protocol allows it, and the driver must call ``value()`` on the
-    restored step right before the gradient (finding 1 of the second release review: the
+    restored step right before the gradient (before 2026-09-07: the
     driver evaluated the values live only, so a fresh instance per step got its gradient
     requested without a value, and a shared instance differentiated the last forward step's
     residual at every step - 30% off)."""
@@ -1048,7 +1048,7 @@ class CachedRunningLossTest(unittest.TestCase):
 
 class AdaptiveSnapshotLifetimeTest(unittest.TestCase):
     """The failure-adaptive step helper owns a step's pre-state until both captures reached the
-    record list (finding 2 of the second release review: a failing post-state capture leaked
+    record list (before 2026-09-07: a failing post-state capture leaked
     the pre-state with substepping enabled, even without an actual subdivision)."""
 
     def _captures(self, scene):
@@ -1135,10 +1135,9 @@ class AdaptiveSnapshotLifetimeTest(unittest.TestCase):
 
 class LossFactoryReplayTest(unittest.TestCase):
     """``step_losses(step)`` is called exactly once per step, during the forward rollout, and
-    the sweep differentiates the instances it returned (finding R3-1 of the third release
-    review: the factory was called again in the sweep, so a factory that samples or consumes
+    the sweep differentiates the instances it returned (before 2026-09-07: the factory was called again in the sweep, so a factory that samples or consumes
     data - targets, weights, minibatches - had its value and its gradient taken from two
-    different objectives, 2.9x apart in the reviewer's case, and an iterator-backed factory
+    different objectives, 2.9x apart in one measured case, and an iterator-backed factory
     ran dry). The finite-difference references below hold the targets the forward rollout
     actually drew."""
 

@@ -56,7 +56,7 @@ releases on that base; these distributions are built from this repository, not f
   resting on a soft cube agrees with the kinematic identity to 1e-5 in both configurations, a
   cube a rod is dropped on likewise, and a tactile policy on the box passes its
   finite-difference check. Contacts with point-cloud colliders are refused explicitly.
-- Release-review fixes (2026-09-07, six findings reproduced against the tree above): (1) a
+- Fixes from the pre-release checks of 2026-09-07 (each reproduced before it was changed): (1) a
   contact arriving on a soft-body SDF collider in a differentiable scene aborted the process (the
   stage-start fill of a contact missing at the stage start copied current SDF Hessians a forward
   step never computes); the fill now stores a zero stage-start Hessian, the filled-in normal being

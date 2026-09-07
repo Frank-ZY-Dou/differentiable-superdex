@@ -739,7 +739,7 @@ class DeformableColliderGradientTest(unittest.TestCase):
         fifth step): the contact samples that map into the collider at the current state but
         not at the stage start of the step get filled-in stage-start data from the current
         state. Until 2026-09-07 that fill asserted on the current SDF Hessians, which a forward
-        step of a differentiable scene does not compute (finding 1 of the release review: the
+        step of a differentiable scene does not compute (before 2026-09-07: the
         process aborted at the fifth step; the resting-contact fixtures never arrive). The fill
         now sets a zero stage-start Hessian for those contacts (the filled normal is the current
         one and does not depend on the stage-start position). The forward runs, and the

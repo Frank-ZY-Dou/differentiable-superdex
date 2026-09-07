@@ -1777,8 +1777,7 @@ class PolicyRolloutLifetimeTest(unittest.TestCase):
 
 class CachedRunningLossBridgeTest(unittest.TestCase):
     """A running cost that caches its residual in ``value()`` through the torch bridge gives
-    the stateless loss's value and gradient (the bridge wraps DifferentiableRollout; finding 1
-    of the second release review)."""
+    the stateless loss's value and gradient (the bridge wraps DifferentiableRollout)."""
 
     class _CachedLoss:
         def __init__(self, actor, ref):
@@ -1826,7 +1825,7 @@ class CachedRunningLossBridgeTest(unittest.TestCase):
 
 class PolicyRolloutAdaptiveLifetimeTest(unittest.TestCase):
     """The policy driver's failure-adaptive stepping releases a step's pre-state when its
-    post-state capture fails (finding 2 of the second release review)."""
+    post-state capture fails."""
 
     def test_post_state_capture_failure(self) -> None:
         diffsim_torch = _make_bridge_module()
@@ -1877,7 +1876,7 @@ class PolicyRolloutAdaptiveLifetimeTest(unittest.TestCase):
 
 class LossFactoryReplayBridgeTest(unittest.TestCase):
     """The bridges call ``step_losses(step)`` once per step and differentiate the instances of
-    the forward rollout (finding R3-1 of the third release review)."""
+    the forward rollout."""
 
     N, DT_FREE = 6, 0.05
 
@@ -1971,8 +1970,7 @@ class LossFactoryReplayBridgeTest(unittest.TestCase):
 
 class BridgeActorValidationTest(unittest.TestCase):
     """Every actor of a declared input group must belong to the bridge's scene and appear once
-    in that group; actors are resolved by identity, names only label the gradients (findings
-    R3-2 and R3-3 of the third release review: a repeated force actor had its earlier block
+    in that group; actors are resolved by identity, names only label the gradients (before 2026-09-07: a repeated force actor had its earlier block
     overwritten while both blocks received the gradient; an actor of another scene with the
     same name was silently replaced by this scene's actor, and a foreign contact actor was
     mutated in its own scene and reported that scene's stale gradient)."""
