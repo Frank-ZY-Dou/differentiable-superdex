@@ -1773,3 +1773,104 @@ class PolicyRolloutLifetimeTest(unittest.TestCase):
                 continue
             live.append(handle)
         self.assertEqual(live, [])
+
+
+class CachedRunningLossBridgeTest(unittest.TestCase):
+    """A running cost that caches its residual in ``value()`` through the torch bridge gives
+    the stateless loss's value and gradient (the bridge wraps DifferentiableRollout; finding 1
+    of the second release review)."""
+
+    class _CachedLoss:
+        def __init__(self, actor, ref):
+            self.actor, self.ref, self.residual = actor, np.asarray(ref, dtype=np.float64), None
+
+        def value(self) -> float:
+            self.residual = (
+                np.asarray(self.actor.get_center_of_mass_transform().translation, dtype=np.float64)
+                - self.ref
+            )
+            return 0.5 * float(self.residual @ self.residual)
+
+        def accumulate_output_grad(self) -> None:
+            if self.residual is None:
+                raise RuntimeError("gradient requested before loss.value()")
+            grad = np.zeros(7, dtype=real_dtype())
+            grad[:3] = self.residual
+            diffsim.get_center_of_mass_transform_backward(self.actor, grad)
+            self.residual = None
+
+    def _gradient(self, make_losses):
+        diffsim_torch = _make_bridge_module()
+        scene, cube = scenes.rigid_free()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        bridge = diffsim_torch.TorchRollout(
+            scene, dt=0.05, num_steps=6, force_actors=[cube], step_losses=make_losses(cube)
+        )
+        self.addCleanup(bridge.close)
+        forces = torch.zeros((6, 6), dtype=torch.float64, requires_grad=True)
+        value = bridge(forces=forces)
+        value.backward()
+        return value.item(), forces.grad.numpy().copy()
+
+    def test_cached_losses_match_the_stateless_loss(self) -> None:
+        ref = (0.1, 0.2, 0.3)
+        stateless = self._gradient(lambda cube: (lambda step: [TranslationErrorLoss(cube, ref=np.array(ref))]))
+        fresh = self._gradient(lambda cube: (lambda step: [self._CachedLoss(cube, ref)]))
+        shared = self._gradient(lambda cube: (lambda step, loss=self._CachedLoss(cube, ref): [loss]))
+        for label, (value, grad) in (("fresh", fresh), ("shared", shared)):
+            self.assertEqual(value, stateless[0], label)
+            np.testing.assert_array_equal(grad, stateless[1], label)
+        self.assertGreater(float(np.abs(stateless[1]).max()), 0.0)
+
+
+class PolicyRolloutAdaptiveLifetimeTest(unittest.TestCase):
+    """The policy driver's failure-adaptive stepping releases a step's pre-state when its
+    post-state capture fails (finding 2 of the second release review)."""
+
+    def test_post_state_capture_failure(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, cube = scenes.rigid_free()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        policy = torch.nn.Linear(3, 6).double()
+        with torch.no_grad():
+            policy.weight.zero_()
+            policy.bias.zero_()
+        rollout = diffsim_torch.PolicyRollout(
+            scene,
+            dt=DT,
+            num_steps=2,
+            policy=policy,
+            observations=[diffsim_torch.TranslationObservation(cube)],
+            force_actors=[cube],
+            terminal_losses=[TranslationErrorLoss(cube)],
+            max_substep_levels=1,
+            substep_residual_tolerance=1e-6,
+        )
+        self.addCleanup(rollout.close)
+        captured = []
+        real_capture = type(scene).capture_state
+        calls = []
+
+        def capture(self_scene):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("injected capture failure")
+            handle = real_capture(self_scene)
+            captured.append(handle)
+            return handle
+
+        with mock.patch.object(type(scene), "capture_state", capture):
+            with self.assertRaisesRegex(RuntimeError, "injected"):
+                rollout()
+        self.assertEqual(len(captured), 1)
+        live = []
+        for handle in captured:
+            try:
+                scene.restore_state(handle, False)
+            except RuntimeError:
+                continue
+            live.append(handle)
+        self.assertEqual(live, [])
+

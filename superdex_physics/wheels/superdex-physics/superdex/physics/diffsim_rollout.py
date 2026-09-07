@@ -237,7 +237,11 @@ def _step_adaptive(
             scene.capture_state(),
         )
         return taken
-    post = scene.capture_state()
+    try:
+        post = scene.capture_state()
+    except BaseException:
+        scene.release_state(pre)
+        raise
     if on_substep is None:
         scene.release_state(pre)
         scene.release_state(post)
@@ -498,6 +502,15 @@ class DifferentiableRollout:
         evaluated on the final state; ``step_losses(step)`` may return
         additional losses whose gradients are accumulated at that step of the
         reverse sweep (a running cost). At least one loss source is required.
+
+        Loss protocol: ``value()`` is called on the state the loss refers to
+        (each step's final state during the forward rollout for a running cost,
+        the final state for a terminal loss) and the values sum to the
+        objective; during the reverse sweep, with the step's state restored,
+        ``value()`` is called again right before ``accumulate_output_grad()``,
+        so a loss may cache whatever its gradient needs in ``value()`` - the
+        cache always belongs to the state being differentiated. A callable
+        ``step_losses`` may return fresh instances at every call or shared ones.
         """
         if not terminal_losses and step_losses is None:
             raise ValueError("provide terminal_losses and/or step_losses")
@@ -574,6 +587,10 @@ class DifferentiableRollout:
                     loss.accumulate_output_grad()
             if step_losses is not None and last_of_step:
                 for loss in step_losses(record.step):
+                    # value() right before the gradient, on the restored step: a loss may
+                    # cache its derivative context in value() (the objective took the live
+                    # values during the forward rollout; this one is discarded).
+                    loss.value()
                     loss.accumulate_output_grad()
             diffsim.back_propagate(self.scene)
             steps_swept += 1

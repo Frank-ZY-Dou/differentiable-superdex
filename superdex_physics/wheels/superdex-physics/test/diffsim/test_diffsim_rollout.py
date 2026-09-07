@@ -934,3 +934,176 @@ class TruncationObjectiveTest(unittest.TestCase):
             losses.append(result.loss)
         self.assertGreater(losses[0], 0.0)
         self.assertAlmostEqual(losses[0], losses[1], delta=1e-12 * losses[0])
+
+
+class _CachedTranslationLoss:
+    """A running cost that caches its residual in ``value()`` and differentiates from the
+    cache: the two-method protocol allows it, and the driver must call ``value()`` on the
+    restored step right before the gradient (finding 1 of the second release review: the
+    driver evaluated the values live only, so a fresh instance per step got its gradient
+    requested without a value, and a shared instance differentiated the last forward step's
+    residual at every step - 30% off)."""
+
+    def __init__(self, actor, ref=(0.0, 0.0, 0.0)):
+        self.actor = actor
+        self.ref = np.asarray(ref, dtype=np.float64)
+        self.residual = None
+        self.values = 0
+        self.gradients = 0
+
+    def value(self) -> float:
+        self.values += 1
+        self.residual = (
+            np.asarray(self.actor.get_center_of_mass_transform().translation, dtype=np.float64)
+            - self.ref
+        )
+        return 0.5 * float(self.residual @ self.residual)
+
+    def accumulate_output_grad(self) -> None:
+        if self.residual is None:
+            raise RuntimeError("gradient requested before loss.value()")
+        self.gradients += 1
+        grad = np.zeros(7, dtype=_real_dtype())
+        grad[:3] = self.residual
+        diffsim.get_center_of_mass_transform_backward(self.actor, grad)
+        self.residual = None  # a stale cache must never serve a later step
+
+
+def _real_dtype():
+    return np.float64 if DOUBLE else np.float32
+
+
+class CachedRunningLossTest(unittest.TestCase):
+    """Running costs that cache their derivative context in ``value()``, fresh per step and
+    shared across steps, against the stateless harness loss and against finite differences."""
+
+    def _free_fall(self):
+        scene, cube = scenes.rigid_free()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        cube.set_velocity([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+        return scene, cube
+
+    def test_fresh_cached_losses_match_the_stateless_loss(self) -> None:
+        scene, cube = self._free_fall()
+        stateless = DifferentiableRollout(scene, dt=0.05, num_steps=6).run(
+            step_losses=lambda step: [TranslationErrorLoss(cube, ref=np.array([0.1, 0.2, 0.3]))]
+        )
+        scene.release_all_states()
+        scene, cube = self._free_fall()
+        made = []
+
+        def losses(step):
+            loss = _CachedTranslationLoss(cube, ref=(0.1, 0.2, 0.3))
+            made.append(loss)
+            return [loss]
+
+        cached = DifferentiableRollout(scene, dt=0.05, num_steps=6).run(step_losses=losses)
+        self.assertEqual(cached.loss, stateless.loss)
+        np.testing.assert_array_equal(
+            cached.gradients["cube"].initial_velocity, stateless.gradients["cube"].initial_velocity
+        )
+        # Every instance was evaluated before its gradient; the sweep's instances once more.
+        self.assertTrue(all(loss.values >= 1 for loss in made))
+        self.assertEqual(sum(loss.gradients for loss in made), 6)
+
+    def test_shared_cached_loss_vs_fd(self) -> None:
+        n, dt = 6, 0.05
+        scene, cube = self._free_fall()
+        initial = scene.capture_state()
+        dofs = np.arange(6, dtype=np.int32)
+        forces = np.zeros((n, 6))
+        loss = _CachedTranslationLoss(cube)
+
+        def apply(step):
+            cube.set_external_forces_on_dofs(dofs, np.ascontiguousarray(forces[step]))
+
+        result = DifferentiableRollout(scene, dt=dt, num_steps=n).run(
+            apply_inputs=apply, step_losses=lambda step: [loss]
+        )
+        analytic = float(result.gradients["cube"].external_forces[2, 0])
+        # The position is linear in the force, so the loss is quadratic in it and the central
+        # difference is exact up to rounding: the wide float32 steps keep the rounding of the
+        # loss (1e-7 of 1.9) below the tolerance.
+        steps, tol = ((1e-4, 1e-5), 1e-6) if DOUBLE else ((1e-1, 5e-2), 5e-3)
+        fds = []
+        for eps in steps:
+            values = []
+            for sign in (1.0, -1.0):
+                scene.restore_state(initial, False)
+                forces[0, 2] = sign * eps
+                total = 0.0
+                for step in range(n):
+                    apply(step)
+                    scene.step(dt)
+                    total += loss.value()
+                values.append(total)
+            fds.append((values[0] - values[1]) / (2 * eps))
+        forces[0, 2] = 0.0
+        scene.release_all_states()
+        self.assertGreater(abs(fds[0]), 1e-6, "vacuous")
+        self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), tol, fds)
+        self.assertLessEqual(abs(analytic - fds[0]) / abs(fds[0]), tol, (analytic, fds))
+
+
+class AdaptiveSnapshotLifetimeTest(unittest.TestCase):
+    """The failure-adaptive step helper owns a step's pre-state until both captures reached the
+    record list (finding 2 of the second release review: a failing post-state capture leaked
+    the pre-state with substepping enabled, even without an actual subdivision)."""
+
+    def _captures(self, scene):
+        captured = []
+        real_capture = type(scene).capture_state
+        state = {"calls": 0, "fail_at": None}
+
+        def capture(self_scene):
+            state["calls"] += 1
+            if state["calls"] == state["fail_at"]:
+                raise RuntimeError("injected capture failure")
+            handle = real_capture(self_scene)
+            captured.append(handle)
+            return handle
+
+        return captured, state, capture
+
+    def test_post_state_capture_failure(self) -> None:
+        scene, cube = scenes.rigid_free()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        captured, state, capture = self._captures(scene)
+        state["fail_at"] = 2  # the post-state of the first step
+        loss = TranslationErrorLoss(cube)
+        # The convergence check is not under test (the float32 build's residuals would not pass
+        # the tight tolerance the adaptive mode requires): the step is accepted.
+        with mock.patch.object(type(scene), "capture_state", capture), mock.patch.object(
+            diffsim_rollout, "forward_solve_failed", return_value=False
+        ):
+            with self.assertRaisesRegex(RuntimeError, "injected"):
+                DifferentiableRollout(
+                    scene, dt=DT, num_steps=2, max_substep_levels=1, substep_residual_tolerance=1e-6
+                ).run(terminal_losses=[loss])
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(_live_handles(scene, captured), [])
+
+    def test_capture_failure_after_an_accepted_half_step(self) -> None:
+        scene, cube = scenes.rigid_free()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        captured, state, capture = self._captures(scene)
+        # The plain step is declared failed once, so it is redone as two half steps: captures
+        # are the pre-state (1), the first half's post-state (2, accepted into the records),
+        # the second half's pre-state (3) and its post-state (4), which fails.
+        state["fail_at"] = 4
+        loss = TranslationErrorLoss(cube)
+        failed = mock.Mock(side_effect=[True, False, False])
+        with mock.patch.object(type(scene), "capture_state", capture), mock.patch.object(
+            diffsim_rollout, "forward_solve_failed", failed
+        ):
+            with self.assertRaisesRegex(RuntimeError, "injected"):
+                DifferentiableRollout(
+                    scene, dt=DT, num_steps=2, max_substep_levels=1, substep_residual_tolerance=1e-6
+                ).run(terminal_losses=[loss])
+        self.assertEqual(failed.call_count, 3)
+        self.assertEqual(len(captured), 3)
+        self.assertEqual(_live_handles(scene, captured), [])
+

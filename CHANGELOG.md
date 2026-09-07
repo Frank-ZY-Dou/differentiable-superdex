@@ -73,7 +73,9 @@ releases on that base; these distributions are built from this repository, not f
   1e-5 down to 1e-8). (4) The rollout and policy drivers release every captured state when a
   loss, the adjoint or a native step error raises. (5) `truncation_window` truncates the reverse
   sweep only: the running costs are evaluated live during the forward rollout and the reported
-  loss sums every step's. (6) The torch bridges refuse the single-precision engine at
+  loss sums every step's; during the sweep each loss's `value()` is called again on the restored
+  step right before its gradient, so a loss may cache its derivative context in `value()`
+  (a fresh instance per step or a shared one). (6) The torch bridges refuse the single-precision engine at
   construction instead of returning float32-accurate gradients as float64 tensors. Found while
   fixing (2): the engine's queries (contact forces, contact points) are outputs of a step, not
   state, so after a state restore they still reported the last forward step - a running
