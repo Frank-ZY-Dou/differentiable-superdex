@@ -59,13 +59,7 @@ struct CRigidVel : public RigidBodyVelContainer {
 };
 
 /// @brief Component for time integration of rigid velocity.
-using IntegrationRigidVels = IntegrationBundle<RigidBodyVelContainer>;
-struct CIntegrationRigidVels : public IntegrationRigidVels, NoCopy {
-  MOCHI_STRUCT_BEGIN(mochi::CIntegrationRigidVels);
-  MOCHI_ATTRIBUTE(CaptureState);
-  MOCHI_BASE_CLASS(IntegrationRigidVels);
-  MOCHI_STRUCT_END();
-};
+MOCHI_DEFINE_INTEGRATION_COMPONENT(CIntegrationRigidVels, RigidBodyVelContainer);
 
 // ECS component storing rigid actor creation params that are consumed during InitRigidActor
 // and cannot be recovered from the ECS afterward. Used for lossless prefab export.

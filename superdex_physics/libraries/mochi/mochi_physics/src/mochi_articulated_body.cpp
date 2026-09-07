@@ -266,7 +266,7 @@ void articulated::compound::SetArticulatedJointVelocities(
   auto& jointVels = reg.get<CArticulatedJointVels<TimeStep::Current>>(e).value;
   for (int i = 0; i < props.numLinks; ++i) {
     auto const& dofInfo = joints->dofInfo[i];
-    auto& jointVel = jointVels[i].value;
+    auto& jointVel = jointVels[i];
     switch (joints->jointTypes[i]) {
       case ArticulatedJointType::Free:
         jointVel.SetVCom(Load<3, Vec4r>(&vel[dofInfo.GetTransOffset()]));
@@ -404,7 +404,7 @@ static void GetArticulatedJointVelocitiesImpl(
     CArticulatedJointVels<TimeStep::Current> const& jointVels,
     ColumnVectorView<real> outVel) {
   for (int i = 0; i < props.numLinks; ++i) {
-    auto const& jointVel = jointVels.value[i].value;
+    auto const& jointVel = jointVels.value[i];
     auto const& dofInfo = jointDofInfo[i];
     switch (jointTypes[i]) {
       case ArticulatedJointType::Free:
@@ -2211,7 +2211,7 @@ void articulated::compound::AssembleInertiaForces(
         intState.dtStage,
         currJointTxs[i],
         stageStartJointTxs[i],
-        stageStartJointVels.value[i].value,
+        stageStartJointVels.value[i],
         energy,
         gradient,
         hessian);
@@ -2237,8 +2237,8 @@ void articulated::compound::AssembleInertiaForces(
     }
     int const offset = poseInfo[i].offset;
     auto const stageStartJointVel = jointTypes[i] == ArticulatedJointType::Revolute
-        ? stageStartJointVels.value[i].value.GetOmegaAndVSym().first
-        : stageStartJointVels.value[i].value.GetVCom();
+        ? stageStartJointVels.value[i].GetOmegaAndVSym().first
+        : stageStartJointVels.value[i].GetVCom();
     real const stageStartVel = Dot<3>(ToSimd(jointAxes[i]), stageStartJointVel);
     inertiaFuncSingleDof(
         currPose.value[offset],
@@ -2789,13 +2789,8 @@ void articulated::compound::EntityPreFirstStage(
   // compute their values at the beginning of the step.
   integration::ApplyTimeIntegrationStepStart(
       metadata, intState, outIntPose, prevPose, outIntPose.stepStart);
-  for (int i = 0; i < prevJointVels.value.size(); ++i) {
-    integration::ApplyTimeIntegrationStepStart(
-        intState,
-        outIntJointVels.value[i],
-        prevJointVels.value[i],
-        outIntJointVels.value[i].stepStart);
-  }
+  integration::ApplyTimeIntegrationStepStart(
+      intState, outIntJointVels, prevJointVels, outIntJointVels.stepStart);
 }
 
 template <TimeTarget kTargetTime, TimeStep kOutTime>
@@ -2835,10 +2830,7 @@ static void ComputeStateAndVelocity(
 
   // Joint velocities are differential variables. Use integration utilities to compute their
   // value.
-  for (int i = 0; i < outIntJointVels.value.size(); ++i) {
-    integration::ApplyTimeIntegration<kTargetTime>(
-        intState, outIntJointVels.value[i], outJointVels.value[i]);
-  }
+  integration::ApplyTimeIntegration<kTargetTime>(intState, outIntJointVels, outJointVels);
 }
 
 static void PushCurrentStateAndVelocityToIntegrationStages(
@@ -2851,9 +2843,7 @@ static void PushCurrentStateAndVelocityToIntegrationStages(
   // Joint DoFs and velocities are differential variables. Push them to the vectors containing
   // their values at the end of each time integration stage.
   outIntDofs.stages[intState.currentStage].value = currDofs.value;
-  for (int i = 0; i < isize(outIntJointVels.value); ++i) {
-    outIntJointVels.value[i].stages[intState.currentStage].value = currJointVels.value[i].value;
-  }
+  outIntJointVels.stages[intState.currentStage].value = currJointVels.value;
 }
 
 static void ComputeCurrentVelocity(
@@ -2865,7 +2855,7 @@ static void ComputeCurrentVelocity(
   // Joint velocities are recovered via finite differences of the pose at the beginning and at the
   // end of the stage.
   for (int i = 0; i < isize(currJointTransforms); ++i) {
-    outCurrJointVels.value[i].value.SetFromFiniteDifferencePose(
+    outCurrJointVels.value[i].SetFromFiniteDifferencePose(
         stageStartJointTransforms[i], currJointTransforms[i], intState.dtStage);
   }
 }
@@ -2903,7 +2893,7 @@ static void HandleSolverDivergence(
 
     // Reset the velocity to zero.
     for (auto& jointVel : outCurrJointVels.value) {
-      jointVel.value.SetZero();
+      jointVel.SetZero();
     }
   }
 }
@@ -2917,9 +2907,9 @@ static void CompoundEntityPreStep(
   // Shift joint DoFs from current to previous.
   prevState.value = currState.value;
   // Shift joint velocities from current to previous and reset current velocity.
-  for (int i = 0; i < isize(currJointVels.value); ++i) {
-    prevJointVels.value[i].value = currJointVels.value[i].value;
-    currJointVels.value[i].value.SetZero();
+  prevJointVels.value = currJointVels.value;
+  for (auto& jointVel : currJointVels.value) {
+    jointVel.SetZero();
   }
 }
 
@@ -3079,15 +3069,11 @@ void articulated::compound::RecordState(
   RecordDataset("pose", AsConstView(reducedPose.value), outData);
 
   // Record current joint velocities as three 2D datasets
-  MOCHI_FILO_STACK_ALLOCATOR(alloc, sizeof(RigidBodyVel) * 256);
-  DynamicArray<RigidBodyVel> jointVelsRaw(&alloc);
-  jointVelsRaw.reserve(jointVels.value.size());
-  for (auto const& jointVel : jointVels.value) {
-    jointVelsRaw.emplace_back(jointVel.value);
-  }
-  RecordDatasetFromContainers(MakeConstSpan(jointVelsRaw), "vcom", ExtractVcom, &alloc, outData);
-  RecordDatasetFromContainers(MakeConstSpan(jointVelsRaw), "omega", ExtractOmega, &alloc, outData);
-  RecordDatasetFromContainers(MakeConstSpan(jointVelsRaw), "vsym", ExtractVsym, &alloc, outData);
+  MOCHI_FILO_STACK_ALLOCATOR(alloc, sizeof(Matrix3x3r) * 256);
+  RecordDatasetFromContainers(MakeConstSpan(jointVels.value), "vcom", ExtractVcom, &alloc, outData);
+  RecordDatasetFromContainers(
+      MakeConstSpan(jointVels.value), "omega", ExtractOmega, &alloc, outData);
+  RecordDatasetFromContainers(MakeConstSpan(jointVels.value), "vsym", ExtractVsym, &alloc, outData);
 
   // If there is a pose controller, record the old target pose as a 1D dataset.
   if (targetOld) {
@@ -3102,9 +3088,9 @@ void articulated::compound::UpdateVSym(
   for (auto& jointVel : outJointVels.value) {
     // See rigid::UpdateVSym: the previous step's finite-difference joint velocity is re-expressed
     // for this step's size (no-op for uniform step sizes).
-    jointVel.value.RescaleRotationIncrement(
+    jointVel.RescaleRotationIncrement(
         static_cast<real>(time->DeltaTimePrev()), static_cast<real>(time->DeltaTime()));
-    jointVel.value.UpdateVSymIfDirty(static_cast<real>(time->DeltaTime()));
+    jointVel.UpdateVSymIfDirty(static_cast<real>(time->DeltaTime()));
   }
 }
 

@@ -16,6 +16,7 @@
 
 #include "mochi_physics_test_fixture.h"
 
+#include <mochi_physics/src/mochi_articulated_body.h>
 #include <mochi_physics/src/mochi_integration.h>
 
 #include <mochi_core/articulated_body/articulated_body.h>
@@ -184,6 +185,49 @@ TEST(MochiIntegration, ConstantStep) {
         CVelocitySlice<real, TimeStep::StageStart>(numDofs),
         CVelocitySlice<real, TimeStep::Current>(numDofs),
         CIntegrationVelocitySlices<DisplacementLayer::Default>(numDofs),
+        params,
+        dt);
+  }
+
+  {
+    int constexpr kNumJoints = 3;
+    auto init = [&](auto& previous, auto& integration) {
+      for (int i = 0; i < kNumJoints; ++i) {
+        previous.value[i].SetVCom({0.2_r * i, -0.3_r * i, -0.1_r * i});
+        previous.value[i].SetOmega({1.2_r * i, 0.3_r * i, -0.5_r * i});
+        previous.value[i].UpdateVSymIfDirty(dt);
+      }
+      while (integration.prevSteps.size() < params.numSteps) {
+        integration.prevSteps.emplace_back(previous.value);
+      }
+    };
+    auto stageSolve = [](auto const& stageStart, auto& current) {
+      current.value = stageStart.value;
+    };
+    auto emplace = [](auto& integration, auto const& current, int iStage) {
+      integration.stages[iStage].value = current.value;
+    };
+    auto check = [](auto const& previous, auto const& current) {
+      ASSERT_EQ(previous.value.size(), current.value.size());
+      for (int i = 0; i < isize(previous.value); ++i) {
+        EXPECT_NEAR_EQ(previous.value[i].GetVCom(), current.value[i].GetVCom());
+        EXPECT_NEAR_EQ(
+            previous.value[i].GetOmegaAndVSym().first, current.value[i].GetOmegaAndVSym().first);
+        EXPECT_NEAR_EQ(
+            previous.value[i].GetOmegaAndVSym().second, current.value[i].GetOmegaAndVSym().second);
+      }
+    };
+
+    EmulateTimeStep(
+        computeTarget,
+        init,
+        stageSolve,
+        emplace,
+        check,
+        CArticulatedJointVels<TimeStep::Previous>(kNumJoints),
+        CArticulatedJointVels<TimeStep::StageStart>(kNumJoints),
+        CArticulatedJointVels<TimeStep::Current>(kNumJoints),
+        CIntegrationArticulatedJointVels(kNumJoints),
         params,
         dt);
   }
