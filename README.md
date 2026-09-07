@@ -1,3 +1,53 @@
+# Differentiable SuperDex
+
+> Gradients through contact for Meta's Project SuperDex
+
+This repository is a fork of [Project SuperDex](https://github.com/facebookresearch/project_superdex)
+that makes SuperDex Physics differentiable. It adds the discrete adjoint of the engine's implicit
+time steps, through frictional contact, with gradients for initial states, per-step controller
+targets and external forces, gravity, contact materials, densities and soft material parameters.
+A PyTorch bridge turns a rollout into an autograd node, so policies and parameter encoders train
+on exact simulation gradients. Scenes that do not ask for gradients run exactly as in upstream
+SuperDex.
+
+| A feedback policy pushes a cube (`push_policy`) | A five-finger hand carries a cube (`hand`) |
+| :-: | :-: |
+| ![push_policy](superdex_physics/examples/media/robot_push_policy.gif) | ![hand](superdex_physics/examples/media/robot_hand_grasp.gif) |
+| **A gripper carries a cube (`grasp`)** | **An arm pushes a cube (`push`)** |
+| ![grasp](superdex_physics/examples/media/robot_grasp.gif) | ![push](superdex_physics/examples/media/robot_push.gif) |
+
+Each animation is one optimization: the controller targets of the robot are updated by gradient
+descent through the simulator until the object reaches its goal, and the adjoint gradient is
+checked against finite differences at the first iteration.
+
+What this fork adds to SuperDex:
+
+- `superdex.physics.diffsim`, the engine's discrete adjoint: back-propagation through the implicit
+  steps of rigid, articulated, soft and rod dynamics, their frictional contacts and constraints,
+  implemented in the C++ engine (`superdex_physics/libraries/mochi`).
+- `superdex.physics.diffsim_rollout` and `superdex.physics.diffsim_torch`: a rollout driver with
+  checkpoints, running losses and adaptive substepping, a PyTorch autograd bridge, and closed-loop
+  policy training with contact-force observations.
+- Examples in `superdex_physics/examples/example_diffsim_*.py`: the adjoint API by hand, system
+  identification, and ten manipulation tasks solved by gradient descent through contact.
+- A gradient test suite (`superdex_physics/wheels/superdex-physics/test/diffsim`) that checks every
+  path against finite differences and closed-form references, run in both precisions by CI.
+
+- Details, validation and demo results: [SuperDex Physics README](superdex_physics/wheels/superdex-physics/README.md#differentiable-simulation).
+- Release notes of this fork: [CHANGELOG.md](CHANGELOG.md).
+- Base: SuperDex 1.0.0 and the upstream `main` branch as of 2026-09-06. The fork's version is
+  `1.0.0+diffsim.1`; its wheels are built from this repository.
+
+Run a demo (double precision):
+
+```bash
+SUPERDEX_PRECISION=double uv run --no-project superdex_physics/examples/example_diffsim_robot_video.py --task push --check
+```
+
+The rest of this file is the upstream project's own README.
+
+---
+
 # Project SuperDex
 
 > A unified platform for dexterous manipulation research

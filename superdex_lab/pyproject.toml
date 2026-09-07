@@ -41,8 +41,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/facebookresearch/project_superdex"
-Repository = "https://github.com/facebookresearch/project_superdex"
+Homepage = "https://github.com/Frank-ZY-Dou/differentiable-superdex"
+Repository = "https://github.com/Frank-ZY-Dou/differentiable-superdex"
 
 [tool.setuptools.packages.find]
 where = ["."]

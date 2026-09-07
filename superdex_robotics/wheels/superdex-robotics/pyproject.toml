@@ -39,8 +39,8 @@ double = ["superdex-robotics-fp64==1.0.0+diffsim.1"]
 fp64 = ["superdex-robotics-fp64==1.0.0+diffsim.1"]
 
 [project.urls]
-Homepage = "https://github.com/facebookresearch/project_superdex"
-Repository = "https://github.com/facebookresearch/project_superdex"
+Homepage = "https://github.com/Frank-ZY-Dou/differentiable-superdex"
+Repository = "https://github.com/Frank-ZY-Dou/differentiable-superdex"
 
 [tool.uv]
 managed = false

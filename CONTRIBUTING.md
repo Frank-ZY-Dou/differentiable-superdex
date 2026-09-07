@@ -1,4 +1,12 @@
-# Contributing to Meta Open Source Projects
+# Contributing
+
+This repository is a fork of [Project SuperDex](https://github.com/facebookresearch/project_superdex).
+Issues and pull requests about the differentiable simulation (`superdex.physics.diffsim`, the
+rollout driver, the torch bridge, their tests and examples) belong here. Changes to the rest of
+SuperDex belong upstream, under the process below, and are picked up here when upstream is
+merged.
+
+# Contributing to Meta Open Source Projects (upstream)
 
 We want to make contributing to this project as easy and transparent as
 possible.

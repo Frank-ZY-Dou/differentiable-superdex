@@ -40,8 +40,8 @@ classifiers = [
 superdex-studio = "superdex_studio.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/facebookresearch/project_superdex"
-Repository = "https://github.com/facebookresearch/project_superdex"
+Homepage = "https://github.com/Frank-ZY-Dou/differentiable-superdex"
+Repository = "https://github.com/Frank-ZY-Dou/differentiable-superdex"
 
 [tool.uv]
 managed = false

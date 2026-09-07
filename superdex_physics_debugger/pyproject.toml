@@ -38,8 +38,8 @@ classifiers = [
 superdex-physics-debugger = "superdex_physics_debugger.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/facebookresearch/project_superdex"
-Repository = "https://github.com/facebookresearch/project_superdex"
+Homepage = "https://github.com/Frank-ZY-Dou/differentiable-superdex"
+Repository = "https://github.com/Frank-ZY-Dou/differentiable-superdex"
 
 [tool.uv]
 managed = false

@@ -44,13 +44,12 @@ low-level. :class:`DifferentiableRollout` wraps it into one object that
   gradient of an inherited (not re-set) target back to the step that set it.
 
 Requirements are those of ``diffsim`` itself: rigid, articulated,
-standalone soft and rod actors (soft and rod contact against static colliders
-only; a rod's initial state exposes its nodal velocities, 4 per node),
-Backward Euler, double precision recommended (the driver also runs on the
-single-precision build; gradients are then float32-accurate), and the
-per-step protocol -
-inputs are applied first, then the pre-step state is captured, then the scene
-steps (no input changes in between).
+standalone soft and rod actors (a rod's initial state exposes its nodal
+velocities, 4 per node), Backward Euler, double precision recommended (the
+driver also runs on the single-precision build, with float32-accurate
+gradients), and the per-step protocol: inputs are applied first, then the
+pre-step state is captured, then the scene steps, with no input changes in
+between.
 
 Example::
 
@@ -59,12 +58,12 @@ Example::
         apply_inputs=lambda step: actor.set_articulated_target_pose(plan[step]),
         terminal_losses=[my_loss],
     )
-    grad_plan = result.control_gradients[actor_name]  # (num_dofs, num_steps)
+    grad_plan = result.gradients[actor.get_name()].control_targets  # (num_dofs, num_steps)
 
-Losses are objects with two methods: ``value() -> float`` and
-``accumulate_output_grad() -> None`` (the latter calls diffsim output-backward
-functions such as ``get_center_of_mass_transform_backward``); they are
-evaluated on the live scene state.
+Losses are objects with two methods, ``value() -> float`` and
+``accumulate_output_grad() -> None``; the latter calls the diffsim output
+adjoints such as ``get_center_of_mass_transform_backward``. See
+:meth:`DifferentiableRollout.run` for when each is called.
 """
 
 from __future__ import annotations

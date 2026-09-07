@@ -20,12 +20,12 @@ torch policy maps the observed state to the controller targets and/or the
 external forces - joint torques - at every step, and the policy parameters
 receive the loss gradient, feedback path included).
 
-:class:`TorchRollout` wraps a fixed scene + rollout schedule + loss into a
-callable that maps input tensors to a scalar ``torch.Tensor`` loss, with the
+:class:`TorchRollout` wraps a scene, a rollout schedule and a loss into a
+callable that maps input tensors to a scalar ``torch.Tensor``, with the
 backward pass served by the engine's discrete adjoint
-(:class:`superdex.physics.diffsim_rollout.DifferentiableRollout`). That makes
-the simulator a node in a torch autograd graph: upstream networks (policies
-producing controls, parameter encoders, ...) receive exact simulation
+(:class:`superdex.physics.diffsim_rollout.DifferentiableRollout`). The
+simulator becomes a node of the autograd graph: networks upstream of it
+(policies producing controls, parameter encoders) receive exact simulation
 gradients, and torch optimizers drive them.
 
 Differentiable inputs (each group is opt-in at construction):
@@ -95,17 +95,8 @@ Design and contract:
   default ``1e-3``-ish tolerances, friction-heavy gradients can be off by
   several percent against finite differences.
 
-Every input group, torques included, passes ``torch.autograd.gradcheck``.
-The torque gradients of a standalone rigid actor need the adjoint operator to
-carry the moving-chart term of the external torque (the step residual is
-evaluated in the chart of the iterate itself, so the step Jacobian is the
-fixed-chart Hessian minus 1/2 [tau]x on the rotation block; the engine adds
-its transpose in the adjoint solve since 2026-09-05). Before that the torque
-and rotational gradients were off by half the rotation the torque induces in
-a step (2.2e-4 relative at 0.3 N*m, 8.6e-4 at 1.2 N*m on a free cube); now
-below 1e-8 at both, 1.4e-6 over five steps (``TorqueGradientTest``; finite
-differences at eps 1e-4 - at eps 1e-6 the quotients carry the forward Newton's
-stopping noise, 3e-5 at 1.2 N*m).
+Every input group, torques included, passes ``torch.autograd.gradcheck``
+(``test/diffsim/test_diffsim_torch.py``).
 
 Example::
 
