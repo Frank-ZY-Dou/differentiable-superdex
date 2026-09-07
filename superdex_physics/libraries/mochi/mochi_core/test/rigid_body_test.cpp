@@ -263,7 +263,7 @@ TEST(RigidBodyUtils, EvalTimeSteppedRotation) {
 
   real dt = 1e-3_r;
   vel.SetOmega({1.1_r, -0.7_r, 0.8_r});
-  vel.UpdateVSymIfDirty(dt);
+  vel.UpdateVSymIfDirty(dt, /*finiteDifferenceConsistent*/ true);
 
   // Small time-step
   testExtrapolation(dt);
@@ -271,11 +271,32 @@ TEST(RigidBodyUtils, EvalTimeSteppedRotation) {
 
   dt = 3e-1_r;
   vel.SetOmega({1.1_r, -0.7_r, 0.8_r});
-  vel.UpdateVSymIfDirty(dt);
+  vel.UpdateVSymIfDirty(dt, /*finiteDifferenceConsistent*/ true);
 
   // Large time-step
   testExtrapolation(dt);
   testAccurate(dt);
+}
+
+TEST(RigidBodyUtils, EvalTimeSteppedRotationDefaultDefinition) {
+  // With the default definition of the symmetric part (scenes that are not differentiable),
+  // EvalTimeSteppedRotation() is itself the rotation increment applied to R, and the
+  // finite-difference velocity of (R, Rnew) reproduces omega.
+  VMatrix3x3r R = Rodrigues(Vec4r{0.8_r, -1.2_r, 0.5_r});
+  RigidBodyVel vel;
+  for (real dt : {1e-3_r, 1e-2_r}) {
+    vel.SetOmega({1.1_r, -0.7_r, 0.8_r});
+    vel.UpdateVSymIfDirty(dt);
+    VMatrix3x3r Rnew = EvalTimeSteppedRotation(R, vel, dt);
+    EXPECT_TRUE(NearEqual(Determinant3x3(AsMatrixView(Rnew)), 1_r, 1e-5_r));
+    EXPECT_TRUE(NearEqual(
+        ToNdArray3x3(Dot3x3(Rnew, Transpose3x3(Rnew))), ToNdArray3x3(VEye<3>()), 1e-5_r));
+    RigidBodyVel velTest;
+    EvalFiniteDifferenceRotationVelocity(
+        QuaternionFromMatrix(R), QuaternionFromMatrix(Rnew), dt, velTest);
+    EXPECT_TRUE(NearEqual(
+        ToReal3(vel.GetOmegaAndVSym().first), ToReal3(velTest.GetOmegaAndVSym().first), 1e-5_r));
+  }
 }
 
 TEST(RigidBodyUtils, EvalFiniteDifferenceRotationVelocity) {
@@ -323,7 +344,7 @@ TEST(RigidBodyUtils, EvalFiniteDifferenceRotationVelocity) {
 
   real dt = 1e-2_r;
   vel.SetOmega({1.1_r, -0.7_r, 0.8_r});
-  vel.UpdateVSymIfDirty(dt);
+  vel.UpdateVSymIfDirty(dt, /*finiteDifferenceConsistent*/ true);
 
   // Small time-step approximate functions
   test(EvalTimeSteppedRotation, EvalFiniteDifferenceRotationVelocity, true, dt, 3e-2_r);
@@ -338,7 +359,7 @@ TEST(RigidBodyUtils, EvalFiniteDifferenceRotationVelocity) {
 
   dt = 3e-1_r;
   vel.SetOmega({1.1_r, -0.7_r, 0.8_r});
-  vel.UpdateVSymIfDirty(dt);
+  vel.UpdateVSymIfDirty(dt, /*finiteDifferenceConsistent*/ true);
 
   // Large time-step approximate functions. The test fails.
   test(EvalTimeSteppedRotation, EvalFiniteDifferenceRotationVelocity, true, dt, 3e-2_r);

@@ -1376,12 +1376,19 @@ void mochi::rigid::RecordState(
 void mochi::rigid::UpdateVSym(
     ecs::Included<TagRigidActor>,
     ecs::CtxGlobal<CSceneTime const> time,
+    ecs::OptionalCtxGlobal<TagDifferentiableScene const> differentiable,
     CRigidVel<TimeStep::Current>& outVel) {
-  // A finite-difference velocity of the previous step is re-expressed for this step's size (a
-  // no-op for uniform step sizes; see RigidBodyVel::RescaleRotationIncrement).
-  outVel.value.RescaleRotationIncrement(
-      static_cast<real>(time->DeltaTimePrev()), static_cast<real>(time->DeltaTime()));
-  outVel.value.UpdateVSymIfDirty(static_cast<real>(time->DeltaTime()));
+  // Differentiable scenes keep the finite-difference velocities consistent across steps: the
+  // previous step's velocity is re-expressed for this step's size (a no-op for uniform step
+  // sizes; see RigidBodyVel::RescaleRotationIncrement), and the symmetric part of an externally
+  // set velocity gets the finite-difference-consistent definition (see UpdateVSymIfDirty). Other
+  // scenes keep SuperDex's behavior unchanged.
+  bool const consistent = differentiable.value != nullptr;
+  if (consistent) {
+    outVel.value.RescaleRotationIncrement(
+        static_cast<real>(time->DeltaTimePrev()), static_cast<real>(time->DeltaTime()));
+  }
+  outVel.value.UpdateVSymIfDirty(static_cast<real>(time->DeltaTime()), consistent);
 }
 
 void mochi::rigid::TransportGradient(

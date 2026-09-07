@@ -245,7 +245,18 @@ class RigidBodyVel {
 
   // Warning: omega is the finite-difference velocity of a rotation increment only if |omega| < 1/h
   // (sin(theta) = h |omega|). This should be checked by the caller.
-  void UpdateVSymIfDirty(real h) {
+  //
+  // Two definitions of the symmetric part are available after an externally set omega. Both give
+  // the skew part h sk(w) and a rotation increment DR with sin(theta) = h |w|; they differ in the
+  // sign of the symmetric part, i.e. in which matrix EvalTimeSteppedRotation() produces:
+  // - the default (SuperDex's definition) makes EvalTimeSteppedRotation() itself the rotation DR;
+  // - finiteDifferenceConsistent gives omega and vsym the meaning SetFromFiniteDifferencePose()
+  //   gives them, so EvalTimeSteppedRotation() returns the extrapolation 2 R - Rold used on every
+  //   later step and the first step after an externally set velocity has the same structure as
+  //   all later steps. Differentiable scenes use it: with the default, the previous-delta variable
+  //   of the rigid-body merit is not a rotation on that first step and the adjoint's initial
+  //   angular-velocity gradient is off by O(h |w|).
+  void UpdateVSymIfDirty(real h, bool finiteDifferenceConsistent = false) {
     if (!_isVSymDirty) {
       return; // Nothing to do
     }
@@ -262,16 +273,13 @@ class RigidBodyVel {
     // Apply SVD to sk^2(w) = U S UT, and sym = U X UT:
     // The singular vectors are u = w/|w| and any two orthonormal vectors
     // x1 = 0; x2 = x3 = (1 - cos(theta)) / h = (1 - sqrt(1 - h^2 |w|^2)) / h
-    // (The former definition, x2 = x3 = (sqrt(1 - h^2 |w|^2) - 1) / h, made
-    // EvalTimeSteppedRotation() itself the rotation DR; that gave the first step after an
-    // externally set velocity a different structure from all later steps, and the previous-delta
-    // variable of the rigid-body merit was then not a rotation, so the adjoint's initial
-    // angular-velocity gradient was off by O(h |w|).)
+    // (The default definition, x2 = x3 = (sqrt(1 - h^2 |w|^2) - 1) / h, makes
+    // EvalTimeSteppedRotation() itself the rotation DR; see the note above.)
     // WARNING: We clamp the discriminant to zero, but valid omega should be checked by the caller.
     // Omega is valid if |w| < 1/h
     real normSqrOmega = NormSqr<3>(_omega);
     real disc = Max(0_r, 1_r - h * h * normSqrOmega);
-    real x = (1_r - Sqrt(disc)) / h;
+    real x = finiteDifferenceConsistent ? (1_r - Sqrt(disc)) / h : (Sqrt(disc) - 1_r) / h;
     VMatrix3x3r X = VDiagonalMatrix<3>(Vec4r{0_r, x, x});
     Vec4r u1 =
         NearEqual<3>(_omega, Vec4r{0_r, 0_r, 0_r}) ? Vec4r{1_r, 0_r, 0_r} : Normalize<3>(_omega);

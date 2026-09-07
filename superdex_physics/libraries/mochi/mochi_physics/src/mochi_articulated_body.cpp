@@ -16,6 +16,8 @@
 
 #include "mochi_articulated_body.h"
 
+#include "mochi_differentiable.h"
+
 #include "mochi_actor_convergence.h"
 #include "mochi_blended.h"
 #include "mochi_capture.h"
@@ -3084,13 +3086,16 @@ void articulated::compound::RecordState(
 void articulated::compound::UpdateVSym(
     ecs::Included<TagArticulatedActor>,
     ecs::CtxGlobal<CSceneTime const> time,
+    ecs::OptionalCtxGlobal<TagDifferentiableScene const> differentiable,
     CArticulatedJointVels<TimeStep::Current>& outJointVels) {
+  // See rigid::UpdateVSym: differentiable scenes only.
+  bool const consistent = differentiable.value != nullptr;
   for (auto& jointVel : outJointVels.value) {
-    // See rigid::UpdateVSym: the previous step's finite-difference joint velocity is re-expressed
-    // for this step's size (no-op for uniform step sizes).
-    jointVel.RescaleRotationIncrement(
-        static_cast<real>(time->DeltaTimePrev()), static_cast<real>(time->DeltaTime()));
-    jointVel.UpdateVSymIfDirty(static_cast<real>(time->DeltaTime()));
+    if (consistent) {
+      jointVel.RescaleRotationIncrement(
+          static_cast<real>(time->DeltaTimePrev()), static_cast<real>(time->DeltaTime()));
+    }
+    jointVel.UpdateVSymIfDirty(static_cast<real>(time->DeltaTime()), consistent);
   }
 }
 

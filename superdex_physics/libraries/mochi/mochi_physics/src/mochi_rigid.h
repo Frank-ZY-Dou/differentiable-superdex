@@ -396,6 +396,7 @@ void RecordState(
 void UpdateVSym(
     ecs::Included<TagRigidActor>,
     ecs::CtxGlobal<CSceneTime const> time,
+    ecs::OptionalCtxGlobal<TagDifferentiableScene const> differentiable,
     CRigidVel<TimeStep::Current>& outVel);
 
 /*

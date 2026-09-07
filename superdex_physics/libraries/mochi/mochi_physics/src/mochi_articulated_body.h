@@ -38,6 +38,10 @@
 #include <vector>
 
 namespace mochi {
+struct TagDifferentiableScene;
+}
+
+namespace mochi {
 
 // Forwards
 struct CDofOffset;
@@ -740,6 +744,7 @@ void RecordState(
 void UpdateVSym(
     ecs::Included<TagArticulatedActor>,
     ecs::CtxGlobal<CSceneTime const> time,
+    ecs::OptionalCtxGlobal<TagDifferentiableScene const> differentiable,
     CArticulatedJointVels<TimeStep::Current>& outJointVels);
 
 /*
