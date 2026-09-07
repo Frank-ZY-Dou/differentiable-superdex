@@ -515,37 +515,51 @@ class DifferentiableRollout:
         additional losses whose gradients are accumulated at that step of the
         reverse sweep (a running cost). At least one loss source is required.
 
-        Loss protocol: ``value()`` is called on the state the loss refers to
-        (each step's final state during the forward rollout for a running cost,
-        the final state for a terminal loss) and the values sum to the
-        objective; during the reverse sweep, with the step's state restored,
-        ``value()`` is called again right before ``accumulate_output_grad()``,
-        so a loss may cache whatever its gradient needs in ``value()`` - the
-        cache always belongs to the state being differentiated. A callable
-        ``step_losses`` may return fresh instances at every call or shared ones.
+        Loss protocol: ``step_losses(step)`` is called exactly once per step,
+        on that step's final state during the forward rollout, and the
+        instances it returns are the ones the sweep differentiates - a factory
+        may sample or consume data (targets, weights, minibatches) and still
+        defines a single objective. ``value()`` is called on the state the
+        loss refers to (each step's final state for a running cost, the final
+        state for a terminal loss) and the values sum to the objective; during
+        the reverse sweep, with the step's state restored, ``value()`` is
+        called again right before ``accumulate_output_grad()``, so a loss may
+        cache whatever its gradient needs in ``value()`` - the cache always
+        belongs to the state being differentiated. The factory may return
+        fresh instances at every call or shared ones.
         """
         if not terminal_losses and step_losses is None:
             raise ValueError("provide terminal_losses and/or step_losses")
         terminal_losses = list(terminal_losses or [])
 
-        # The running costs are evaluated live, on each step's final state (the objective is
-        # the whole trajectory's whatever the truncation window); the sweep only accumulates
-        # their gradients.
+        # ``step_losses(step)`` is called exactly once per step, on the step's final state
+        # during the forward rollout: the instances it returns are evaluated there (the
+        # objective is the whole trajectory's whatever the truncation window) and kept for
+        # the sweep, which differentiates those same instances - a factory that samples or
+        # consumes data (targets, weights, minibatches) defines one objective, and its
+        # gradient is that objective's.
+        step_loss_lists: dict[int, list] = {}
         running_total = [0.0]
 
         def on_step_end(step: int) -> None:
             if step_losses is not None:
-                running_total[0] += sum(loss.value() for loss in step_losses(step))
+                losses = list(step_losses(step))
+                step_loss_lists[step] = losses
+                running_total[0] += sum(loss.value() for loss in losses)
 
         records = self._forward(apply_inputs, on_step_end)
         try:
-            return self._sweep(records, terminal_losses, step_losses, running_total[0])
+            return self._sweep(records, terminal_losses, step_loss_lists, running_total[0])
         finally:
             # Every capture is released whatever raised: a loss, the adjoint, a reader.
             self._release(records)
 
     def _sweep(
-        self, records: list[_StepRecord], terminal_losses: list, step_losses, running_total: float
+        self,
+        records: list[_StepRecord],
+        terminal_losses: list,
+        step_loss_lists: dict[int, list],
+        running_total: float,
     ) -> RolloutResult:
         """The reverse adjoint sweep over ``records`` (owned by the caller)."""
         loss_value = sum(loss.value() for loss in terminal_losses) + running_total
@@ -597,11 +611,11 @@ class DifferentiableRollout:
             if k == len(records) - 1:
                 for loss in terminal_losses:
                     loss.accumulate_output_grad()
-            if step_losses is not None and last_of_step:
-                for loss in step_losses(record.step):
-                    # value() right before the gradient, on the restored step: a loss may
-                    # cache its derivative context in value() (the objective took the live
-                    # values during the forward rollout; this one is discarded).
+            if last_of_step:
+                for loss in step_loss_lists.get(record.step, ()):
+                    # The forward rollout's instances. value() right before the gradient,
+                    # on the restored step: a loss may cache its derivative context in
+                    # value() (the objective took the live values; this one is discarded).
                     loss.value()
                     loss.accumulate_output_grad()
             diffsim.back_propagate(self.scene)

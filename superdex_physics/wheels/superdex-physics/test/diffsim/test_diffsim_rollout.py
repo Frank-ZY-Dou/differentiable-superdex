@@ -1132,3 +1132,125 @@ class AdaptiveSnapshotLifetimeTest(unittest.TestCase):
             self.assertEqual(len(captured), 1, where)
             self.assertEqual(_live_handles(scene, captured), [], where)
 
+
+class LossFactoryReplayTest(unittest.TestCase):
+    """``step_losses(step)`` is called exactly once per step, during the forward rollout, and
+    the sweep differentiates the instances it returned (finding R3-1 of the third release
+    review: the factory was called again in the sweep, so a factory that samples or consumes
+    data - targets, weights, minibatches - had its value and its gradient taken from two
+    different objectives, 2.9x apart in the reviewer's case, and an iterator-backed factory
+    ran dry). The finite-difference references below hold the targets the forward rollout
+    actually drew."""
+
+    N, DT_FREE = 6, 0.05
+
+    def _free_fall(self):
+        scene, cube = scenes.rigid_free()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        cube.set_velocity([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+        return scene, cube
+
+    def _check_factory(self, make_factory) -> None:
+        scene, cube = self._free_fall()
+        initial = scene.capture_state()
+        dofs = np.arange(6, dtype=np.int32)
+        forces = np.zeros((self.N, 6))
+        calls, refs = [], []
+        factory = make_factory(cube, calls, refs)
+
+        def apply(step):
+            cube.set_external_forces_on_dofs(dofs, np.ascontiguousarray(forces[step]))
+
+        result = DifferentiableRollout(scene, dt=self.DT_FREE, num_steps=self.N).run(
+            apply_inputs=apply, step_losses=factory
+        )
+        self.assertEqual(calls, list(range(self.N)))  # once per step, in order
+        analytic = float(result.gradients["cube"].external_forces[2, 0])
+
+        def objective():
+            total = 0.0
+            for step in range(self.N):
+                apply(step)
+                scene.step(self.DT_FREE)
+                total += TranslationErrorLoss(cube, ref=refs[step]).value()
+            return total
+
+        steps, tol = ((1e-4, 1e-5), 1e-6) if DOUBLE else ((1e-1, 5e-2), 5e-3)
+        fds = []
+        for eps in steps:
+            values = []
+            for sign in (1.0, -1.0):
+                scene.restore_state(initial, False)
+                forces[0, 2] = sign * eps
+                values.append(objective())
+            fds.append((values[0] - values[1]) / (2 * eps))
+        forces[0, 2] = 0.0
+        scene.restore_state(initial, False)
+        recorded = objective()
+        scene.release_all_states()
+        self.assertAlmostEqual(result.loss, recorded, delta=1e-12 * max(1.0, abs(recorded)))
+        self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), tol, fds)
+        self.assertLessEqual(abs(analytic - fds[0]) / abs(fds[0]), tol, (analytic, fds))
+
+    def test_sampling_factory(self) -> None:
+        def make(cube, calls, refs):
+            rng = np.random.default_rng(42)
+
+            def factory(step):
+                target = rng.uniform(0.0, 2.0, 3)
+                calls.append(step)
+                refs.append(target.copy())
+                return [TranslationErrorLoss(cube, ref=target)]
+
+            return factory
+
+        self._check_factory(make)
+
+    def test_iterator_backed_factory(self) -> None:
+        def make(cube, calls, refs):
+            targets = iter(np.random.default_rng(7).uniform(0.0, 2.0, (self.N, 3)))
+
+            def factory(step):
+                target = next(targets)  # a second pass would run dry
+                calls.append(step)
+                refs.append(target.copy())
+                return [TranslationErrorLoss(cube, ref=target)]
+
+            return factory
+
+        self._check_factory(make)
+
+    def test_truncated_sweep_and_adaptive_substeps_call_the_factory_once_per_step(self) -> None:
+        reference = None
+        for window, adaptive in ((None, False), (2, False), (None, True)):
+            scene, cube = self._free_fall()
+            calls = []
+
+            def factory(step):
+                calls.append(step)
+                return [TranslationErrorLoss(cube, ref=np.array([0.1, 0.2, 0.3]))]
+
+            kwargs = dict(max_substep_levels=1, substep_residual_tolerance=1e-6) if adaptive else {}
+            if adaptive:
+                # The first step is declared failed once and redone as two half steps.
+                patch = mock.patch.object(
+                    diffsim_rollout, "forward_solve_failed", side_effect=[True] + [False] * 20
+                )
+            else:
+                patch = mock.patch.object(
+                    diffsim_rollout, "forward_solve_failed", wraps=diffsim_rollout.forward_solve_failed
+                )
+            with patch:
+                result = DifferentiableRollout(
+                    scene, dt=self.DT_FREE, num_steps=self.N, truncation_window=window, **kwargs
+                ).run(step_losses=factory)
+            self.assertEqual(calls, list(range(self.N)), (window, adaptive))
+            if adaptive:
+                # The split changes the trajectory (Backward Euler at another step size), not
+                # the number of factory calls.
+                self.assertEqual(result.split_steps, [(0, 2)])
+            elif window is None:
+                reference = result.loss
+            else:
+                self.assertEqual(result.loss, reference, (window, adaptive))

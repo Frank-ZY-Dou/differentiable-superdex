@@ -75,6 +75,13 @@ Design and contract:
   than converted.
 - A group declared at construction requires its tensor at every call, and a
   tensor for an undeclared group is rejected: there are no implicit defaults.
+- Every actor of a group belongs to the bridge's scene and appears once in
+  that group (identity by handle; names only label the gradient results): an
+  actor of another scene, even with the same name, and a repeated actor are
+  rejected at construction. One actor may sit in several different groups.
+- ``step_losses(step)`` is called once per step, during the forward rollout;
+  the sweep differentiates the instances it returned (a factory may sample or
+  consume data and still defines one objective).
 - Losses follow the ``diffsim_rollout`` protocol (``value()`` and
   ``accumulate_output_grad()``); they are part of the bridge, not tensors, so
   the loss shape itself is fixed at construction.
@@ -200,6 +207,39 @@ def _soft_material_set(params, field: str, value: float) -> None:
         setattr(params, field, value)
 
 
+def _same_scene(actor, scene) -> bool:
+    owner = actor.get_scene()
+    return owner is scene or owner.get_handle() == scene.get_handle()
+
+
+def _check_group(scene, actors, role: str) -> None:
+    """Every actor of a declared input group belongs to ``scene`` and appears once.
+
+    A bridge differentiates the scene it was built for: an actor of another scene (a
+    matching name is not an identity - batched scenes reuse names) would be simulated in
+    one scene and mutated or read in the other. Each entry of a group is an independent
+    input block applied in order, so a repeated actor would have its earlier block
+    overwritten while still receiving a gradient.
+    """
+    seen = set()
+    for actor in actors:
+        name = actor.get_name()
+        if not _same_scene(actor, scene):
+            raise ValueError(
+                f"{role} actor {name!r} belongs to another scene "
+                f"({actor.get_scene().get_name()!r}); a bridge differentiates the scene it "
+                "was built for"
+            )
+        handle = actor.get_handle()
+        if handle in seen:
+            raise ValueError(
+                f"{role} actor {name!r} is declared twice in the {role} group; each entry "
+                "is an independent input block and a repeated actor's earlier block would be "
+                "overwritten"
+            )
+        seen.add(handle)
+
+
 def _require_double_precision() -> None:
     """The bridge's tensors are float64 because the engine simulates in double precision;
     the single-precision build would return float32-accurate gradients as float64 tensors."""
@@ -301,16 +341,28 @@ class TorchRollout:
             max_substep_levels=max_substep_levels,
             substep_residual_tolerance=substep_residual_tolerance,
         )
-        by_name = {entry.name: entry for entry in self._rollout.entries}
+        # Actors are resolved by identity (handle), never by name: names label the
+        # gradient dictionaries only. Every group is validated before any state is
+        # captured or any parameter touched.
+        for role, group in (
+            ("control", control_actors),
+            ("force", force_actors),
+            ("contact", contact_actors),
+            ("density", density_actors),
+            ("initial-state", initial_state_actors),
+            ("soft-material", soft_material_actors),
+        ):
+            _check_group(scene, group, role)
+        by_handle = {entry.actor.get_handle(): entry for entry in self._rollout.entries}
 
         def _entry(actor, role: str):
-            name = actor.get_name()
-            if name not in by_name:
+            entry = by_handle.get(actor.get_handle())
+            if entry is None:
                 raise ValueError(
-                    f"{role} actor {name!r} is not a dynamic actor of this "
+                    f"{role} actor {actor.get_name()!r} is not a dynamic actor of this "
                     "scene (static and nested-link actors are not supported)"
                 )
-            return by_name[name]
+            return entry
 
         self._control_actors = []
         for actor in control_actors:
@@ -838,19 +890,31 @@ class PolicyRollout:
             max_substep_levels=max_substep_levels,
             substep_residual_tolerance=substep_residual_tolerance,
         )
-        by_name = {entry.name: entry for entry in self._driver.entries}
+        # Actors are resolved by identity (handle), never by name (see _check_group); the
+        # observations' actors must belong to this scene as well.
+        _check_group(scene, control_actors, "control")
+        _check_group(scene, force_actors, "force")
+        for observation in self.observations:
+            actor = getattr(observation, "actor", None)
+            if actor is not None and not _same_scene(actor, scene):
+                raise ValueError(
+                    f"observation of actor {actor.get_name()!r} of another scene "
+                    f"({actor.get_scene().get_name()!r}); a policy rollout observes the scene "
+                    "it was built for"
+                )
+        by_handle = {entry.actor.get_handle(): entry for entry in self._driver.entries}
         self._control_entries = []
         for actor in control_actors:
-            name = actor.get_name()
-            if name not in by_name or not by_name[name].has_controller:
-                raise ValueError(f"control actor {name!r} has no pose controller")
-            self._control_entries.append(by_name[name])
+            entry = by_handle.get(actor.get_handle())
+            if entry is None or not entry.has_controller:
+                raise ValueError(f"control actor {actor.get_name()!r} has no pose controller")
+            self._control_entries.append(entry)
         self._force_entries = []
         for actor in force_actors:
-            name = actor.get_name()
-            if name not in by_name or not by_name[name].force_dofs:
-                raise ValueError(f"force actor {name!r} takes no external forces")
-            self._force_entries.append(by_name[name])
+            entry = by_handle.get(actor.get_handle())
+            if entry is None or not entry.force_dofs:
+                raise ValueError(f"force actor {actor.get_name()!r} takes no external forces")
+            self._force_entries.append(entry)
         self.target_size = sum(e.dofs_size for e in self._control_entries)
         self.force_size = sum(len(e.force_dofs) for e in self._force_entries)
         self.control_size = self.target_size + self.force_size
@@ -957,6 +1021,10 @@ class PolicyRollout:
         obs_history = [self._observe()] * self.history  # newest first
         graphs = []  # (obs_tensor, control_tensor) per step
         records: list[_StepRecord] = []
+        # step_losses(step) is called once per step, on the step's final state; the sweep
+        # differentiates those instances (see DifferentiableRollout.run).
+        step_loss_lists: dict[int, list] = {}
+        running_total = 0.0
         try:
             for step in range(self.num_steps):
                 obs = np.concatenate(obs_history[: self.history])
@@ -992,12 +1060,16 @@ class PolicyRollout:
                             _StepRecord(step, sub_dt, pre, post)
                         ),
                     )
+                if self._step_losses is not None:
+                    losses = list(self._step_losses(step))
+                    step_loss_lists[step] = losses
+                    running_total += sum(loss.value() for loss in losses)
                 obs_history.insert(0, self._observe())
         except BaseException:
             driver._release(records)
             raise
         try:
-            loss_value = sum(loss.value() for loss in self._terminal_losses)
+            loss_value = sum(loss.value() for loss in self._terminal_losses) + running_total
 
             # Reverse sweep. pending[k] is the gradient to inject at the state after step k
             # (the observation the policy used for later steps); the initial state (k = -1) is
@@ -1018,10 +1090,9 @@ class PolicyRollout:
                     for loss in self._terminal_losses:
                         loss.accumulate_output_grad()
                 if last_of_step:
-                    if self._step_losses is not None:
-                        for loss in self._step_losses(record.step):
-                            loss_value += loss.value()
-                            loss.accumulate_output_grad()
+                    for loss in step_loss_lists.get(record.step, ()):
+                        loss.value()  # the restored step's derivative context
+                        loss.accumulate_output_grad()
                     if record.step in pending:
                         self._inject_observation_grad(pending.pop(record.step))
                 diffsim.back_propagate(scene)

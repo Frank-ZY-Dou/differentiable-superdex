@@ -1874,3 +1874,219 @@ class PolicyRolloutAdaptiveLifetimeTest(unittest.TestCase):
             live.append(handle)
         self.assertEqual(live, [])
 
+
+class LossFactoryReplayBridgeTest(unittest.TestCase):
+    """The bridges call ``step_losses(step)`` once per step and differentiate the instances of
+    the forward rollout (finding R3-1 of the third release review)."""
+
+    N, DT_FREE = 6, 0.05
+
+    def _free_fall(self):
+        scene, cube = scenes.rigid_free()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        cube.set_velocity([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+        return scene, cube
+
+    def test_torch_rollout_sampling_factory_vs_fd_of_the_recorded_objective(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, cube = self._free_fall()
+        rng = np.random.default_rng(42)
+        calls, refs = [], []
+
+        def factory(step):
+            target = rng.uniform(0.0, 2.0, 3)
+            calls.append(step)
+            refs.append(target.copy())
+            return [TranslationErrorLoss(cube, ref=target)]
+
+        bridge = diffsim_torch.TorchRollout(
+            scene, dt=self.DT_FREE, num_steps=self.N, force_actors=[cube], step_losses=factory
+        )
+        self.addCleanup(bridge.close)
+        forces = torch.zeros((self.N, 6), dtype=torch.float64, requires_grad=True)
+        value = bridge(forces=forces)
+        value.backward()
+        self.assertEqual(calls, list(range(self.N)))
+        analytic = float(forces.grad[0, 2])
+        # The recorded objective, re-simulated directly with the drawn targets held fixed.
+        initial = bridge._state_init
+        dofs = np.arange(6, dtype=np.int32)
+        fds = []
+        for eps in (1e-4, 1e-5):
+            values = []
+            for sign in (1.0, -1.0):
+                scene.restore_state(initial, False)
+                total = 0.0
+                for step in range(self.N):
+                    f = np.zeros(6)
+                    if step == 0:
+                        f[2] = sign * eps
+                    cube.set_external_forces_on_dofs(dofs, f)
+                    scene.step(self.DT_FREE)
+                    total += TranslationErrorLoss(cube, ref=refs[step]).value()
+                values.append(total)
+            fds.append((values[0] - values[1]) / (2 * eps))
+        self.assertLessEqual(abs(fds[0] - fds[1]) / abs(fds[0]), 1e-6, fds)
+        self.assertLessEqual(abs(analytic - fds[0]) / abs(fds[0]), 1e-6, (analytic, fds))
+
+    def test_policy_rollout_consuming_factory_matches_the_deterministic_one(self) -> None:
+        """An iterator-backed factory (called once per step, in order) gives the objective and
+        the policy gradient of the equivalent per-step-indexed factory, bit for bit."""
+        diffsim_torch = _make_bridge_module()
+        targets = np.random.default_rng(3).uniform(0.0, 2.0, (self.N, 3))
+        results = []
+        for consuming in (False, True):
+            scene, cube = self._free_fall()
+            policy = torch.nn.Linear(3, 6).double()
+            with torch.no_grad():
+                policy.weight.zero_()
+                policy.bias.copy_(torch.tensor([0.1, 0.0, 0.3, 0.0, 0.0, 0.0], dtype=torch.float64))
+            calls = []
+            stream = iter(targets)
+
+            def factory(step, consuming=consuming, stream=stream, calls=calls, cube=cube):
+                calls.append(step)
+                target = next(stream) if consuming else targets[step]
+                return [TranslationErrorLoss(cube, ref=target)]
+
+            rollout = diffsim_torch.PolicyRollout(
+                scene,
+                dt=self.DT_FREE,
+                num_steps=self.N,
+                policy=policy,
+                observations=[diffsim_torch.TranslationObservation(cube)],
+                force_actors=[cube],
+                step_losses=factory,
+            )
+            self.addCleanup(rollout.close)
+            value = rollout()
+            value.backward()
+            self.assertEqual(calls, list(range(self.N)))
+            results.append((value.item(), policy.bias.grad.numpy().copy()))
+        self.assertEqual(results[0][0], results[1][0])
+        np.testing.assert_array_equal(results[0][1], results[1][1])
+        self.assertGreater(float(np.abs(results[0][1]).max()), 0.0)
+
+
+class BridgeActorValidationTest(unittest.TestCase):
+    """Every actor of a declared input group must belong to the bridge's scene and appear once
+    in that group; actors are resolved by identity, names only label the gradients (findings
+    R3-2 and R3-3 of the third release review: a repeated force actor had its earlier block
+    overwritten while both blocks received the gradient; an actor of another scene with the
+    same name was silently replaced by this scene's actor, and a foreign contact actor was
+    mutated in its own scene and reported that scene's stale gradient)."""
+
+    def _two_scenes(self, foreign_name: str):
+        scene_a, cube_a = scenes.rigid_on_plane("coulomb")
+        self.addCleanup(physics.destroy_scene, scene_a)
+        scene_b = physics.create_scene("other_scene")
+        self.addCleanup(physics.destroy_scene, scene_b)
+        scene_b.set_gravity([0.0, 0.0, -9.81])
+        cp = scenes.contact_params("coulomb")
+        scene_b.create_rigid_actor(
+            name="ground", shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+            is_static=True, contact=cp,
+        )
+        cube_b = scene_b.create_rigid_actor(
+            name=foreign_name, shape=scenes.cube_shape(), density=1000.0, contact=cp,
+            world_from_local=physics.TransformRT([0.0, 0.0, 0.099]),
+        )
+        configure_for_differentiability(scene_a)
+        configure_for_differentiability(scene_b)
+        return scene_a, cube_a, scene_b, cube_b
+
+    def test_duplicate_actors_are_rejected_in_every_group(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, cube = scenes.rigid_on_plane("coulomb")
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        loss = TranslationErrorLoss(cube)
+        for group in ("force_actors", "contact_actors", "density_actors"):
+            with self.assertRaisesRegex(ValueError, "declared twice"):
+                diffsim_torch.TorchRollout(scene, dt=DT, num_steps=2, terminal_losses=[loss], **{group: [cube, cube]})
+        with self.assertRaisesRegex(ValueError, "declared twice"):
+            diffsim_torch.PolicyRollout(
+                scene, dt=DT, num_steps=2, policy=torch.nn.Linear(3, 12).double(),
+                observations=[diffsim_torch.TranslationObservation(cube)],
+                force_actors=[cube, cube], terminal_losses=[loss],
+            )
+        chain_scene, chain = scenes.pendulum(with_controller=True)
+        self.addCleanup(physics.destroy_scene, chain_scene)
+        configure_for_differentiability(chain_scene)
+        chain_loss = ArticulatedPoseErrorLoss(chain, ref=np.zeros(chain.get_num_dofs()))
+        with self.assertRaisesRegex(ValueError, "declared twice"):
+            diffsim_torch.TorchRollout(chain_scene, dt=DT, num_steps=2, control_actors=[chain, chain], terminal_losses=[chain_loss])
+        with self.assertRaisesRegex(ValueError, "declared twice"):
+            diffsim_torch.PolicyRollout(
+                chain_scene, dt=DT, num_steps=2,
+                policy=torch.nn.Linear(chain.get_num_dofs(), 2 * chain.get_num_dofs()).double(),
+                observations=[diffsim_torch.ArticulatedPoseObservation(chain)],
+                control_actors=[chain, chain], terminal_losses=[chain_loss],
+            )
+        soft_scene, soft = scenes.soft_cube()
+        self.addCleanup(physics.destroy_scene, soft_scene)
+        configure_for_differentiability(soft_scene)
+        soft_loss = DisplacementErrorLoss(soft)
+        for group in ("initial_state_actors", "soft_material_actors"):
+            with self.assertRaisesRegex(ValueError, "declared twice"):
+                diffsim_torch.TorchRollout(soft_scene, dt=DT, num_steps=2, terminal_losses=[soft_loss], **{group: [soft, soft]})
+
+    def test_one_actor_in_several_groups_is_fine(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, cube = scenes.rigid_on_plane("coulomb")
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        bridge = diffsim_torch.TorchRollout(
+            scene, dt=DT, num_steps=3, force_actors=[cube], contact_actors=[cube], density_actors=[cube],
+            terminal_losses=[TranslationErrorLoss(cube)],
+        )
+        self.addCleanup(bridge.close)
+        cp = cube.get_contact_params()
+        forces = torch.zeros((3, 6), dtype=torch.float64, requires_grad=True)
+        params = torch.tensor(
+            [[getattr(cp, f) for f in diffsim_torch.CONTACT_PARAM_FIELDS]], dtype=torch.float64, requires_grad=True
+        )
+        density = torch.tensor([1000.0], dtype=torch.float64, requires_grad=True)
+        bridge(forces=forces, contact_params=params, densities=density).backward()
+        for tensor in (forces, params, density):
+            self.assertGreater(float(tensor.grad.abs().max()), 0.0)
+
+    def test_foreign_actors_are_rejected_without_touching_either_scene(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        from superdex.physics.diffsim_rollout import DifferentiableRollout
+
+        for foreign_name in ("cube", "other"):
+            scene_a, cube_a, scene_b, cube_b = self._two_scenes(foreign_name)
+            # A gradient left in scene B by its own rollout must not be reported by a bridge of A.
+            DifferentiableRollout(scene_b, dt=DT, num_steps=2).run(terminal_losses=[TranslationErrorLoss(cube_b)])
+            before_b = cube_b.get_contact_params().coulomb_friction_coefficient
+            before_a = cube_a.get_contact_params().coulomb_friction_coefficient
+            captures = []
+            real_capture = type(scene_a).capture_state
+
+            def capture(self_scene):
+                captures.append(1)
+                return real_capture(self_scene)
+
+            loss = TranslationErrorLoss(cube_a)
+            with mock.patch.object(type(scene_a), "capture_state", capture):
+                for group in ("force_actors", "contact_actors", "density_actors"):
+                    with self.assertRaisesRegex(ValueError, "another scene"):
+                        diffsim_torch.TorchRollout(scene_a, dt=DT, num_steps=2, terminal_losses=[loss], **{group: [cube_b]})
+                with self.assertRaisesRegex(ValueError, "another scene"):
+                    diffsim_torch.PolicyRollout(
+                        scene_a, dt=DT, num_steps=2, policy=torch.nn.Linear(3, 6).double(),
+                        observations=[diffsim_torch.TranslationObservation(cube_a)],
+                        force_actors=[cube_b], terminal_losses=[loss],
+                    )
+                with self.assertRaisesRegex(ValueError, "another scene"):
+                    diffsim_torch.PolicyRollout(
+                        scene_a, dt=DT, num_steps=2, policy=torch.nn.Linear(3, 6).double(),
+                        observations=[diffsim_torch.TranslationObservation(cube_b)],
+                        force_actors=[cube_a], terminal_losses=[loss],
+                    )
+            self.assertEqual(captures, [], "rejected before any state was captured")
+            self.assertEqual(cube_b.get_contact_params().coulomb_friction_coefficient, before_b)
+            self.assertEqual(cube_a.get_contact_params().coulomb_friction_coefficient, before_a)
+            scene_b.release_all_states()
