@@ -1662,6 +1662,27 @@ class EngineContactForceAdjointTest(unittest.TestCase):
             )
             self.assertLessEqual(rel, 1e-5, (label, rel))
 
+    def test_rod_samples_are_exact(self) -> None:
+        """The force on a rigid cube that a rod is dropped on (scenes.rod_onto_cube: the rod's
+        centerline samples against the cube's SDF, the cube sliding on a frictionless ground),
+        driven by external forces on the cube, against the cube's kinematic identity. The rod's
+        samples reach its nodes (three displacements and a twist per node) through the segment
+        interpolation, the same map as a soft body's samples (2026-09-06)."""
+        def build():
+            scene, rod, cube = scenes.rod_onto_cube(cube_velocity=(0.3, 0.0, 0.0))
+            configure_for_differentiability(scene)
+            cube.register_query(physics.QueryType.TOTAL_CONTACT_FORCE)
+            return scene, cube, cube
+
+        dofs = np.arange(6, dtype=np.int32)
+        forces = np.zeros((self.NUM_STEPS, 6))
+        forces[:, 0] = np.linspace(1.0, 4.0, self.NUM_STEPS)
+        forces[:, 4] = 0.1
+        rel = self._engine_vs_kinematic(
+            build, "cube", lambda a, u: a.set_external_forces_on_dofs(dofs, np.ascontiguousarray(u)), forces, True
+        )
+        self.assertLessEqual(rel, 1e-5, rel)
+
     def test_moving_collider_is_exact(self) -> None:
         """A rigid pusher (pushed and tilted by external forces) against the target cube, with
         and without Coulomb friction (measured 12-15% before the rotation term, 5e-8 to 3e-7

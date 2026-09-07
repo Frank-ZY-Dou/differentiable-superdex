@@ -28,6 +28,7 @@
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <string_view>
 #include <memory>
 #include <random>
 #include <string>
@@ -859,6 +860,64 @@ TEST(MochiContact, FindPointContacts_BoxMesh) {
   constexpr real kAngleTolForRotatedCases = 0.06_r; // about 3.5 deg
   TestPointContactsBoxVariations<MeshCollider>(
       factory, kAngleTolForRotatedCases, true, GetRotationsToTest());
+}
+
+// The Hessian of a mesh collider's signed distance (QueryPoint's optional output, by the
+// closest feature) against central differences of its gradient, at points whose closest
+// feature is a face (zero Hessian), an edge or a node of a box mesh, outside and inside.
+TEST(MochiContact, MeshCollider_SignedDistanceHessianMatchesGradientDifferences) {
+  MeshCollider collider(CreateTriangularMeshBox(Quaternion{}, Real3{}, Real3{0.1_r, 0.1_r, 0.1_r}));
+  collider.Initialize();
+  ContactDetectionParams params;
+  params.tolerance = std::numeric_limits<real>::infinity();
+  auto query = [&](Real3 const& point, Matrix3x3r* hess) {
+    Vec4r outPos = {};
+    real sdf = {};
+    Vec4r grad = {};
+    EXPECT_TRUE(collider.QueryPoint(ToSimd(point, 1_r), params, outPos, sdf, grad, hess));
+    return std::pair{sdf, ToReal3(grad)};
+  };
+  struct Case {
+    Real3 point;
+    char const* feature;
+  };
+  Case const cases[] = {
+      {{0.03_r, -0.02_r, 0.15_r}, "face, outside"},
+      {{0.03_r, -0.02_r, 0.08_r}, "face, inside"},
+      {{0.13_r, -0.02_r, 0.14_r}, "edge, outside"},
+      {{0.13_r, 0.14_r, 0.15_r}, "node, outside"},
+  };
+  real constexpr h = 1e-6_r;
+  for (auto const& c : cases) {
+    Matrix3x3r hess = {};
+    auto const [sdf, grad] = query(c.point, &hess);
+    SCOPED_TRACE(c.feature);
+    real const scale = 1_r / std::abs(sdf); // the Hessian's magnitude off a face
+    for (int a = 0; a < 3; ++a) {
+      Real3 plus = c.point;
+      Real3 minus = c.point;
+      plus[a] += h;
+      minus[a] -= h;
+      auto const gradPlus = query(plus, nullptr).second;
+      auto const gradMinus = query(minus, nullptr).second;
+      for (int r = 0; r < 3; ++r) {
+        real const fd = (gradPlus[r] - gradMinus[r]) / (2_r * h);
+        EXPECT_NEAR(hess[r][a], fd, 1e-5_r * scale) << "entry (" << r << ", " << a << ")";
+      }
+    }
+    if (std::string_view(c.feature).starts_with("face")) {
+      for (int r = 0; r < 3; ++r) {
+        for (int col = 0; col < 3; ++col) {
+          EXPECT_EQ(hess[r][col], 0_r);
+        }
+      }
+    }
+    for (int r = 0; r < 3; ++r) {
+      for (int col = 0; col < 3; ++col) {
+        EXPECT_NEAR(hess[r][col], hess[col][r], 1e-12_r * scale);
+      }
+    }
+  }
 }
 
 // Helper function to load the corase duck mesh

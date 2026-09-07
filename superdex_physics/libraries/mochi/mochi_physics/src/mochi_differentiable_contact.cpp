@@ -20,6 +20,7 @@
 #include "mochi_contact.h"
 #include "mochi_discretization_components.h"
 #include "mochi_rigid.h"
+#include "mochi_rod.h"
 
 #include <mochi_core/contact/dmap.h>
 #include <mochi_core/geometry/tetrahedral_map.h>
@@ -358,30 +359,32 @@ static void AccumulateAllSyncRigidContactForceAdjoints(
   }
 }
 
-// The force adjoints of a soft actor's samples (the quadrature points of its boundary
-// elements) against a queried rigid collider. The samples' collider-space positions depend on
-// the soft's nodal DoFs through the boundary interpolation and the rigid pose, the same map the
-// contact assembly uses (deformable::SetupCollidingJacobians); it is rebuilt here for the pair
-// at the target time step, since the registered contact Jacobians belong to the last assembly.
-// The collider side is the rigid accumulation above (lever arms about the collider's center of
-// mass, the rotation of the forces with the collider).
-template <GradTarget kGradTarget>
-static void AccumulateAllSyncSoftCollidingForceAdjoints(
+// The force adjoints of a deformable actor's samples (the quadrature points of a soft body's
+// boundary elements, of a shell's surface elements, of a rod's centerline segments) against a
+// queried rigid collider. The samples' collider-space positions depend on the actor's nodal DoFs
+// through the element interpolation and the rigid pose, the same map the contact assembly uses
+// (deformable::SetupCollidingJacobians); it is rebuilt here for the pair at the target time step,
+// since the registered contact Jacobians belong to the last assembly. The collider side is the
+// rigid accumulation above (lever arms about the collider's center of mass, the rotation of the
+// forces with the collider).
+template <GradTarget kGradTarget, typename ActorTag, typename DiscretizationType, int kNumFields>
+static void AccumulateAllSyncDeformableCollidingForceAdjoints(
     entt::registry& reg,
-    CIslandDescendants const& descendants) {
+    Span<entt::entity const> actors) {
   MOCHI_PROFILE_SCOPE();
   TimeStep constexpr kTimeStep = GetTimeStep<kGradTarget>();
   bool constexpr kCurrent = kGradTarget == GradTarget::Current;
   ContactEvalConfig const configAllPairs =
       InitializeContactForceAdjointEvalConfig(reg.ctx<CSimulationParams const>());
   MOCHI_FILO_STACK_ALLOCATOR(allocator, 32 * 1024);
-  for (auto e : descendants.softActors) {
-    if (!reg.all_of<TagSoftActor>(e) || reg.any_of<TagNestedSoftActor, TagRomActor>(e)) {
+  for (auto e : actors) {
+    if (!reg.all_of<ActorTag>(e) ||
+        reg.any_of<TagNestedSoftActor, TagRomActor, TagRodSurfaceContact>(e)) {
       continue;
     }
     auto* activeCollisions =
         reg.try_get<CActiveCollisions<ContactType::Sync, TimeStep::Current>>(e);
-    auto const* discretization = reg.try_get<CFemBoundaryDiscretization const>(e);
+    auto const* discretization = reg.try_get<DiscretizationType const>(e);
     if (!activeCollisions || !discretization) {
       continue;
     }
@@ -409,13 +412,13 @@ static void AccumulateAllSyncSoftCollidingForceAdjoints(
       VMatrix3x3r const jacColliderFromWorld = ToVMatrix3x3Transpose(
           (kCurrent ? rootB.worldFromLocal : rootB.worldFromLocalStageStart).GetRotation());
       std::array<ContactJac, JacData::kMaxJacs> jacs;
-      dmap::DMapDeformable<3> dsoft(0, dofOffsetA);
+      dmap::DMapDeformable<kNumFields> dsoft(0, dofOffsetA);
       dmap::DMapRTConst dtransform(kCurrent ? rootA.worldFromLocal : rootA.worldFromLocalStageStart);
       discretization->Visit([&](auto const& discretizationImpl) {
         using DiscretizationT = std::decay_t<decltype(discretizationImpl)>;
         using DQuad = dmap::DMapQuad<typename DiscretizationT::ElementT>;
         DQuad dquad(discretizationImpl.femElements, MakeSingletonConstSpan(jacColliderFromWorld));
-        dmap::DMap<DQuad, dmap::DMapRTConst, dmap::DMapDeformable<3>> dmapPair(
+        dmap::DMap<DQuad, dmap::DMapRTConst, dmap::DMapDeformable<kNumFields>> dmapPair(
             &dquad, &dtransform, &dsoft);
         dmapPair.GetJac(query.sampleIndices, jacs);
       });
@@ -489,7 +492,21 @@ static void AccumulateIslandContactForceAdjoints(
 
   // Handle sync contact per island
   AccumulateAllSyncRigidContactForceAdjoints<kGradTarget>(reg, descendants.rigidActors);
-  AccumulateAllSyncSoftCollidingForceAdjoints<kGradTarget>(reg, descendants);
+  AccumulateAllSyncDeformableCollidingForceAdjoints<
+      kGradTarget,
+      TagSoftActor,
+      CFemBoundaryDiscretization,
+      3>(reg, descendants.softActors);
+  AccumulateAllSyncDeformableCollidingForceAdjoints<
+      kGradTarget,
+      TagShellActor,
+      CFemSurfaceDiscretization,
+      3>(reg, descendants.shellActors);
+  AccumulateAllSyncDeformableCollidingForceAdjoints<
+      kGradTarget,
+      TagRodActor,
+      CFemSegmentDiscretization,
+      4>(reg, descendants.rodActors);
 }
 
 void mochi::AccumulateContactForceAdjoints(entt::registry& reg) {

@@ -62,11 +62,19 @@ def build_cases():
         ref[-1] = 0.3
         return scene, [ArticulatedPoseErrorLoss(chain, ref)], {}
 
+    def mesh_box():
+        scene, cube = scenes.rigid_on_mesh_box("coulomb")
+        return scene, [TranslationErrorLoss(cube)], {}
+
+    # Rigid and articulated scenes only: GradientCheckCase's initial-state blocks use the
+    # rigid and articulated accessors (a soft actor's nodal state is covered by
+    # test_diffsim_soft with its own finite differences).
     return {
         "rigid_on_plane_coulomb": rigid_coulomb,
         "two_cubes_on_plane": two_cubes,
         "pendulum_controller": controller,
         "free_chain_on_plane": free_chain,
+        "rigid_on_mesh_box_coulomb": mesh_box,
     }
 
 

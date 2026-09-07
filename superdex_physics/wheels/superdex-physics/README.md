@@ -203,8 +203,8 @@ cube; the contact-force query adjoint is exact against static and moving collide
 checked against the kinematic identity of a free body); the
 stiffness damping of soft materials and point-cloud colliders (shells and rods acting as
 colliders, no SDF Hessians) are not differentiable, and the contact-force query adjoint refuses
-contacts with point-cloud colliders and the samples of shells and rods (a soft body as the
-collider or as the colliding body is covered); a soft body pressed and dragged by a link can trap the forward Newton solve at
+contacts with point-cloud colliders (soft bodies, shells and rods as the colliding bodies, and a
+soft body as the collider, are covered); a soft body pressed and dragged by a link can trap the forward Newton solve at
 isolated steps, which the driver's substepping resolves (see the examples' docstrings). Losses
 through frictional contact are piecewise smooth: at steps where the forward Newton solve is
 nearly degenerate (100+ iterations to a 1e-9 residual, an arm pushing a cube over the ground)

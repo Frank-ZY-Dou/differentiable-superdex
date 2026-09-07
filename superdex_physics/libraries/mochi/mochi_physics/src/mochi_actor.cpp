@@ -2763,8 +2763,8 @@ static void GetContactForceWorldBackwardImpl(
   };
   auto const isSupportedColliding = [&](entt::entity colliding) {
     return reg.all_of<TagRigidActor>(colliding) ||
-        (reg.all_of<TagSoftActor>(colliding) &&
-         !reg.any_of<TagNestedSoftActor, TagRomActor>(colliding));
+        (reg.any_of<TagSoftActor, TagShellActor, TagRodActor>(colliding) &&
+         !reg.any_of<TagNestedSoftActor, TagRomActor, TagRodSurfaceContact>(colliding));
   };
   if (auto* collisionsAsync =
           reg.try_get<CActiveCollisions<ContactType::Async, TimeStep::Current>>(e)) {
@@ -2810,8 +2810,8 @@ static void GetContactForceWorldBackwardImpl(
         MOCHI_ERROR_IF(
             !jac.query->posColliding.empty() && !isSupportedColliding(jac.otherEntity),
             error,
-            "Contact-force adjoints of the samples of a shell, rod, nested or ROM actor "
-            "against this actor are not supported: disable that contact.");
+            "Contact-force adjoints of the samples of a nested or ROM actor, or of a rod with "
+            "surface contact, against this actor are not supported: disable that contact.");
         MOCHI_ERROR_RETURN(error);
         AccumulateContactForceWorldAdjoints(reg, jac.otherEntity, *jac.query, -gradForceWorld);
       }

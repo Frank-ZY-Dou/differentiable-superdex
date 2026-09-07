@@ -14,7 +14,7 @@ releases on that base; these distributions are built from this repository, not f
   and articulated colliders included) and node-to-rigid constraints, with gradients for initial
   states, per-step controller targets and external forces, gravity, contact materials, densities
   and soft material parameters; every path is checked against independent finite differences in
-  `superdex_physics/wheels/superdex-physics/test/diffsim` (142 tests) and the C++ suites.
+  `superdex_physics/wheels/superdex-physics/test/diffsim` (145 tests) and the C++ suites.
 - Adjoint correctness fixes: rod and soft residual sizing across assemblies, inner-solver
   convergence norm, relative outer tolerance with the true residual reported, stage-start contact
   Jacobians for deformable-vs-dynamic contact, exact adjoints across steps of different sizes
@@ -52,9 +52,10 @@ releases on that base; these distributions are built from this repository, not f
   soft bodies: the nodes of a soft-body SDF collider through its mapping and through the
   deformation gradient of its tetrahedra, and the nodes of a soft body whose samples touch the
   queried actor through the samples' interpolation (that direction used to be dropped silently;
-  the other refused). A box resting on a soft cube agrees with the kinematic identity to 1e-5 in
-  both configurations, and a tactile policy on the box passes its finite-difference check.
-  Contacts with point-cloud colliders and the samples of shells and rods are refused explicitly.
+  the other refused), and likewise the nodes of a shell or a rod whose samples touch it. A box
+  resting on a soft cube agrees with the kinematic identity to 1e-5 in both configurations, a
+  cube a rod is dropped on likewise, and a tactile policy on the box passes its
+  finite-difference check. Contacts with point-cloud colliders are refused explicitly.
 - Deformable (soft-body SDF) colliders are differentiable: mapped SDF colliders provide SDF
   Hessians, the stage-start query stores the Jacobians of the collider's stage-start mapping
   (`jacWorldFromDofsStageStart`), and both the colliding-side and the collider-side contact

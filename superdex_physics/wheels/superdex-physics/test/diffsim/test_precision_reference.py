@@ -47,13 +47,14 @@ from .harness import GradientCheckCase
 REFERENCE_PATH = pathlib.Path(__file__).with_name("data") / "fp64_reference_gradients.json"
 BLOCKS = ("control", "force", "init_pose", "init_vel")
 # Relative error of the single-precision gradients against the double-precision reference,
-# per gradient block. Measured on 2026-09-05 (engine at 1.0.0+diffsim.1): pendulum with a
+# per gradient block. Measured on 2026-09-06 (engine at 1.0.0+diffsim.1): pendulum with a
 # controller 2e-5..1.2e-4, a cube sliding on the ground 1.2e-4..1.8e-4, a free chain on the
-# ground 7e-5..2.5e-3, two stacked cubes 2.9e-3 (initial velocities) and 9.8e-3 (initial
-# poses) - the stacked contact is where float32 residuals and the 1e-5 Newton tolerance of
-# that build bite hardest. The tolerance is three times the worst block: a wrong adjoint
-# term moves a gradient by O(1) (every engine bug found so far did), a precision loss by
-# these fractions of a percent.
+# ground 7e-5..2.5e-3, a cube sliding off-center on a static mesh-collider box 3.2e-3 (initial
+# poses) and 4.1e-3 (initial velocities), two stacked cubes 2.9e-3 (initial velocities) and
+# 9.8e-3 (initial poses) - the stacked contact is where float32 residuals and the 1e-5 Newton
+# tolerance of that build bite hardest. The tolerance is three times the worst block: a wrong
+# adjoint term moves a gradient by O(1) (every engine bug found so far did), a precision loss
+# by these fractions of a percent.
 FP32_TOLERANCE = 3e-2
 FP64_TOLERANCE = 1e-9
 
