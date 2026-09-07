@@ -290,11 +290,17 @@ class TorqueGradientTest(unittest.TestCase):
     8.6e-4 at 1.2 N m on a free cube (before 2026-09-03 twice that, when the constant torque
     term was still transported inside the products - the other half of the same term, with
     the wrong sign). With the term in the operator (both the Krylov and the Newton outer
-    solver) the free-cube errors are 1.6e-7 and 3.1e-5 (measured 2026-09-05; the finite
-    differences are taken at eps 1e-6 on a loss of order 1e-3). These tests assert the
-    gradients are exact to those levels, with a margin, and that the torque gradients are not
-    trivially zero.
+    solver) the gradients are exact to the finite differences' resolution: 6.5e-10 at 0.3 N m
+    and 9.8e-9 at 1.2 N m for one step, 1.4e-6 over five steps, at eps 1e-4 (measured
+    2026-09-07). The finite-difference step matters: at eps 1e-6 the quotients themselves
+    are only self-consistent to 3e-5 at 1.2 N m, because the forward Newton solve (1e-12
+    tolerance) stops after 76 to 85 iterations across the stencil and the loss jumps by the
+    size of the last iterate; eps 1e-4 averages that out while the truncation error stays
+    below 1e-8 (the loss is smooth in the torque). These tests assert exactness at that
+    resolution, with a margin, and that the torque gradients are not trivially zero.
     """
+
+    FD_EPS = 1e-4
 
     def _torque_adjoint_and_fd(self, scene_fn, loss_cls, amplitude, num_steps=1, newton_outer=False):
         diffsim_torch = _make_bridge_module()
@@ -319,65 +325,67 @@ class TorqueGradientTest(unittest.TestCase):
         bridge(forces=f0).backward()
         adjoint = f0.grad.numpy()[:, 3:].copy()
         fd = np.zeros_like(adjoint)
-        eps = 1e-6
         for k in range(num_steps):
             for i, dof in enumerate(range(3, 6)):
                 values = []
                 for sign in (+1.0, -1.0):
                     perturbed = base.copy()
-                    perturbed[k, dof] += sign * eps
+                    perturbed[k, dof] += sign * self.FD_EPS
                     values.append(
                         bridge(
                             forces=torch.tensor(perturbed, dtype=torch.float64)
                         ).item()
                     )
-                fd[k, i] = (values[0] - values[1]) / (2 * eps)
+                fd[k, i] = (values[0] - values[1]) / (2 * self.FD_EPS)
         self.assertGreater(float(np.abs(fd).max()), 1e-6, "vacuous: the torque does not move the loss")
         return adjoint, fd
+
+    @staticmethod
+    def _relative(adjoint, fd):
+        # Relative to the block's largest entry: components the scene's symmetry leaves near
+        # zero would otherwise compare rounding with rounding.
+        return np.abs(adjoint - fd) / max(float(np.abs(fd).max()), 1e-14)
 
     def test_free_cube_moderate_torque_is_exact(self) -> None:
         adjoint, fd = self._torque_adjoint_and_fd(
             scenes.rigid_free, QuaternionErrorLoss, amplitude=0.3
         )
-        rel = np.abs(adjoint - fd) / np.maximum(np.abs(fd), 1e-14)
-        self.assertLess(float(rel.max()), 2e-6, rel)  # measured 1.6e-7
+        self.assertLess(float(self._relative(adjoint, fd).max()), 1e-8, (adjoint, fd))  # 6.5e-10
 
     def test_free_cube_large_torque_is_exact(self) -> None:
-        # 1.2 N m rotates this cube by 2.3e-3 rad per step; measured 3.1e-5 for one step and
-        # 8.3e-5 for five (8.6e-4 / 2.0e-3 without the chart term).
+        # 1.2 N m rotates this cube by 2.3e-3 rad per step; measured 9.8e-9 for one step and
+        # 1.4e-6 for five (8.6e-4 / 2.0e-3 without the chart term).
         adjoint, fd = self._torque_adjoint_and_fd(
             scenes.rigid_free, QuaternionErrorLoss, amplitude=1.2
         )
-        rel = np.abs(adjoint - fd) / np.maximum(np.abs(fd), 1e-14)
-        self.assertLess(float(rel.max()), 1e-4, rel)
+        self.assertLess(float(self._relative(adjoint, fd).max()), 1e-7, (adjoint, fd))
         adjoint, fd = self._torque_adjoint_and_fd(
             scenes.rigid_free, QuaternionErrorLoss, amplitude=1.2, num_steps=5
         )
-        rel = np.abs(adjoint - fd) / np.maximum(np.abs(fd), 1e-14)
-        self.assertLess(float(rel.max()), 3e-4, rel)
+        self.assertLess(float(self._relative(adjoint, fd).max()), 1e-5, (adjoint, fd))
 
     def test_newton_outer_solver_carries_the_term_too(self) -> None:
         adjoint, fd = self._torque_adjoint_and_fd(
             scenes.rigid_free, QuaternionErrorLoss, amplitude=1.2, newton_outer=True
         )
-        rel = np.abs(adjoint - fd) / np.maximum(np.abs(fd), 1e-14)
-        self.assertLess(float(rel.max()), 1e-4, rel)  # measured 3.1e-5, as the Krylov path
+        self.assertLess(float(self._relative(adjoint, fd).max()), 1e-7, (adjoint, fd))  # as Krylov
 
     def test_contact_scene_torque_gradients(self) -> None:
         """A cube sliding on the ground with a torque: the torque gradients of a translation
-        loss are small (1e-8, the torque barely moves the cube) and the adjoint reproduces
-        them to the adjoint solve's tolerance: 2.6e-10 absolute for one step, 4.2e-9 over
-        five (before the chart term 3.4e-10 / 8.5e-9)."""
+        loss are small (1e-8 to 1e-7, the torque barely moves the cube) and the adjoint
+        reproduces them: 1.5e-11 absolute for one step and 2.2e-10 over five, 5e-5 relative
+        to the block's largest entry (the finite differences themselves agree between eps
+        1e-4 and 1e-5 to 5e-6 and 7e-6)."""
         adjoint, fd = self._torque_adjoint_and_fd(
             lambda: scenes.rigid_on_plane("rich"), TranslationErrorLoss, amplitude=0.3
         )
-        self.assertLess(float(np.abs(adjoint - fd).max()), 2e-9)
+        self.assertLess(float(np.abs(adjoint - fd).max()), 2e-10)
+        self.assertLess(float(self._relative(adjoint, fd).max()), 5e-4, (adjoint, fd))
         adjoint, fd = self._torque_adjoint_and_fd(
             lambda: scenes.rigid_on_plane("rich"), TranslationErrorLoss, amplitude=0.3, num_steps=5
         )
-        self.assertLess(float(np.abs(adjoint - fd).max()), 2e-8)
-        rel = np.abs(adjoint - fd) / np.maximum(np.abs(fd), 1e-14)
-        self.assertLess(float(rel.max()), 5e-3, rel)  # measured 6.8e-4
+        self.assertLess(float(np.abs(adjoint - fd).max()), 2e-9)
+        self.assertLess(float(self._relative(adjoint, fd).max()), 5e-4, (adjoint, fd))
 
 
 class GradcheckSoftTest(unittest.TestCase):

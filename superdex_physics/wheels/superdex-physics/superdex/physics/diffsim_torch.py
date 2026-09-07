@@ -94,7 +94,9 @@ fixed-chart Hessian minus 1/2 [tau]x on the rotation block; the engine adds
 its transpose in the adjoint solve since 2026-09-05). Before that the torque
 and rotational gradients were off by half the rotation the torque induces in
 a step (2.2e-4 relative at 0.3 N*m, 8.6e-4 at 1.2 N*m on a free cube); now
-1.6e-7 and 3.1e-5 (``TorqueGradientTest``).
+below 1e-8 at both, 1.4e-6 over five steps (``TorqueGradientTest``; finite
+differences at eps 1e-4 - at eps 1e-6 the quotients carry the forward Newton's
+stopping noise, 3e-5 at 1.2 N*m).
 
 Example::
 

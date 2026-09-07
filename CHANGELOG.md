@@ -25,7 +25,7 @@ releases on that base; these distributions are built from this repository, not f
   fixed-chart Hessian minus `1/2 [tau]x` on the rotation block; the adjoint solve now uses its
   transpose, by defect correction around the symmetric Krylov solve or directly in the Newton
   outer solver, and `get_step_jacobian` the term itself). Torque gradients went from 2.2e-4
-  relative at 0.3 N m (8.6e-4 at 1.2 N m) to 1.6e-7 (3.1e-5) on a free cube and are gradchecked
+  relative at 0.3 N m (8.6e-4 at 1.2 N m) to below 1e-8 at both on a free cube and are gradchecked
   with every other input group.
 - Forward robustness for differentiable scenes: friction continuation
   (`NonLinearSolverParams.friction_continuation_levels`) and failure-adaptive substepping in the

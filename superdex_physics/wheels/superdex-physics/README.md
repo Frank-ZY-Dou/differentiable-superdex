@@ -240,8 +240,8 @@ Known limitations: the adjoint is exact for steps of any size and for consecutiv
 different sizes (at a step-size change the engine re-expresses the previous finite-difference
 angular velocities for the new size, keeping the angular rate; `get_step_jacobian` handles it
 the same way, and the adjoint operator carries the moving-chart term of external torques on
-rigid bodies, so torque gradients are exact to 1.6e-7 at 0.3 N m and 3e-5 at 1.2 N m on a 0.2 m
-cube; the contact-force query adjoint is exact against static and moving colliders alike,
+rigid bodies, so torque gradients are exact to 1e-8 at 0.3 and 1.2 N m on a 0.2 m cube (1e-6
+over five steps); the contact-force query adjoint is exact against static and moving colliders alike,
 checked against the kinematic identity of a free body); the
 stiffness damping of soft materials and point-cloud colliders (shells and rods acting as
 colliders, no SDF Hessians) are not differentiable, and the contact-force query adjoint refuses
