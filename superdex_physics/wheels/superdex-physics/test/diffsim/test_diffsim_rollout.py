@@ -1107,3 +1107,28 @@ class AdaptiveSnapshotLifetimeTest(unittest.TestCase):
         self.assertEqual(len(captured), 3)
         self.assertEqual(_live_handles(scene, captured), [])
 
+    def test_failure_in_the_convergence_check_or_the_restore(self) -> None:
+        """The other failure paths between the step and the hand-over: a raising convergence
+        check, and a raising restore before a subdivision."""
+        for where in ("check", "restore"):
+            scene, cube = scenes.rigid_free()
+            self.addCleanup(physics.destroy_scene, scene)
+            configure_for_differentiability(scene)
+            captured, state, capture = self._captures(scene)
+            loss = TranslationErrorLoss(cube)
+            if where == "check":
+                failed = mock.Mock(side_effect=RuntimeError("injected check failure"))
+                restore = type(scene).restore_state
+            else:
+                failed = mock.Mock(return_value=True)
+                restore = mock.Mock(side_effect=RuntimeError("injected restore failure"))
+            with mock.patch.object(type(scene), "capture_state", capture), mock.patch.object(
+                diffsim_rollout, "forward_solve_failed", failed
+            ), mock.patch.object(type(scene), "restore_state", restore):
+                with self.assertRaisesRegex(RuntimeError, "injected"):
+                    DifferentiableRollout(
+                        scene, dt=DT, num_steps=2, max_substep_levels=1, substep_residual_tolerance=1e-6
+                    ).run(terminal_losses=[loss])
+            self.assertEqual(len(captured), 1, where)
+            self.assertEqual(_live_handles(scene, captured), [], where)
+

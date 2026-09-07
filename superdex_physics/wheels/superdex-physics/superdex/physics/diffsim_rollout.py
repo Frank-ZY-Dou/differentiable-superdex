@@ -205,23 +205,30 @@ def _step_adaptive(
     scene, dt: float, level: int, max_levels: int, residual_tolerance: float,
     step: int, on_substep, pre,
 ) -> list[float]:
+    """One (sub)step from the captured pre-state ``pre``, which this call owns until it is
+    handed to ``on_substep`` together with the post-state (or released): whatever raises
+    before that - the native step, the convergence check, the restore before a subdivision,
+    the post-state capture, the callback - releases what has not been handed over. A
+    subdivision hands ``pre`` to its first half and captures a pre-state of its own for the
+    second, so no handle has two owners."""
     try:
         scene.step(dt)
+        failed = forward_solve_failed(scene, residual_tolerance)
+        if failed:
+            stats = scene.get_solver_stats()
+            if level >= max_levels:
+                raise ForwardSolveError(
+                    step,
+                    dt,
+                    stats.convergence_status,
+                    stats.residual_norm,
+                    stats.max_non_linear_iters,
+                )
+            scene.restore_state(pre, False)
     except BaseException:
         scene.release_state(pre)
         raise
-    if forward_solve_failed(scene, residual_tolerance):
-        stats = scene.get_solver_stats()
-        if level >= max_levels:
-            scene.release_state(pre)
-            raise ForwardSolveError(
-                step,
-                dt,
-                stats.convergence_status,
-                stats.residual_norm,
-                stats.max_non_linear_iters,
-            )
-        scene.restore_state(pre, False)
+    if failed:
         half = dt / 2.0
         taken = _step_adaptive(
             scene, half, level + 1, max_levels, residual_tolerance, step, on_substep, pre
@@ -245,8 +252,13 @@ def _step_adaptive(
     if on_substep is None:
         scene.release_state(pre)
         scene.release_state(post)
-    else:
+        return [dt]
+    try:
         on_substep(pre, post, dt)
+    except BaseException:
+        scene.release_state(pre)
+        scene.release_state(post)
+        raise
     return [dt]
 
 
