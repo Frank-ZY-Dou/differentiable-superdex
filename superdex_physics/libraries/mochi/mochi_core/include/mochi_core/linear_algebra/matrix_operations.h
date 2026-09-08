@@ -324,6 +324,115 @@ template <
     krylov::Direction kMajorDirection,
     krylov::Ownership kOwnership,
     int kLeadDim>
+inline void SymInverse4x4(
+    Matrix<Scalar, kRowsAtCT, kColsAtCT, kMajorDirection, kOwnership, kLeadDim> const& A,
+    Matrix<std::remove_const_t<Scalar>, kRowsAtCT, kColsAtCT, kMajorDirection>& invA) {
+  MOCHI_ASSERT_VERBOSE((A.Rows() == 4) && (A.Cols() == 4), "Incorrect matrix size.");
+  MOCHI_ASSERT_VERBOSE((invA.Rows() == 4) && (invA.Cols() == 4), "Incorrect matrix size.");
+
+  using T = std::remove_const_t<Scalar>;
+  T const a00 = A(0, 0);
+  T const a11 = A(1, 1);
+  T const a22 = A(2, 2);
+  T const a33 = A(3, 3);
+  constexpr bool kUseLowerTriangle = kMajorDirection == krylov::Direction::ColMajor;
+  T const a10 = kUseLowerTriangle ? A(1, 0) : A(0, 1);
+  T const a20 = kUseLowerTriangle ? A(2, 0) : A(0, 2);
+  T const a30 = kUseLowerTriangle ? A(3, 0) : A(0, 3);
+  T const a21 = kUseLowerTriangle ? A(2, 1) : A(1, 2);
+  T const a31 = kUseLowerTriangle ? A(3, 1) : A(1, 3);
+  T const a32 = kUseLowerTriangle ? A(3, 2) : A(2, 3);
+
+  auto const setSingular = [&](int pivotIndex, T pivot, T diagonal) {
+    MOCHI_LOG_ERROR(
+        "Matrix is singular or needs pivoting at diagonal %d (pivot: %e, input diagonal: %e).",
+        pivotIndex,
+        static_cast<double>(pivot),
+        static_cast<double>(diagonal));
+    invA.SetZero();
+  };
+
+  T const d0 = a00;
+  if (d0 == T{0})
+    MOCHI_UNLIKELY {
+      setSingular(0, d0, a00);
+      return;
+    }
+  T const d0Inv = T{1} / d0;
+  T const l10 = a10 * d0Inv;
+  T const l20 = a20 * d0Inv;
+  T const l30 = a30 * d0Inv;
+
+  T const d1 = a11 - l10 * a10;
+  if (RejectSymInversePivot(d1, a11))
+    MOCHI_UNLIKELY {
+      setSingular(1, d1, a11);
+      return;
+    }
+  T const d1Inv = T{1} / d1;
+  T const q21 = a21 - l20 * a10;
+  T const q31 = a31 - l30 * a10;
+  T const l21 = q21 * d1Inv;
+  T const l31 = q31 * d1Inv;
+
+  T const d2 = a22 - l20 * a20 - l21 * q21;
+  if (RejectSymInversePivot(d2, a22))
+    MOCHI_UNLIKELY {
+      setSingular(2, d2, a22);
+      return;
+    }
+  T const d2Inv = T{1} / d2;
+  T const q32 = a32 - l30 * a20 - l31 * q21;
+  T const l32 = q32 * d2Inv;
+
+  T const d3 = a33 - l30 * a30 - l31 * q31 - l32 * q32;
+  if (RejectSymInversePivot(d3, a33))
+    MOCHI_UNLIKELY {
+      setSingular(3, d3, a33);
+      return;
+    }
+  T const d3Inv = T{1} / d3;
+
+  // A^-1 = L^-T D^-1 L^-1. Compute one triangle and mirror it exactly.
+  T const lm10 = -l10;
+  T const lm21 = -l21;
+  T const lm32 = -l32;
+  T const lm20 = l10 * l21 - l20;
+  T const lm31 = l21 * l32 - l31;
+  T const lm30 = -l30 - l31 * lm10 - l32 * lm20;
+  T const t10 = lm10 * d1Inv;
+  T const t20 = lm20 * d2Inv;
+  T const t21 = lm21 * d2Inv;
+  T const t30 = lm30 * d3Inv;
+  T const t31 = lm31 * d3Inv;
+  T const t32 = lm32 * d3Inv;
+
+  T const inv33 = d3Inv;
+  T const inv23 = t32;
+  T const inv13 = t31;
+  T const inv03 = t30;
+  T const inv22 = d2Inv + lm32 * t32;
+  T const inv12 = t21 + lm32 * t31;
+  T const inv02 = t20 + lm32 * t30;
+  T const inv11 = d1Inv + lm21 * t21 + lm31 * t31;
+  T const inv01 = t10 + lm20 * t21 + lm30 * t31;
+  T const inv00 = d0Inv + lm10 * t10 + lm20 * t20 + lm30 * t30;
+
+  // clang-format off
+  invA(0, 0) = inv00;  invA(0, 1) = inv01;  invA(0, 2) = inv02;  invA(0, 3) = inv03;
+  invA(1, 0) = inv01;  invA(1, 1) = inv11;  invA(1, 2) = inv12;  invA(1, 3) = inv13;
+  invA(2, 0) = inv02;  invA(2, 1) = inv12;  invA(2, 2) = inv22;  invA(2, 3) = inv23;
+  invA(3, 0) = inv03;  invA(3, 1) = inv13;  invA(3, 2) = inv23;  invA(3, 3) = inv33;
+  // clang-format on
+}
+
+template <
+    typename Scalar,
+    int kRowsAtCT,
+    int kColsAtCT,
+    krylov::Direction kMajorDirection,
+    krylov::Ownership kOwnership,
+    int kLeadDim>
 inline void Inverse4x4(
     Matrix<Scalar, kRowsAtCT, kColsAtCT, kMajorDirection, kOwnership, kLeadDim> const& A,
     Matrix<std::remove_const_t<Scalar>, kRowsAtCT, kColsAtCT, kMajorDirection>& invA) {
@@ -814,7 +923,7 @@ auto SymInverse(
         return invA;
       }
       case 4: {
-        details::Inverse4x4(A, invA);
+        details::SymInverse4x4(A, invA);
         return invA;
       }
     }

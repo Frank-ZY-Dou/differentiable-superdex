@@ -252,6 +252,21 @@ TEST(LDLt, SymInverse3x3PivotHandling) {
   TestSymInversePivotHandling<3, kRowMajor>(computeInverse);
 }
 
+TEST(LDLt, SymInverse4x4ScaleAndPermutation) {
+  auto const computeInverse = [](auto const& A, auto& invA) { details::SymInverse4x4(A, invA); };
+  // Conservative Frobenius-condition-number bound for the Hilbert matrices.
+  // Uniform scaling and symmetric permutations preserve the condition number.
+  constexpr real kConditionNumberBound = 16000_r;
+  TestSymInverseScaleAndPermutation<4, kColMajor>(kConditionNumberBound, computeInverse);
+  TestSymInverseScaleAndPermutation<4, kRowMajor>(kConditionNumberBound, computeInverse);
+}
+
+TEST(LDLt, SymInverse4x4PivotHandling) {
+  auto const computeInverse = [](auto const& A, auto& invA) { details::SymInverse4x4(A, invA); };
+  TestSymInversePivotHandling<4, kColMajor>(computeInverse);
+  TestSymInversePivotHandling<4, kRowMajor>(computeInverse);
+}
+
 TEST(LDLt, EquilibrationConsistency) {
   static_assert(
       static_cast<int>(LDLtEquilibration::Count) == 2,

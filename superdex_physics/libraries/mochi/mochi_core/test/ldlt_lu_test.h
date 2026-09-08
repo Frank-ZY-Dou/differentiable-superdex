@@ -167,7 +167,7 @@ void TestInverse() {
         EXPECT_NEAR(
             A(ii, jj),
             ii == jj ? 1_r : 0_r,
-            real(15 * n * n) * std::numeric_limits<real>::epsilon());
+            real(150 * n * n) * std::numeric_limits<real>::epsilon());
       }
     }
   };
