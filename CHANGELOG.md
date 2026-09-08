@@ -74,6 +74,10 @@ produce trajectories identical to upstream SuperDex.
   the bridges refuse to build a graph through their backward passes (`create_graph`, Hessians),
   raising instead of returning an incomplete derivative; the closed-loop bridge checks its own
   plain steps and its probe step for non-finite residuals as the driver does.
+- Demos: the rigid cubes carry a structured mesh with cells of 12.5 mm, so that contact samples sit
+  near their edges and corners (contact acts at surface samples; a 12-triangle cube sank a corner
+  10 mm into the ground when tipped before any sample saw it), and the rigid pushes hold the cubes'
+  orientation with a running cost, as the policy push did.
 
 ### Upstream
 

@@ -28,7 +28,8 @@ rendered offscreen with the built-in viewer and written to MP4:
    cube to a goal that is off the initial push line, so the optimizer has to
    steer it through frictional contact between the arm's collision meshes and
    the cube (articulated-vs-rigid contact in one island; the cube slides on the
-   ground with friction).
+   ground with friction). A running cost on the cube's orientation keeps the
+   push flat: without it the optimizer shoves the cube over onto an edge.
 3. ``robot_grasp.mp4`` - FR3 with the Robotiq 2F-85 gripper descends onto a
    cube, closes the fingers and lifts it straight up; the goal for the cube
    lies 15 cm beside the lift line, so the optimizer has to carry the held
@@ -203,9 +204,11 @@ HAUL_CABLE_DENSITY = 1000.0  # [kg/m^3]
 HAUL_CABLE_ELEMENTS = 16
 HAUL_DT, HAUL_STEPS = 0.02, 60
 HAUL_NEWTON_TOL = 1e-7  # the cable island's Newton residual stalls at ~5e-9 (round-off)
-HAUL_STALL_TOLERANCE = 1e-6
-# Under aggressive trajectories a step of the cable island occasionally runs out of Newton
-# iterations at ~2e-6 residual (a slack, buckling cable); such steps are substepped.
+# With the box's 768 contact triangles (cube_shape) the island's residual floor sits at ~2.5e-6
+# on some steps; stalls below this are accepted. Under aggressive trajectories a step of the
+# cable island occasionally runs out of Newton iterations higher up (a slack, buckling cable);
+# such steps are substepped.
+HAUL_STALL_TOLERANCE = 5e-6
 HAUL_SUBSTEP_LEVELS = 2
 HAUL_LEARNING_RATE = 0.004  # Adam; 0.002 halves the loss in 40 iterations, 0.004 reaches 0.00096 in 120
 # Five-finger grasps: a HandGrasp profile per hand (HAND_GRASPS). All of them pinch the same
@@ -275,7 +278,7 @@ DG5F_GRASP = HandGrasp(
         for joint, amount in zip((2, 3, 4), (0.5, 1.0, 0.4))
     },
     thumb={"dg5f_joint_1_1": 0.3, "dg5f_joint_1_2": -1.2, "dg5f_joint_1_3": 1.0, "dg5f_joint_1_4": 0.0},
-    lifted_cube=(0.465, -0.020, 0.271),
+    lifted_cube=(0.464, -0.019, 0.271),
 )
 
 # Wuji Hand 2 (beta 1, the SuperDex asset; beta 2 below is this fork's conversion of the
@@ -311,20 +314,20 @@ WUJI2_GRASP = HandGrasp(
     fingers=_WUJI2_FINGERS,
     thumb=_WUJI2_THUMB,
     thumb_pre=_WUJI2_THUMB_PRE,
-    lifted_cube=(0.462, -0.004, 0.270),
+    lifted_cube=(0.460, -0.002, 0.270),
 )
 WUJI2B2_GRASP = dataclasses.replace(
     WUJI2_GRASP,
     name="wuji2b2",
     title="FR3 + Wuji Hand 2 (beta 2) grasp",
     bot="bots/arm_hand_combos/fr3_wuji_hand2_beta2/right/fr3_wuji_hand2_beta2_right.superdex_bot",
-    lifted_cube=(0.464, -0.007, 0.269),
+    lifted_cube=(0.461, -0.002, 0.269),
 )
 
 # Wuji Hand 1. In the palm frame the fingers extend along +z and curl toward +x (the palm
 # side), the thumb (finger 1) rests on the +y side. Palm down with the fingers along +y
 # (palm x -> -Z, y -> -X, z -> +Y); the cube is centered 110 mm ahead of and 65 mm below the
-# palm, 5 mm toward the thumb side. Fingers 2-5 flex on joints 1, 3 and 4 (joint 2 abducts):
+# palm, 5 mm toward the little finger. Fingers 2-5 flex on joints 1, 3 and 4 (joint 2 abducts):
 # closed, fingers 2 and 3 reach 8 mm past the cube's far face. The thumb descends already
 # curled above the cube's near-top edge (open) and unrolls onto the near face (thumb, its tip
 # 6 mm inside the face); closing it from the straight pose instead swings it through the
@@ -344,7 +347,7 @@ WUJI1_GRASP = HandGrasp(
     },
     thumb={"finger1_joint1": 1.2, "finger1_joint2": -0.6, "finger1_joint3": 0.85, "finger1_joint4": 0.85},
     open={"finger1_joint1": 1.6, "finger1_joint2": -0.3, "finger1_joint3": 1.1, "finger1_joint4": 1.1},
-    lifted_cube=(0.447, 0.000, 0.270),
+    lifted_cube=(0.446, 0.000, 0.270),
 )
 
 # XHand1. In the root frame (the wrist mount) the fingers extend along -z and curl toward +y
@@ -353,8 +356,10 @@ WUJI1_GRASP = HandGrasp(
 # the palm. Each finger flexes on its two joints: closed, the fingertips reach 7 mm past the
 # far face. The thumb is 12 cm long and would touch the table while bending across the palm
 # at this height, so the hand descends with it already bent across and fully flexed (open),
-# just in front of the cube's near face, and the closure unrolls it onto that face (thumb,
-# 5 mm inside).
+# just in front of the cube's near face, and the closure unrolls it onto that face (thumb).
+# The thumb presses the near face lower than the fingers press the far face, so the cube
+# rocks a few degrees at closure and settles tilted in the lifted grip; a less unrolled thumb
+# (rota joint 2 at 1.25 rather than 0.9) keeps that within about 25 degrees.
 XHAND_GRASP = HandGrasp(
     name="xhand",
     title="FR3 + XHand1 grasp",
@@ -368,9 +373,9 @@ XHAND_GRASP = HandGrasp(
         for finger in ("index", "mid", "ring", "pinky")
         for joint, amount in zip((1, 2), (0.6, 1.0))
     },
-    thumb={"right_hand_thumb_bend_joint": 1.4, "right_hand_thumb_rota_joint1": 0.8, "right_hand_thumb_rota_joint2": 0.9},
+    thumb={"right_hand_thumb_bend_joint": 1.4, "right_hand_thumb_rota_joint1": 0.8, "right_hand_thumb_rota_joint2": 1.25},
     open={"right_hand_thumb_bend_joint": 1.4, "right_hand_thumb_rota_joint1": 0.8, "right_hand_thumb_rota_joint2": 1.6},
-    lifted_cube=(0.453, -0.001, 0.252),
+    lifted_cube=(0.453, -0.001, 0.250),
 )
 
 HAND_GRASPS = {p.name: p for p in (DG5F_GRASP, WUJI2_GRASP, WUJI2B2_GRASP, WUJI1_GRASP, XHAND_GRASP)}
@@ -433,6 +438,46 @@ ARM_CONTACT = CONTACT
 CUBE_CONN = np.array(
     [0, 1, 2, 4, 6, 7, 4, 2, 5, 4, 7, 1, 3, 2, 1, 7, 1, 2, 4, 7], dtype=np.int32
 )
+
+
+# Contact in SuperDex acts at sample points of one body's surface tested against the other
+# body's distance field; the sample points of a triangle mesh lie inside its triangles. A cube
+# of 12 triangles (cube_coords) has no sample near its edges and corners, so a tilted cube
+# sinks a corner 10 mm into the ground before any sample sees it. The rigid cubes therefore
+# use a structured mesh with cells of about CUBE_CELL_SIZE, whose samples sit within a few
+# millimetres of every edge and corner (8 cells per edge on the 10 cm cubes, 4 on the 5 cm
+# ones; a 5 cm cube of 8 cells put so many samples between the fingertips of a five-finger
+# hand that the Newton solve of the lift failed).
+CUBE_CELL_SIZE = 0.0125  # [m]
+
+
+def cube_shape(half: float):
+    """The tet-mesh shape of a cube of half size ``half`` with cells of about CUBE_CELL_SIZE."""
+    cells = max(1, int(round(2.0 * half / CUBE_CELL_SIZE)))
+    coordinates, connectivity = box_tet_mesh(size=2.0 * half, cells=cells)
+    return physics.create_tet_mesh_shape(coordinates=coordinates, connectivity=connectivity)
+
+
+class CubeOrientationLoss:
+    """0.5 * PUSH_YAW_WEIGHT * ||q - q0||^2 on a rigid actor's orientation quaternion at every
+    step of a push (q0 is the orientation at construction): the push keeps the cube flat and
+    square, see PUSH_YAW_WEIGHT."""
+
+    def __init__(self, cube):
+        self.cube = cube
+        self.quat_ref = np.asarray(cube.get_center_of_mass_transform().rotation.tolist(), dtype=np.float64)
+
+    def _diff(self) -> np.ndarray:
+        return np.asarray(self.cube.get_center_of_mass_transform().rotation.tolist(), dtype=np.float64) - self.quat_ref
+
+    def value(self) -> float:
+        d = self._diff()
+        return 0.5 * PUSH_YAW_WEIGHT * float(d @ d)
+
+    def accumulate_output_grad(self) -> None:
+        g = np.zeros(7)
+        g[3:] = PUSH_YAW_WEIGHT * self._diff()
+        diffsim.get_center_of_mass_transform_backward(self.cube, g)
 
 
 def cube_coords(half: float) -> np.ndarray:
@@ -800,6 +845,7 @@ def run_task(
     substep_levels: int = 0,
     stall_tolerance: float | None = None,
     max_penetration: float | None = MAX_PENETRATION,
+    step_losses=None,
 ) -> None:
     """Optimizes the rollout loss over the pose-controller targets.
 
@@ -820,7 +866,8 @@ def run_task(
     the guard's stall tolerance) is redone as 2, 4, ... substeps. ``stall_tolerance``
     overrides the guard's default residual floor for stalled solves;
     ``max_penetration`` the interpenetration the replays may reach (see
-    :class:`ConvergenceGuard`)."""
+    :class:`ConvergenceGuard`); ``step_losses`` (``step -> [loss]``) adds running
+    costs to the terminal ``loss``."""
     num_steps = controls0.shape[0]
     guard = ConvergenceGuard(scene, stall_tolerance, max_penetration)
     bridge = TorchRollout(
@@ -829,6 +876,7 @@ def run_task(
         num_steps=num_steps,
         control_actors=[arm],
         terminal_losses=[loss],
+        step_losses=step_losses,
         max_substep_levels=substep_levels,
         substep_residual_tolerance=guard.stall_tolerance if substep_levels else None,
     )
@@ -1080,7 +1128,7 @@ def task_push_policy(output_dir: pathlib.Path, num_iterations: int, check: bool)
     )
     cube = scene.create_rigid_actor(
         name="cube",
-        shape=physics.create_tet_mesh_shape(coordinates=cube_coords(CUBE_HALF), connectivity=CUBE_CONN),
+        shape=cube_shape(CUBE_HALF),
         density=300.0,
         contact=CONTACT,
         world_from_local=physics.TransformRT(cube_start.tolist()),
@@ -1100,27 +1148,7 @@ def task_push_policy(output_dir: pathlib.Path, num_iterations: int, check: bool)
             g[:3] = cube_position() - goal
             diffsim.get_center_of_mass_transform_backward(cube, g)
 
-    quat_ref = np.asarray(cube.get_center_of_mass_transform().rotation.tolist(), dtype=np.float64)
-
-    class CubeYawLoss:
-        """0.5 * PUSH_POLICY_YAW_WEIGHT * ||q - q0||^2 on the cube's orientation, at every step:
-        a push that keeps the cube square (an off-center push spins it, and a spun cube's final
-        position is a chaotic function of the push - the terminal loss alone gives noisy
-        gradients)."""
-
-        def _diff(self) -> np.ndarray:
-            return np.asarray(cube.get_center_of_mass_transform().rotation.tolist(), dtype=np.float64) - quat_ref
-
-        def value(self) -> float:
-            d = self._diff()
-            return 0.5 * PUSH_POLICY_YAW_WEIGHT * float(d @ d)
-
-        def accumulate_output_grad(self) -> None:
-            g = np.zeros(7)
-            g[3:] = PUSH_POLICY_YAW_WEIGHT * self._diff()
-            diffsim.get_center_of_mass_transform_backward(cube, g)
-
-    yaw_loss = CubeYawLoss()
+    yaw_loss = CubeOrientationLoss(cube)
     step_losses = lambda step: [yaw_loss]
     observations = [ArticulatedPoseObservation(arm), TranslationObservation(cube), OrientationObservation(cube)]
     state_nominal = scene.capture_state()
@@ -1368,7 +1396,10 @@ PUSH_POLICY_HIDDEN = 32
 PUSH_POLICY_RESIDUAL_SCALE = 0.05  # [rad] the residual head's output scale
 PUSH_POLICY_PLAN_ITERATIONS = 40  # Adam iterations of the open-loop plan on the nominal start
 PUSH_POLICY_GOAL = np.array([0.80, 0.0, CUBE_HALF])  # straight ahead: the plan is a square push
-PUSH_POLICY_YAW_WEIGHT = 2e-3  # per-step weight of the cube's orientation error (1e-2 dominated the distance)
+# Per-step weight of a pushed cube's orientation error (1e-2 dominated the distance term). A
+# cube pushed off center spins, and a cube shoved hard tips over onto an edge; either makes
+# the final position a rough function of the push, and a tipped cube rolls on its corners.
+PUSH_YAW_WEIGHT = 2e-3
 PUSH_POLICY_STARTS = ((0.0, 0.0), (0.0, -0.015), (0.0, 0.015))  # [m] cube start offsets trained jointly
 PUSH_POLICY_LEARNING_RATE = 3e-3  # Adam on the residual MLP's weights (1e-3 barely moved the feedback policy)
 PUSH_POLICY_MAX_INCREASE = 0.1  # a step raising the mean loss by more than this fraction is undone
@@ -1445,7 +1476,7 @@ def _task_push_impl(
     else:
         cube = scene.create_rigid_actor(
             name="cube",
-            shape=physics.create_tet_mesh_shape(coordinates=cube_coords(CUBE_HALF), connectivity=CUBE_CONN),
+            shape=cube_shape(CUBE_HALF),
             density=300.0,
             contact=CONTACT,
             world_from_local=physics.TransformRT(cube_start.tolist()),
@@ -1458,7 +1489,7 @@ def _task_push_impl(
         # The second cube, in the push line right behind the first; the loss is on it.
         cube2 = scene.create_rigid_actor(
             name="cube2",
-            shape=physics.create_tet_mesh_shape(coordinates=cube_coords(CUBE_HALF), connectivity=CUBE_CONN),
+            shape=cube_shape(CUBE_HALF),
             density=300.0,
             contact=CONTACT,
             world_from_local=physics.TransformRT(
@@ -1475,6 +1506,12 @@ def _task_push_impl(
 
     arm.set_articulated_pose_from_joints(poses[0])
     configure(scene)
+    # The rigid pushes keep their cubes flat and square (a running orientation cost, as in the
+    # policy push); a soft cube has no orientation.
+    step_losses = None
+    if not soft:
+        holds = [CubeOrientationLoss(cube)] + ([CubeOrientationLoss(cube2)] if multi else [])
+        step_losses = lambda step: holds
 
     class CubeLoss:
         def value(self) -> float:
@@ -1524,6 +1561,7 @@ def _task_push_impl(
             # The soft cube's compliant contact (PUSH_SOFT_PENALTY) overlaps more than the
             # rigid limit; its penetration is reported, not bounded.
             max_penetration=None if soft else MAX_PENETRATION,
+            step_losses=step_losses,
         )
     finally:
         robotics.destroy_bot(scene, bot)
@@ -1626,9 +1664,7 @@ def build_grasp_task(soft: bool = False, fingertip_box_dir: pathlib.Path | None 
     else:
         cube = scene.create_rigid_actor(
             name="cube",
-            shape=physics.create_tet_mesh_shape(
-                coordinates=cube_coords(GRASP_CUBE_HALF), connectivity=CUBE_CONN
-            ),
+            shape=cube_shape(GRASP_CUBE_HALF),
             density=GRASP_CUBE_DENSITY,
             contact=GRASP_CONTACT,
             world_from_local=physics.TransformRT(cube_pos.tolist()),
@@ -1805,7 +1841,7 @@ def build_hand_grasp_task(profile: HandGrasp):
     )
     cube = scene.create_rigid_actor(
         name="cube",
-        shape=physics.create_tet_mesh_shape(coordinates=cube_coords(HAND_CUBE_HALF), connectivity=CUBE_CONN),
+        shape=cube_shape(HAND_CUBE_HALF),
         density=HAND_CUBE_DENSITY,
         contact=GRASP_CONTACT,
         world_from_local=physics.TransformRT(HAND_CUBE_POS.tolist()),
@@ -2063,7 +2099,7 @@ def task_haul(output_dir: pathlib.Path, num_iterations: int, check: bool) -> Non
     )
     box = scene.create_rigid_actor(
         name="box",
-        shape=physics.create_tet_mesh_shape(coordinates=cube_coords(HAUL_BOX_HALF), connectivity=CUBE_CONN),
+        shape=cube_shape(HAUL_BOX_HALF),
         density=HAUL_BOX_DENSITY,
         contact=CONTACT,
         world_from_local=physics.TransformRT(HAUL_BOX_START.tolist()),

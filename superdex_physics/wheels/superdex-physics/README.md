@@ -205,7 +205,8 @@ SUPERDEX_PRECISION=double python superdex_physics/examples/example_diffsim_robot
 direction and one entry at a time on the largest entries; `--export-scenes` also writes each recorded frame's bodies, meshes and camera next to
 the video, and `render_diffsim_blender.py` renders those with Blender (Cycles) into the
 animations shown here. The tasks (`--task`): `reach`, an FR3 arm reaching a point; `push`, `push_soft`,
-`push_multi`, the arm pushing a rigid cube, a soft cube, or a cube that pushes a second one;
+`push_multi`, the arm pushing a rigid cube, a soft cube, or a cube that pushes a second one (a running
+cost on the cubes' orientation keeps the rigid pushes flat);
 `push_policy`, a feedback policy trained through the simulator on three cube starts, on top of an
 optimized open-loop plan and against an open-loop baseline; `grasp` and `grasp_soft`, a 2F-85
 gripper carrying a rigid or a soft cube; `hand`, `wuji2`, `wuji2b2`, `wuji1` and `xhand`, a five-finger
@@ -224,29 +225,31 @@ cable.
 | ![xhand](../../examples/media/robot_xhand_grasp.gif) | ![wuji2b2](../../examples/media/robot_wuji2b2_grasp.gif) |
 
 What the demos reach after 40 iterations (100 for `push_policy`). The loss is half the squared
-distance of the manipulated object to its goal, so 1e-4 is about 1.4 cm and 1e-6 about 1.4 mm;
-the last column is the relative difference between the adjoint and finite differences at the
-first iteration.
+distance of the manipulated object to its goal (the pushes add the running cost on the cube's
+orientation), so 1e-4 is about 1.4 cm and 1e-6 about 1.4 mm; the last column is the relative
+difference between the adjoint and finite differences at the first iteration.
 
 | task | optimized variables | loss at start | loss at the end | adjoint vs FD |
 |---|---|---|---|---|
 | `reach` | joint targets, free motion | 6.7e-2 | 2.0e-4 | 1.2e-5 |
-| `push` | joint targets through frictional contact | 7.4e-3 | 2.2e-5 | 6.0e-6 |
-| `push_multi` | joint targets through two contacts (cube pushes cube) | 6.8e-3 | 3.2e-5 | 4.4e-6 |
+| `push` | joint targets through frictional contact | 7.4e-3 | 7.5e-5 | 2.3e-6 |
+| `push_multi` | joint targets through two contacts (cube pushes cube) | 6.8e-3 | 1.7e-4 | 3.2e-3 |
 | `push_soft` | joint targets, FEM cube, substepped | 7.6e-3 | 1.3e-4 | 6.8e-5 |
-| `push_policy` | MLP weights, closed loop, three cube starts | 3.8e-3 (mean) | 8.5e-5; 0.1 / 0.6 / 0.8 cm to the goal | 2.0e-3 (mean over starts) |
-| `grasp` | carry knots, 2F-85 gripper, closed-loop linkage | 1.1e-2 | 2e-6 | 1.4e-4 |
+| `push_policy` | MLP weights, closed loop, three cube starts | 3.4e-3 (mean) | 1.7e-4; 0.2 / 1.7 / 1.4 cm to the goal | 1.9e-4 (mean over starts) |
+| `grasp` | carry knots, 2F-85 gripper, closed-loop linkage | 1.1e-2 | 2e-6 | 1.8e-3 |
 | `grasp_soft` | carry knots, FEM cube in the gripper | 1.1e-2 | < 1e-6 | 1.3e-3 |
-| `hand` | carry knots, DG-5F fingertip pinch, 27 DoFs | 1.1e-2 | 7.7e-5 | 2.2e-8 |
-| `wuji2` | carry knots, Wuji Hand 2 (beta 1) pinch, 27 DoFs | 1.1e-2 | 1e-6 | 6.8e-8 |
-| `wuji2b2` | carry knots, Wuji Hand 2 (beta 2) pinch, 27 DoFs | 1.1e-2 | < 1e-6 | 2.3e-7 |
-| `wuji1` | carry knots, Wuji Hand 1 pinch, 27 DoFs | 1.1e-2 | < 1e-6 | 2.4e-8 |
-| `xhand` | carry knots, XHand1 pinch, 19 DoFs | 1.1e-2 | < 1e-6 | 1.4e-8 |
+| `hand` | carry knots, DG-5F fingertip pinch, 27 DoFs | 1.1e-2 | 8.1e-5 | 3.8e-7 |
+| `wuji2` | carry knots, Wuji Hand 2 (beta 1) pinch, 27 DoFs | 1.1e-2 | < 1e-6 | 3.9e-8 |
+| `wuji2b2` | carry knots, Wuji Hand 2 (beta 2) pinch, 27 DoFs | 1.1e-2 | < 1e-6 | 5.3e-8 |
+| `wuji1` | carry knots, Wuji Hand 1 pinch, 27 DoFs | 1.1e-2 | < 1e-6 | 3.8e-8 |
+| `xhand` | carry knots, XHand1 pinch, 19 DoFs | 1.1e-2 | < 1e-6 | 9.3e-8 |
 | `tendon` | tendon pull of a rod-driven finger | 9.9e-4 | < 1e-6 | 1.1e-4 |
-| `haul` | joint targets through a cable to a box | 6.6e-3 | 2.5e-3 | 2.3e-5 |
+| `haul` | joint targets through a cable to a box | 6.6e-3 | 1.4e-3 | 2.1e-5 |
 
 Notes on the demos. The rigid tasks use the engine's default contact stiffness (1e9 Pa/m); a
-softer material lets a position-controlled arm sink visibly into what it pushes. The soft tasks
+softer material lets a position-controlled arm sink visibly into what it pushes. Contact acts at
+samples of a body's surface, so the demo cubes carry a mesh with 12.5 mm cells: with the plain
+12-triangle cube a tipped corner sank 10 mm into the ground before any sample saw it. The soft tasks
 use a stiffness commensurate with their material (1e6 on a 1e5 Pa cube), the level at which the
 Newton solve still converges to the tolerance the adjoint needs. The five-finger hand carries its
 5 cm cube in a fingertip pinch (fingers 2-4 on the far face, the thumb on the near face): the
