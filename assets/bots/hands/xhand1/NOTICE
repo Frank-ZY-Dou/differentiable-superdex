@@ -1,0 +1,5 @@
+XHand1 description from https://github.com/MandiZhao/dexmachina, dexmachina/assets/xhand
+(MIT License, Copyright (c) 2025 Mandi Zhao). The XHand1 is a product of RobotEra.
+
+Converted to the SuperDex bot format with tools/urdf_to_superdex_bot.py: collision meshes replaced
+by convex hulls, visual meshes converted to GLB, root-finger contact pairs disabled.

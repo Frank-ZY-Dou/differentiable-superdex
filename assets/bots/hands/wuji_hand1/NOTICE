@@ -1,0 +1,5 @@
+Wuji Hand 1 description, version 1.0.2, from https://github.com/wuji-technology/wuji_hand_description
+(MIT License, Copyright (c) 2025 Wuji Technology).
+
+Converted to the SuperDex bot format with tools/urdf_to_superdex_bot.py: collision meshes kept or
+replaced by convex hulls, visual meshes converted to GLB, palm-finger contact pairs disabled.

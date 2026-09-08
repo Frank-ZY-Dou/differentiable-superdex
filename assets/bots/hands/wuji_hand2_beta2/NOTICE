@@ -1,0 +1,6 @@
+Wuji Hand 2 (Beta 2) description from https://github.com/wuji-technology/wuji-description,
+hand2/hand2_beta2/body, package version 2026.8.19, commit 4c1073d0a3ad1daaf6546d219db751d8448d3888
+(MIT License, Copyright (c) 2025 Wuji Technology).
+
+Converted to the SuperDex bot format with tools/urdf_to_superdex_bot.py: collision meshes kept or
+replaced by convex hulls, visual meshes converted to GLB, wrist-finger contact pairs disabled.

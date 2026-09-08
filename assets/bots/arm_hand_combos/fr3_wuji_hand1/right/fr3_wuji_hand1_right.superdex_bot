@@ -1,0 +1,22 @@
+{
+  "base": "//arms/fr3/fr3.superdex_bot",
+  "modifications": [
+    {
+      "AttachBot": {
+        "enabled": true,
+        "joint": {
+          "name": "wuji_hand1_to_fr3",
+          "parentLinkFromJoint": {
+            "rotation": [0, 0, 0, 1],
+            "translation": [0, 0, 0.01]
+          },
+          "type": "Hard"
+        },
+        "name": "wuji_hand1_right",
+        "parentLinkName": "fr3_link8",
+        "path": "//hands/wuji_hand1/right/wuji_hand1_right.superdex_bot"
+      }
+    }
+  ],
+  "name": "fr3_wuji_hand1_right"
+}

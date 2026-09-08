@@ -95,8 +95,12 @@ policies on every start.
 fingers horizontal, pinches it between the fingertips of fingers 2-4 on its far
 face and the thumb on its near face, lifts it, and the carry knots are optimized
 like the gripper grasp (27 controlled DoFs, the finger pads in frictional contact
-at the engine's default stiffness; see the ``HAND_*`` constants for the geometry
-and why a wrap is not reachable).
+at the engine's default stiffness; see ``DG5F_GRASP`` for the geometry and why a
+wrap is not reachable). The same pinch runs with the other hands of the
+``HAND_GRASPS`` profiles: ``--task wuji2`` (Wuji Hand 2, beta 1, the SuperDex
+asset), ``wuji2b2`` (Wuji Hand 2, beta 2), ``wuji1`` (Wuji Hand 1) and ``xhand``
+(XHand1); their hand packages under ``assets/bots/hands`` and the FR3 + hand
+recipes under ``assets/bots/arm_hand_combos`` are part of this fork.
 
 ``robot_push_multi.mp4`` (``--task push_multi``) is the push with two cubes in a
 row: the end effector pushes the first cube, which pushes the second; the loss
@@ -130,6 +134,8 @@ grasp only), and the repository assets (resolved through
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import functools
 import os
 import pathlib
 import sys
@@ -202,39 +208,172 @@ HAUL_STALL_TOLERANCE = 1e-6
 # iterations at ~2e-6 residual (a slack, buckling cable); such steps are substepped.
 HAUL_SUBSTEP_LEVELS = 2
 HAUL_LEARNING_RATE = 0.004  # Adam; 0.002 halves the loss in 40 iterations, 0.004 reaches 0.00096 in 120
-# Five-finger hand grasp (FR3 + Tesollo DG-5F, right hand). Palm frame: local x is the palm
-# normal, local z the finger direction, local y across the fingers. The hand is placed with the
-# fingers horizontal along +y and the palm facing down (local x -> -z, local z -> +y), the palm
-# HAND_BACK behind and HAND_UP above the cube center; fingers 2-5 flex to HAND_FLEX on their two
-# proximal flexion joints (0.6 of it on the distal one) and the thumb goes to HAND_THUMB.
-HAND_BOT = "bots/arm_hand_combos/fr3_dg5f_short/right/fr3_dg5f_short_right.superdex_bot"
-HAND_PALM_LINK = "dg5f_link_palm"
+# Five-finger grasps: a HandGrasp profile per hand (HAND_GRASPS). All of them pinch the same
+# 5 cm cube (HAND_CUBE_*) on the same timeline: the hand comes down with open fingers, closes
+# them over HAND_CLOSE_STEPS steps from HAND_CLOSE_START and lifts; the carry knots from
+# HAND_CARRY_START on are the optimized controls. The hand is placed by the engine's IK with a
+# position and a rotation target on the profile's wrist link (one of each per link; the IK
+# solves from the current pose, and the arm's flange angle at the start decides which branch
+# it converges to). A pinch squeezes the position-controlled fingertips a few millimetres into
+# the cube at the default contact stiffness; that is the grip force, and the replays'
+# penetration limit allows it. The hand-cube islands (27 DoFs, some 20 finger links in
+# contact) occasionally run out of Newton iterations at ~5e-7 residual: stalls below the
+# profile's tolerance are accepted, worse steps are substepped.
 HAND_CUBE_HALF = 0.025
 HAND_CUBE_DENSITY = 300.0  # [kg/m^3]: a 5 cm cube of 0.04 kg
 HAND_CUBE_POS = np.array([0.45, 0.0, HAND_CUBE_HALF - 0.001])
-# The grasp is a fingertip pinch: the palm hovers above and behind the cube (palm normal
-# down, fingers along +y), the closing fingers 2-4 curl down onto the cube's far face at its
-# mid-height and the thumb, opposed under the palm, presses the near face. In the palm frame
-# (x = palm normal, z = finger direction) the closed fingertips sit 90 mm below and 135 mm
-# ahead of the palm center and the thumb tip 90 mm below and 80 mm ahead, so the palm goes
-# HAND_UP above and HAND_BACK behind the cube center; HAND_SIDE shifts it sideways so that
-# fingers 2 and 3 straddle the cube's lateral center. A power wrap is not reachable for a
-# cube this size: the thumb's tip cannot get more than ~50 mm behind the finger pads along
-# the finger direction (its opposition sweeps laterally), so palm-down wraps of a 7 cm cube
-# only "held" it by passing the fingers through it at a compliant contact.
-HAND_BACK, HAND_UP, HAND_SIDE = 0.11, 0.095, 0.015  # [m]
-HAND_FLEX = (0.5, 1.0, 0.4)  # [rad] closed MCP / PIP / DIP of fingers 2-5
-HAND_THUMB = (0.3, -1.2, 1.0, 0.0)  # [rad] joints 1_1 (abduction), 1_2 (opposition), 1_3, 1_4
-HAND_IK_WEIGHT = 3.0  # position target weight against the two orientation points
 HAND_CLOSE_START, HAND_CLOSE_STEPS, HAND_LIFT_END = 30, 25, 100
 HAND_CARRY_START = 65
-# The hand-cube island (27 DoFs, some 20 finger links in contact) occasionally runs out of Newton
-# iterations at ~5e-7 residual: stalls below this are accepted, worse steps are substepped.
-HAND_STALL_TOLERANCE = 1e-5
-# The pinch squeezes the position-controlled fingertips a few millimetres into the cube at the
-# default contact stiffness (5-7 mm on the finger pads, the closure targets lie inside the
-# cube); that is the grip force, and the replays' penetration limit allows it.
-HAND_MAX_PENETRATION = 0.01
+
+
+@dataclasses.dataclass(frozen=True)
+class HandGrasp:
+    """The pinch of one five-finger hand on the cube."""
+
+    name: str  # task name: the video is robot_<name>_grasp.mp4
+    title: str  # e.g. "FR3 + DG-5F five-finger grasp"
+    bot: str  # the arm-hand recipe (an asset path)
+    wrist_link: str  # the link the IK places (a name suffix)
+    rotation: np.ndarray  # columns: that link's x, y, z axes in the world at the grasp
+    flange_start: float  # [rad] the FR3's joint 7 at the start of the IK
+    offset: tuple  # [m] the wrist link's origin from the cube center at the grasp (world x, y, z)
+    fingers: dict  # closed targets of the finger joints, by joint name (the rest keep the default pose)
+    thumb: dict  # closed targets of the thumb joints
+    lifted_cube: tuple  # [m] where the lifted cube ends on the initial trajectory (the goal's base)
+    thumb_pre: dict | None = None  # a pose the thumb goes through first (None: straight to closed)
+    thumb_swing: float = 0.6  # the fraction of the closure spent reaching thumb_pre
+    open: dict = dataclasses.field(default_factory=dict)  # joints held away from the default pose while open
+    max_penetration: float = 0.01  # [m] the interpenetration the replays may reach
+    stall_tolerance: float = 1e-5  # the Newton residual below which a stalled solve is accepted
+
+
+# Tesollo DG-5F (short wrist), the hand shipped with SuperDex. Palm frame: local x is the palm
+# normal, local z the finger direction, local y across the fingers. The hand is placed with the
+# fingers horizontal along +y and the palm facing down (local x -> -z, local z -> +y); fingers
+# 2-5 flex on their three flexion joints (x_2 MCP, x_3 PIP, x_4 DIP) and the thumb goes to
+# joints 1_1 (abduction), 1_2 (opposition), 1_3, 1_4 as given. In the palm frame the closed
+# fingertips sit 90 mm below and 135 mm ahead of the palm center and the thumb tip 90 mm below
+# and 80 mm ahead: the palm goes 95 mm above and 110 mm behind the cube center, 15 mm to the
+# side so that fingers 2 and 3 straddle the cube's lateral center; fingers 2-4 curl onto the
+# cube's far face at its mid-height and the thumb, opposed under the palm, presses the near
+# face. A power wrap is not reachable for a cube this size: the thumb's tip cannot get more
+# than ~50 mm behind the finger pads along the finger direction (its opposition sweeps
+# laterally), so palm-down wraps of a 7 cm cube only "held" it by passing the fingers through
+# it at a compliant contact. The IK started at the arm's default flange angle (pi/2) runs
+# into that joint's upper limit for this pose; started at 0 it converges (joint 7 near -2).
+DG5F_GRASP = HandGrasp(
+    name="hand",
+    title="FR3 + DG-5F five-finger grasp",
+    bot="bots/arm_hand_combos/fr3_dg5f_short/right/fr3_dg5f_short_right.superdex_bot",
+    wrist_link="dg5f_link_palm",
+    rotation=np.array([[0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]).T,
+    flange_start=0.0,
+    offset=(0.015, -0.11, 0.095),
+    fingers={
+        f"dg5f_joint_{finger}_{joint}": amount
+        for finger in (2, 3, 4, 5)
+        for joint, amount in zip((2, 3, 4), (0.5, 1.0, 0.4))
+    },
+    thumb={"dg5f_joint_1_1": 0.3, "dg5f_joint_1_2": -1.2, "dg5f_joint_1_3": 1.0, "dg5f_joint_1_4": 0.0},
+    lifted_cube=(0.465, -0.020, 0.271),
+)
+
+# Wuji Hand 2 (beta 1, the SuperDex asset; beta 2 below is this fork's conversion of the
+# newer description, with the same joint names and kinematics). In the wrist frame the fingers
+# extend along -z and curl toward +y (the palm side), the thumb rests on the +x side with its
+# pulp toward the fingers. Palm down with the fingers along +y (wrist x -> -X, y -> -Z,
+# z -> -Y); the arm sags 10 mm under the hand at these gains. With the closed targets the
+# index and middle pads sit 120 mm ahead of and 48 mm below the wrist, their pulps turned
+# back toward the wrist, and the thumb pad 73 mm ahead of and 61 mm below it, its pulp
+# toward the fingertips: the cube, centered 95 mm ahead and 70 mm below the wrist, is pinched
+# between the thumb on its near face and fingers 2-3 on its far face, the pulps' closed
+# positions about a centimetre inside the faces; fingers 4-5 close beside the cube. The thumb
+# closes in two moves: it first swings across the palm (thumb_pre), its pulp turned toward
+# the fingertips and still in front of the cube's near face, then advances along the fingers;
+# a straight interpolation to the closed pose sweeps it through the cube's near corner and
+# pushes the cube away.
+_WUJI2_FINGERS = {
+    f"r_{finger}_{joint}": amount
+    for finger in ("index_finger", "middle_finger", "ring_finger", "pinky")
+    for joint, amount in zip(("mcp_flex", "pip", "dip"), (0.5, 1.0, 0.4))
+}
+_WUJI2_THUMB_PRE = {"r_thumb_cmc_flex": 1.241, "r_thumb_cmc_abd": -0.282, "r_thumb_mcp": -0.997, "r_thumb_ip": -0.229}
+_WUJI2_THUMB = {"r_thumb_cmc_flex": 1.241, "r_thumb_cmc_abd": -0.139, "r_thumb_mcp": -0.519, "r_thumb_ip": -0.78}
+_PALM_DOWN_FINGERS_FORWARD = np.array([[-1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, -1.0, 0.0]]).T
+WUJI2_GRASP = HandGrasp(
+    name="wuji2",
+    title="FR3 + Wuji Hand 2 grasp",
+    bot="bots/arm_hand_combos/fr3_wuji_hand2_beta1/right/fr3_wuji_hand2_beta1_right.superdex_bot",
+    wrist_link="r_wrist",
+    rotation=_PALM_DOWN_FINGERS_FORWARD,
+    flange_start=np.pi / 2,
+    offset=(0.018, -0.095, 0.080),
+    fingers=_WUJI2_FINGERS,
+    thumb=_WUJI2_THUMB,
+    thumb_pre=_WUJI2_THUMB_PRE,
+    lifted_cube=(0.462, -0.004, 0.270),
+)
+WUJI2B2_GRASP = dataclasses.replace(
+    WUJI2_GRASP,
+    name="wuji2b2",
+    title="FR3 + Wuji Hand 2 (beta 2) grasp",
+    bot="bots/arm_hand_combos/fr3_wuji_hand2_beta2/right/fr3_wuji_hand2_beta2_right.superdex_bot",
+    lifted_cube=(0.464, -0.007, 0.269),
+)
+
+# Wuji Hand 1. In the palm frame the fingers extend along +z and curl toward +x (the palm
+# side), the thumb (finger 1) rests on the +y side. Palm down with the fingers along +y
+# (palm x -> -Z, y -> -X, z -> +Y); the cube is centered 110 mm ahead of and 65 mm below the
+# palm, 5 mm toward the thumb side. Fingers 2-5 flex on joints 1, 3 and 4 (joint 2 abducts):
+# closed, fingers 2 and 3 reach 8 mm past the cube's far face. The thumb descends already
+# curled above the cube's near-top edge (open) and unrolls onto the near face (thumb, its tip
+# 6 mm inside the face); closing it from the straight pose instead swings it through the
+# cube's place and below the palm, into the table.
+WUJI1_GRASP = HandGrasp(
+    name="wuji1",
+    title="FR3 + Wuji Hand 1 grasp",
+    bot="bots/arm_hand_combos/fr3_wuji_hand1/right/fr3_wuji_hand1_right.superdex_bot",
+    wrist_link="palm_link",
+    rotation=np.array([[0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]).T,
+    flange_start=0.0,
+    offset=(-0.005, -0.11, 0.075),
+    fingers={
+        f"finger{finger}_joint{joint}": amount
+        for finger in (2, 3, 4, 5)
+        for joint, amount in zip((1, 3, 4), (0.6, 1.0, 0.4))
+    },
+    thumb={"finger1_joint1": 1.2, "finger1_joint2": -0.6, "finger1_joint3": 0.85, "finger1_joint4": 0.85},
+    open={"finger1_joint1": 1.6, "finger1_joint2": -0.3, "finger1_joint3": 1.1, "finger1_joint4": 1.1},
+    lifted_cube=(0.447, 0.000, 0.270),
+)
+
+# XHand1. In the root frame (the wrist mount) the fingers extend along -z and curl toward +y
+# (the palm side), the thumb rests on the +x side. Palm down with the fingers along +y as for
+# the Wuji Hand 2; the cube is centered 135 mm ahead of and 70 mm below the root, 2 cm under
+# the palm. Each finger flexes on its two joints: closed, the fingertips reach 7 mm past the
+# far face. The thumb is 12 cm long and would touch the table while bending across the palm
+# at this height, so the hand descends with it already bent across and fully flexed (open),
+# just in front of the cube's near face, and the closure unrolls it onto that face (thumb,
+# 5 mm inside).
+XHAND_GRASP = HandGrasp(
+    name="xhand",
+    title="FR3 + XHand1 grasp",
+    bot="bots/arm_hand_combos/fr3_xhand1/right/fr3_xhand1_right.superdex_bot",
+    wrist_link="right_hand_link",
+    rotation=_PALM_DOWN_FINGERS_FORWARD,
+    flange_start=np.pi / 2,
+    offset=(0.015, -0.135, 0.08),
+    fingers={
+        f"right_hand_{finger}_joint{joint}": amount
+        for finger in ("index", "mid", "ring", "pinky")
+        for joint, amount in zip((1, 2), (0.6, 1.0))
+    },
+    thumb={"right_hand_thumb_bend_joint": 1.4, "right_hand_thumb_rota_joint1": 0.8, "right_hand_thumb_rota_joint2": 0.9},
+    open={"right_hand_thumb_bend_joint": 1.4, "right_hand_thumb_rota_joint1": 0.8, "right_hand_thumb_rota_joint2": 1.6},
+    lifted_cube=(0.453, -0.001, 0.252),
+)
+
+HAND_GRASPS = {p.name: p for p in (DG5F_GRASP, WUJI2_GRASP, WUJI2B2_GRASP, WUJI1_GRASP, XHAND_GRASP)}
 TENDON_SCENE = "samples/tendon_comparison_articulation.mochi_scene"
 TENDON_SLIDER_GAINS = (200.0, 5.0)  # pose-controller gains of the tendon slider (prismatic joint)
 TENDON_HINGE_DAMPING = 0.02  # the finger hinges are passive: no stiffness, light damping
@@ -1518,10 +1657,10 @@ def build_grasp_task(soft: bool = False, fingertip_box_dir: pathlib.Path | None 
     return scene, bot, arm, cube, cube_position, context, controls0, goal, dt
 
 
-def spawn_hand_arm(scene, with_controller: bool = True, with_contact: bool = True):
-    """FR3 arm with the Tesollo DG-5F hand (20 revolute finger joints); the finger joints
-    get the gripper gains, the arm the reach/push gains times GRASP_ARM_GAIN_SCALE. The
-    returned end-effector actor is the palm link."""
+def spawn_hand_arm(profile: HandGrasp, scene, with_controller: bool = True, with_contact: bool = True):
+    """FR3 arm with the five-finger hand of the profile; the finger joints get the gripper
+    gains, the arm the reach/push gains times GRASP_ARM_GAIN_SCALE. The returned
+    end-effector actor is the profile's wrist link."""
     arm_gains = _arm_gains()
 
     def gains_of(name):
@@ -1531,59 +1670,133 @@ def spawn_hand_arm(scene, with_controller: bool = True, with_contact: bool = Tru
         return GRIPPER_GAINS
 
     return spawn_bot(
-        scene, HAND_BOT, HAND_PALM_LINK, gains_of, with_controller, with_contact, GRASP_CONTACT
+        scene, profile.bot, profile.wrist_link, gains_of, with_controller, with_contact, GRASP_CONTACT
     )
 
 
-def hand_ik_poses(points):
-    """Joint poses placing the palm center at each point with the fingers along +y and the
-    palm facing down (three position targets on the palm link: its center and two points 5 cm
-    along its local x and z axes), from a dedicated zero-gravity IK scene."""
+def revolute_dof_indices(bot) -> dict[str, int]:
+    """Index in the articulated pose vector of every revolute joint of a fixed-base bot,
+    by joint name (the welded joints carry no degree of freedom)."""
+    indices: dict[str, int] = {}
+    joints = bot.get_bot_prefab().joints
+    for i in range(len(joints)):
+        joint = joints[i]
+        if joint.type == physics.ArticulatedJointType.REVOLUTE:
+            indices[joint.name] = len(indices)
+    if len(indices) != bot.get_articulated_actor().get_num_dofs():
+        raise RuntimeError("the bot has degrees of freedom that are not revolute joints")
+    return indices
+
+
+def hand_ik_poses(points, spawner, link_name: str, rotation: np.ndarray, flange_start: float):
+    """Joint poses placing the origin of the link whose name ends with ``link_name`` at
+    each point with the world orientation ``rotation`` (a 3x3 matrix whose columns are
+    the link's axes in the world), from a dedicated zero-gravity IK scene. The engine's IK
+    solver takes one position and one rotation target per link and solves from the
+    current pose; ``flange_start`` is the arm's joint 7 at the start (the pose it converges
+    to depends on that side of the joint's range). A pose that is not reached within a
+    millimetre and half a degree is an error."""
     scene = physics.create_scene("ik")
     scene.set_gravity([0.0, 0.0, 0.0])
-    bot, arm, palm, context = spawn_hand_arm(scene, with_controller=False, with_contact=False)
+    bot, arm, link, context = spawner(scene, with_controller=False, with_contact=False)
+    if link_name is not None and not link.get_name().endswith(link_name):
+        links = []
+        scene.for_each_actor(lambda a: links.append(a) if a.is_nested_link_actor() else None)
+        link = [a for a in links if a.get_name().endswith(link_name)][0]
     solver = physics.experimental.create_ik_solver(scene)
     params = solver.get_solver_params()
-    params.max_iter = 800
+    params.max_iter = 2000
     params.abs_tol = 1e-8
     params.rel_tol = 1e-10
     params.position_error_thres = 1e-4
+    params.rotation_error_thres = 1e-4
     solver.set_solver_params(params)
-    offset = 0.05
+    rotation = np.asarray(rotation, dtype=np.float64)
+    if not np.allclose(rotation @ rotation.T, np.eye(3), atol=1e-12) or np.linalg.det(rotation) < 0:
+        raise ValueError("rotation must be a proper rotation matrix")
+    q_start = np.zeros(arm.get_num_dofs())
+    arm.get_articulated_pose(q_start)
+    q_start[6] = flange_start
+    arm.set_articulated_pose_from_joints(q_start)
     poses = []
     for point in points:
         point = np.asarray(point, dtype=np.float64)
-        solver.clear_position_target(palm.get_handle())
-        solver.create_position_target(palm.get_handle(), [0.0, 0.0, 0.0], list(point), HAND_IK_WEIGHT)
-        solver.create_position_target(
-            palm.get_handle(), [offset, 0.0, 0.0], list(point + np.array([0.0, 0.0, -offset])), 1.0
+        solver.create_position_target(link.get_handle(), [0.0, 0.0, 0.0], list(point), 1.0)
+        solver.create_rotation_target(
+            link.get_handle(), [0.0, 0.0, 0.0], list(_rotation_vector(rotation)), 1.0
         )
-        solver.create_position_target(
-            palm.get_handle(), [0.0, 0.0, offset], list(point + np.array([0.0, offset, 0.0])), 1.0
-        )
-        solver.solve_ik()
+        converged = solver.solve_ik()
         q = np.zeros(arm.get_num_dofs())
         arm.get_articulated_pose(q)
-        reached = np.asarray(palm.get_center_of_mass_transform().translation)
-        print(f"  IK palm {np.round(point, 3)} -> {reached.round(3)}")
+        transform = link.get_root_transform()
+        reached = np.asarray(transform.translation, dtype=np.float64)
+        reached_rotation = _quaternion_matrix(np.asarray(transform.rotation.tolist(), dtype=np.float64))
+        cosine = np.clip((np.trace(rotation.T @ reached_rotation) - 1.0) / 2.0, -1.0, 1.0)
+        angle = np.degrees(np.arccos(cosine))
+        distance = np.linalg.norm(reached - point)
+        print(
+            f"  IK {link_name} {np.round(point, 3)} -> {reached.round(4)} "
+            f"({distance * 1000:.2f} mm, {angle:.2f} deg off, joint 7 at {q[6]:.2f})"
+        )
+        if not converged or distance > 1e-3 or angle > 0.5:
+            raise RuntimeError(
+                f"IK did not reach the pose at {np.round(point, 3)}: {distance * 1000:.1f} mm and "
+                f"{angle:.1f} deg off (converged: {converged})"
+            )
         poses.append(q)
-    solver.clear_position_target(palm.get_handle())
+    solver.clear_position_target(link.get_handle())
+    solver.clear_rotation_target(link.get_handle())
     robotics.destroy_bot(scene, bot)
     physics.experimental.destroy_ik_solver(solver)
     return poses
 
 
-def build_hand_grasp_task():
-    """Scene, actors and initial controls of the five-finger grasp (see the module docstring);
-    the same return value as :func:`build_grasp_task`."""
-    print("[robot_hand_grasp] IK for the descend / grasp / lift palm poses")
-    grasp = HAND_CUBE_POS + np.array([HAND_SIDE, -HAND_BACK, HAND_UP])
-    q_pre, q_grasp, q_lift = hand_ik_poses(
-        [grasp + np.array([0.0, 0.0, 0.15]), grasp, grasp + np.array([0.0, 0.0, 0.25])]
+def _rotation_vector(rotation: np.ndarray) -> np.ndarray:
+    """Axis times angle of a rotation matrix."""
+    cosine = np.clip((np.trace(rotation) - 1.0) / 2.0, -1.0, 1.0)
+    angle = float(np.arccos(cosine))
+    if angle < 1e-12:
+        return np.zeros(3)
+    if angle > np.pi - 1e-6:
+        # Rotation by pi: the axis is the eigenvector for eigenvalue 1.
+        values, vectors = np.linalg.eigh(rotation + rotation.T)
+        axis = vectors[:, np.argmax(values)]
+        return np.pi * axis / np.linalg.norm(axis)
+    axis = np.array(
+        [rotation[2, 1] - rotation[1, 2], rotation[0, 2] - rotation[2, 0], rotation[1, 0] - rotation[0, 1]]
+    ) / (2.0 * np.sin(angle))
+    return angle * axis
+
+
+def _quaternion_matrix(q: np.ndarray) -> np.ndarray:
+    """Rotation matrix of a unit quaternion (x, y, z, w)."""
+    x, y, z, w = q
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
     )
-    scene = physics.create_scene("robot_hand_grasp")
+
+
+def build_hand_grasp_task(profile: HandGrasp):
+    """Scene, actors and initial controls of a five-finger grasp (see :class:`HandGrasp` and
+    the module docstring); the same return value as :func:`build_grasp_task`."""
+    name = f"robot_{profile.name}_grasp"
+    print(f"[{name}] IK for the descend / grasp / lift wrist poses")
+    grasp = HAND_CUBE_POS + np.array(profile.offset)
+    spawner = functools.partial(spawn_hand_arm, profile)
+    q_pre, q_grasp, q_lift = hand_ik_poses(
+        [grasp + np.array([0.0, 0.0, 0.15]), grasp, grasp + np.array([0.0, 0.0, 0.25])],
+        spawner,
+        profile.wrist_link,
+        profile.rotation,
+        profile.flange_start,
+    )
+    scene = physics.create_scene(name)
     scene.set_gravity([0.0, 0.0, -9.81])
-    bot, arm, palm, context = spawn_hand_arm(scene)
+    bot, arm, wrist, context = spawner(scene)
     scene.create_rigid_actor(
         name="ground",
         shape=physics.create_plane_shape(normal=[0.0, 0.0, 1.0], distance=0.0),
@@ -1597,23 +1810,40 @@ def build_hand_grasp_task():
         contact=GRASP_CONTACT,
         world_from_local=physics.TransformRT(HAND_CUBE_POS.tolist()),
     )
+    dofs = revolute_dof_indices(bot)
+    unknown = (set(profile.fingers) | set(profile.thumb) | set(profile.thumb_pre or {}) | set(profile.open)) - set(dofs)
+    if unknown:
+        raise ValueError(f"the profile {profile.name} names joints the hand does not have: {sorted(unknown)}")
     n = arm.get_num_dofs()
     q0 = np.zeros(n)
     arm.get_articulated_pose(q0)
-    hand_open = q0[7:].copy()
+
+    def hand_targets(values: dict[str, float], base: np.ndarray) -> np.ndarray:
+        h = base.copy()
+        for joint, value in values.items():
+            h[dofs[joint] - 7] = value
+        return h
+
+    hand_open = hand_targets(profile.open, q0[7:])
     for q in (q_pre, q_grasp, q_lift):
         q[7:] = hand_open  # the IK moves the fingers too; keep the hand open
     arm.set_articulated_pose_from_joints(q_pre)
     configure(scene)
+    fingers_closed = hand_targets(profile.fingers, hand_open)
+    thumb = [dofs[joint] - 7 for joint in profile.thumb]
+    thumb_open = hand_open[thumb].copy()
+    thumb_closed = np.array([profile.thumb[joint] for joint in profile.thumb])
+    thumb_pre = None if profile.thumb_pre is None else np.array([profile.thumb_pre[joint] for joint in profile.thumb])
 
     def hand_closed(fraction: float) -> np.ndarray:
-        h = hand_open.copy()
-        for finger in range(2, 6):
-            b = 4 * (finger - 1)
-            for j, amount in zip((1, 2, 3), HAND_FLEX):  # joints x_2 (MCP), x_3 (PIP), x_4 (DIP)
-                h[b + j] = hand_open[b + j] + fraction * (amount - hand_open[b + j])
-        for j in range(4):
-            h[j] = hand_open[j] + fraction * (HAND_THUMB[j] - hand_open[j])
+        h = hand_open + fraction * (fingers_closed - hand_open)
+        if thumb_pre is None:
+            h[thumb] = thumb_open + fraction * (thumb_closed - thumb_open)
+        elif fraction < profile.thumb_swing:
+            h[thumb] = thumb_open + (fraction / profile.thumb_swing) * (thumb_pre - thumb_open)
+        else:
+            a = (fraction - profile.thumb_swing) / (1.0 - profile.thumb_swing)
+            h[thumb] = thumb_pre + a * (thumb_closed - thumb_pre)
         return h
 
     num_steps = HAND_LIFT_END
@@ -1631,7 +1861,7 @@ def build_hand_grasp_task():
 
     # Where the cube ends up in the grasp after the lift (measured on the initial trajectory),
     # displaced sideways: the optimizer has to carry it there.
-    goal = np.array([0.476, 0.052, 0.265]) + GRASP_GOAL_OFFSET
+    goal = np.array(profile.lifted_cube) + GRASP_GOAL_OFFSET
     return scene, bot, arm, cube, cube_position, context, controls0, goal, dt
 
 
@@ -1639,10 +1869,10 @@ def task_grasp(output_dir: pathlib.Path, num_iterations: int, check: bool) -> No
     _task_grasp_impl(output_dir, num_iterations, check, soft=False)
 
 
-def task_hand_grasp(output_dir: pathlib.Path, num_iterations: int, check: bool) -> None:
-    """The five-finger hand grasp (see :func:`build_hand_grasp_task`), optimized like
-    :func:`task_grasp`."""
-    _task_grasp_impl(output_dir, num_iterations, check, soft=False, hand=True)
+def task_hand_grasp(output_dir: pathlib.Path, num_iterations: int, check: bool, hand: str = "hand") -> None:
+    """A five-finger grasp (``hand`` names a profile of HAND_GRASPS; see
+    :func:`build_hand_grasp_task`), optimized like :func:`task_grasp`."""
+    _task_grasp_impl(output_dir, num_iterations, check, soft=False, hand=hand)
 
 
 def task_grasp_soft(output_dir: pathlib.Path, num_iterations: int, check: bool) -> None:
@@ -1652,7 +1882,7 @@ def task_grasp_soft(output_dir: pathlib.Path, num_iterations: int, check: bool) 
 
 
 def _task_grasp_impl(
-    output_dir: pathlib.Path, num_iterations: int, check: bool, soft: bool, hand: bool = False
+    output_dir: pathlib.Path, num_iterations: int, check: bool, soft: bool, hand: str = ""
 ) -> None:
     """FR3 + 2F-85: descend onto a cube, close the fingers, lift it straight up.
     The goal for the cube lies 15 cm beside the lift line, so the loss (the
@@ -1669,11 +1899,21 @@ def _task_grasp_impl(
     once, and that jerk drops the cube too.)"""
     if soft and hand:
         raise ValueError("soft and hand are exclusive")
-    name = "robot_hand_grasp" if hand else ("robot_grasp_soft" if soft else "robot_grasp")
-    carry_start = HAND_CARRY_START if hand else GRASP_CARRY_START
     if hand:
-        scene, bot, arm, cube, cube_position, context, controls0, goal, dt = build_hand_grasp_task()
+        if hand not in HAND_GRASPS:
+            raise ValueError(f"unknown hand {hand!r}; the profiles are {sorted(HAND_GRASPS)}")
+        profile = HAND_GRASPS[hand]
+        name, carry_start = f"robot_{profile.name}_grasp", HAND_CARRY_START
+        title_hand = f"{profile.title}: normalized gradient descent on the carry knots"
+        max_penetration, stall_tolerance = profile.max_penetration, profile.stall_tolerance
+        scene, bot, arm, cube, cube_position, context, controls0, goal, dt = build_hand_grasp_task(profile)
     else:
+        name = "robot_grasp_soft" if soft else "robot_grasp"
+        carry_start = GRASP_CARRY_START
+        title_hand = None
+        # The soft cube's 1e7 contact overlaps more than the rigid limit (reported, not bounded).
+        max_penetration = None if soft else MAX_PENETRATION
+        stall_tolerance = PUSH_SOFT_STALL_TOLERANCE if soft else None
         scene, bot, arm, cube, cube_position, context, controls0, goal, dt = build_grasp_task(
             soft, fingertip_box_dir=output_dir / "fingertip_boxes" if soft else None
         )
@@ -1735,7 +1975,7 @@ def _task_grasp_impl(
             look_from=[1.4, -1.2, 0.7],
             look_at=[0.5, 0.0, 0.15],
             title=(
-                "FR3 + DG-5F five-finger grasp: normalized gradient descent on the carry knots"
+                title_hand
                 if hand
                 else (
                     "FR3 + 2F-85 grasp of a soft cube: normalized gradient descent on the carry knots"
@@ -1753,12 +1993,9 @@ def _task_grasp_impl(
             params0=params0,
             optimizer_kind="ngd",
             substep_levels=PUSH_SUBSTEP_LEVELS if (soft or hand) else 0,
-            # The soft cube's 1e7 contact overlaps more than the rigid limit (reported, not
-            # bounded); the hand's pinch squeezes the fingertips into the cube by design.
-            max_penetration=None if soft else (HAND_MAX_PENETRATION if hand else MAX_PENETRATION),
-            stall_tolerance=(
-                PUSH_SOFT_STALL_TOLERANCE if soft else (HAND_STALL_TOLERANCE if hand else None)
-            ),
+            # The hands' pinches squeeze the fingertips into the cube by design.
+            max_penetration=max_penetration,
+            stall_tolerance=stall_tolerance,
         )
     finally:
         robotics.destroy_bot(scene, bot)
@@ -2127,8 +2364,8 @@ def main() -> None:
     parser.add_argument(
         "--task",
         choices=[
-            "reach", "push", "push_soft", "push_multi", "push_policy", "grasp", "grasp_soft", "hand",
-            "tendon", "haul", "both", "all",
+            "reach", "push", "push_soft", "push_multi", "push_policy", "grasp", "grasp_soft",
+            *HAND_GRASPS, "tendon", "haul", "both", "all",
         ],
         default="all",
     )
@@ -2157,8 +2394,9 @@ def main() -> None:
         task_grasp(args.output_dir, args.iterations, args.check)
     if args.task in ("grasp_soft", "all"):
         task_grasp_soft(args.output_dir, args.iterations, args.check)
-    if args.task in ("hand", "all"):
-        task_hand_grasp(args.output_dir, args.iterations, args.check)
+    for hand in HAND_GRASPS:
+        if args.task in (hand, "all"):
+            task_hand_grasp(args.output_dir, args.iterations, args.check, hand)
     if args.task in ("tendon", "all"):
         task_tendon(args.output_dir, args.iterations, args.check)
     if args.task in ("haul", "all"):

@@ -1,0 +1,22 @@
+{
+  "base": "//arms/fr3/fr3.superdex_bot",
+  "modifications": [
+    {
+      "AttachBot": {
+        "enabled": true,
+        "joint": {
+          "name": "xhand1_to_fr3",
+          "parentLinkFromJoint": {
+            "rotation": [1, 0, 0, 0],
+            "translation": [0, 0, 0]
+          },
+          "type": "Hard"
+        },
+        "name": "xhand1_right",
+        "parentLinkName": "fr3_link8",
+        "path": "//hands/xhand1/right/xhand1_right.superdex_bot"
+      }
+    }
+  ],
+  "name": "fr3_xhand1_right"
+}

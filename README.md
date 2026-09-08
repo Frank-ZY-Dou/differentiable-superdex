@@ -25,7 +25,7 @@ Blender from the simulated trajectories (`superdex_physics/examples/render_diffs
 
 - **2026-09-08** First release, `1.0.0+diffsim.1`: the discrete adjoint of SuperDex Physics
   through frictional contact for rigid, articulated, soft and rod bodies, a PyTorch bridge,
-  closed-loop policy training with contact-force observations, ten manipulation demos and a
+  closed-loop policy training with contact-force observations, fourteen manipulation demos and a
   suite of 174 gradient checks. Based on Project SuperDex 1.0.0 and its `main` branch of
   2026-09-06.
 
@@ -39,7 +39,12 @@ What this fork adds to SuperDex:
   policy training with contact-force observations.
 - Examples in `superdex_physics/examples/example_diffsim_*.py`: the adjoint API by hand, system
   identification, inverse kinematics through the simulator (with a contact-force objective), and
-  ten manipulation tasks solved by gradient descent through contact.
+  fourteen manipulation tasks solved by gradient descent through contact, among them grasps with
+  five hands: the Tesollo DG-5F, the Wuji Hand 2 (beta 1 and beta 2), the Wuji Hand 1 and the
+  RobotEra XHand1.
+- Hand packages for the Wuji Hand 1, the Wuji Hand 2 beta 2 and the XHand1 under `assets/bots/hands`,
+  their FR3 assemblies under `assets/bots/arm_hand_combos`, and `tools/urdf_to_superdex_bot.py`, which
+  converts a URDF description into a SuperDex bot package.
 - A gradient test suite (`superdex_physics/wheels/superdex-physics/test/diffsim`) that checks every
   path against finite differences and closed-form references, run in both precisions by CI.
 

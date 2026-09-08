@@ -195,7 +195,7 @@ All examples live in `superdex_physics/examples` and need `SUPERDEX_PRECISION=do
 | `example_diffsim_video.py` | A rigid throw and a soft landing optimized by gradient descent, rendered to video. |
 | `example_diffsim_sysid.py` | System identification. A sliding cube's friction coefficient and density, or (`--mode soft`) a dropped soft cube's Young's modulus and Poisson's ratio, recovered from observed trajectories to 0.01%. |
 | `example_diffsim_ik.py` | Inverse kinematics through the simulator. L-BFGS on the FR3's joint targets with the adjoint gradient of the settled end-effector pose: in free space it reaches a position and orientation to 0.01 mm where the kinematic solution held by the controller sags 55 mm under gravity; on a box it rests the wrist at a point with exactly 10 N of contact force, the height set by the force objective. 25 rollouts, half a minute in all. |
-| `example_diffsim_robot_video.py` | Ten manipulation tasks solved by gradient descent through contact, each recorded as a video. |
+| `example_diffsim_robot_video.py` | Fourteen manipulation tasks solved by gradient descent through contact, each recorded as a video. |
 
 ```bash
 SUPERDEX_PRECISION=double python superdex_physics/examples/example_diffsim_robot_video.py --task all --check
@@ -208,8 +208,9 @@ animations shown here. The tasks (`--task`): `reach`, an FR3 arm reaching a poin
 `push_multi`, the arm pushing a rigid cube, a soft cube, or a cube that pushes a second one;
 `push_policy`, a feedback policy trained through the simulator on three cube starts, on top of an
 optimized open-loop plan and against an open-loop baseline; `grasp` and `grasp_soft`, a 2F-85
-gripper carrying a rigid or a soft cube; `hand`, a five-finger DG-5F hand carrying a cube;
-`tendon`, a tendon-driven finger with a rod as the cable; `haul`, the arm hauling a box with a
+gripper carrying a rigid or a soft cube; `hand`, `wuji2`, `wuji2b2`, `wuji1` and `xhand`, a five-finger
+hand (the Tesollo DG-5F, the Wuji Hand 2 beta 1 and beta 2, the Wuji Hand 1, the XHand1) carrying a
+cube; `tendon`, a tendon-driven finger with a rod as the cable; `haul`, the arm hauling a box with a
 cable.
 
 | `push` | `grasp` |
@@ -232,7 +233,11 @@ first iteration.
 | `push_policy` | MLP weights, closed loop, three cube starts | 3.8e-3 (mean) | 8.5e-5; 0.1 / 0.6 / 0.8 cm to the goal | 2.0e-3 (mean over starts) |
 | `grasp` | carry knots, 2F-85 gripper, closed-loop linkage | 1.1e-2 | 2e-6 | 1.4e-4 |
 | `grasp_soft` | carry knots, FEM cube in the gripper | 1.1e-2 | < 1e-6 | 1.3e-3 |
-| `hand` | carry knots, DG-5F fingertip pinch, 27 DoFs | 1.1e-2 | < 1e-6 | 3.0e-5 |
+| `hand` | carry knots, DG-5F fingertip pinch, 27 DoFs | 1.1e-2 | 7.7e-5 | 2.2e-8 |
+| `wuji2` | carry knots, Wuji Hand 2 (beta 1) pinch, 27 DoFs | 1.1e-2 | 1e-6 | 6.8e-8 |
+| `wuji2b2` | carry knots, Wuji Hand 2 (beta 2) pinch, 27 DoFs | 1.1e-2 | < 1e-6 | 2.3e-7 |
+| `wuji1` | carry knots, Wuji Hand 1 pinch, 27 DoFs | 1.1e-2 | < 1e-6 | 2.4e-8 |
+| `xhand` | carry knots, XHand1 pinch, 19 DoFs | 1.1e-2 | < 1e-6 | 1.4e-8 |
 | `tendon` | tendon pull of a rod-driven finger | 9.9e-4 | < 1e-6 | 1.1e-4 |
 | `haul` | joint targets through a cable to a box | 6.6e-3 | 2.5e-3 | 2.3e-5 |
 
@@ -242,9 +247,17 @@ use a stiffness commensurate with their material (1e6 on a 1e5 Pa cube), the lev
 Newton solve still converges to the tolerance the adjoint needs. The five-finger hand carries its
 5 cm cube in a fingertip pinch (fingers 2-4 on the far face, the thumb on the near face): the
 DG-5F thumb cannot oppose the finger pads along the finger direction by more than about 5 cm, so
-a palm-down power grasp of a larger cube is out of reach. `superdex.physics.utils.penetration.PenetrationChecker`
+a palm-down power grasp of a larger cube is out of reach. The other hands pinch the same cube the same
+way; each closure is a profile of the demo (`HAND_GRASPS`): which joints close, where the wrist goes,
+and how the thumb approaches (the Wuji Hand 2 swings its thumb across the palm first and then advances it
+along the fingers; the Wuji Hand 1 and the XHand1 descend with the thumb already curled beside the cube's
+near face, because their thumbs sweep through the cube's place when they close from the open pose). The
+Wuji Hand 1, the Wuji Hand 2 beta 2 and the XHand1 packages under `assets/bots/hands` were converted
+from the vendors' URDF descriptions with `tools/urdf_to_superdex_bot.py` (collision hulls, GLB visuals),
+and `assets/bots/arm_hand_combos` mounts each of them on the FR3. `superdex.physics.utils.penetration.PenetrationChecker`
 measures interpenetration from the engine's contact samples (the deepest sample per actor pair
-after each step); the demo replays report it and bound it at 5 mm for the rigid tasks. Penalty
+after each step); the demo replays report it and bound it at 5 mm for the rigid tasks (10 mm for the
+hand pinches, which squeeze the fingertips into the cube by design; they measure 3 to 5.5 mm). Penalty
 contact overlaps under load, about 1 to 3.5 mm at the default stiffness here, and the FR3 wrist's
 render meshes extend up to a centimetre beyond its collision hulls, so a wrist that visibly enters
 a cube overlaps less than it looks.
