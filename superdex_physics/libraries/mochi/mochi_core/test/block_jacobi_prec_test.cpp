@@ -31,8 +31,14 @@ using namespace mochi::krylov;
 // Use real instead of float or double to reduce build time. Both are checked by CI.
 using Scalar = real;
 
-template <typename Scalar, typename InType, typename OutType, typename MatrixType>
+template <
+    bool kIsSymmetric,
+    typename Scalar,
+    typename InType,
+    typename OutType,
+    typename MatrixType>
 static void EvalBlockJacobiPrec(MatrixType& A) {
+  constexpr real kRelTol = 10_r * std::numeric_limits<real>::epsilon();
   constexpr int kNumColsInAtCT = mochi::krylov::details::MatTraits<InType>::kNumCols;
   int const numColsB = (kNumColsInAtCT == mochi::krylov::kDynamic) ? 11 : kNumColsInAtCT;
   int numRows = A.Rows();
@@ -45,7 +51,6 @@ static void EvalBlockJacobiPrec(MatrixType& A) {
   OutType JB(numRows, numColsB);
 
   {
-    constexpr real kRelTol = 10_r * std::numeric_limits<real>::epsilon();
     mochi::krylov::JacobiPrec<Scalar> J(A);
     JB.SetRandom(123);
     J(B, JB);
@@ -59,7 +64,7 @@ static void EvalBlockJacobiPrec(MatrixType& A) {
     }
   }
   {
-    mochi::krylov::BlockJacobiPrec<Scalar, 2> J(A);
+    mochi::krylov::BlockJacobiPrec<Scalar, 2, kIsSymmetric> J(A);
     JB.SetRandom(234);
     J(B, JB);
     for (int jj = 0; jj < numColsB; ++jj) {
@@ -72,20 +77,20 @@ static void EvalBlockJacobiPrec(MatrixType& A) {
     }
   }
   {
-    mochi::krylov::BlockJacobiPrec<Scalar, 3> J(A);
+    mochi::krylov::BlockJacobiPrec<Scalar, 3, kIsSymmetric> J(A);
     JB.SetRandom(345);
     J(B, JB);
     for (int jj = 0; jj < numColsB; ++jj) {
       EXPECT_NEAR_RTOL(JB(0, jj), Scalar(jj + 1) * Scalar(1.2222), 0.0001);
       EXPECT_NEAR_RTOL(JB(1, jj), Scalar(jj + 1) * Scalar(1.4444), 0.0001);
       EXPECT_NEAR_RTOL(JB(2, jj), Scalar(jj + 1) * Scalar(1.1111), 0.0001);
-      EXPECT_NEAR_EQ(JB(3, jj), Scalar(jj + 1) * Scalar(7));
-      EXPECT_NEAR_EQ(JB(4, jj), Scalar(jj + 1) * Scalar(10));
-      EXPECT_NEAR_EQ(JB(5, jj), Scalar(jj + 1) * Scalar(8));
+      EXPECT_NEAR_RTOL(JB(3, jj), Scalar(jj + 1) * Scalar(7), kRelTol);
+      EXPECT_NEAR_RTOL(JB(4, jj), Scalar(jj + 1) * Scalar(10), kRelTol);
+      EXPECT_NEAR_RTOL(JB(5, jj), Scalar(jj + 1) * Scalar(8), kRelTol);
     }
   }
   {
-    mochi::krylov::BlockJacobiPrec<Scalar, 6> J(A);
+    mochi::krylov::BlockJacobiPrec<Scalar, 6, kIsSymmetric> J(A);
     JB.SetRandom(456);
     J(B, JB);
     for (int jj = 0; jj < numColsB; ++jj) {
@@ -101,7 +106,7 @@ static void EvalBlockJacobiPrec(MatrixType& A) {
   // Test Solve and ConcurrentSolve() methods. Only supported for column vectors.
   {
     constexpr int kPrecBlockSize = 2;
-    BlockJacobiPrec<Scalar, kPrecBlockSize> J(A);
+    BlockJacobiPrec<Scalar, kPrecBlockSize, kIsSymmetric> J(A);
 
     ColumnVector<Scalar> X(numRows), JX1(numRows), JX2(numRows);
     X.SetRandom(1);
@@ -134,49 +139,55 @@ static void EvalBlockJacobiPrec(MatrixType& A) {
   }
 }
 
-TEST(BlockJacobiPrec, BlockJacobiPrec) {
+template <bool kIsSymmetric>
+static void TestBlockJacobiPrec() {
   DynamicArray<int> rp{0, 2, 5, 8, 11, 14, 16};
   DynamicArray<int> ci{0, 1, 0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 5};
   DynamicArray<Scalar> va{2, -1, -1, 3, -1, -1, 4, -1, -1, 2, -1, -1, 2, -1, -1, 2};
   SparseMatrix<Scalar, int, int> C(6, rp, ci, va);
   {
-    EvalBlockJacobiPrec<Scalar, ColumnVector<Scalar>, ColumnVector<Scalar>>(C);
-    EvalBlockJacobiPrec<Scalar, Matrix<Scalar>, Matrix<Scalar>>(C);
-    EvalBlockJacobiPrec<Scalar, Matrix<Scalar>, RowMatrix<Scalar>>(C);
-    EvalBlockJacobiPrec<Scalar, RowMatrix<Scalar>, Matrix<Scalar>>(C);
-    EvalBlockJacobiPrec<Scalar, RowMatrix<Scalar>, RowMatrix<Scalar>>(C);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, ColumnVector<Scalar>, ColumnVector<Scalar>>(C);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, Matrix<Scalar>, Matrix<Scalar>>(C);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, Matrix<Scalar>, RowMatrix<Scalar>>(C);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, RowMatrix<Scalar>, Matrix<Scalar>>(C);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, RowMatrix<Scalar>, RowMatrix<Scalar>>(C);
   }
   {
     auto bSpC = ToBlockSparseMatrix<2>(C);
-    EvalBlockJacobiPrec<Scalar, ColumnVector<Scalar>, ColumnVector<Scalar>>(bSpC);
-    EvalBlockJacobiPrec<Scalar, Matrix<Scalar>, Matrix<Scalar>>(bSpC);
-    EvalBlockJacobiPrec<Scalar, Matrix<Scalar>, RowMatrix<Scalar>>(bSpC);
-    EvalBlockJacobiPrec<Scalar, RowMatrix<Scalar>, Matrix<Scalar>>(bSpC);
-    EvalBlockJacobiPrec<Scalar, RowMatrix<Scalar>, RowMatrix<Scalar>>(bSpC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, ColumnVector<Scalar>, ColumnVector<Scalar>>(bSpC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, Matrix<Scalar>, Matrix<Scalar>>(bSpC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, Matrix<Scalar>, RowMatrix<Scalar>>(bSpC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, RowMatrix<Scalar>, Matrix<Scalar>>(bSpC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, RowMatrix<Scalar>, RowMatrix<Scalar>>(bSpC);
   }
   {
     auto bSpC = ToBlockSparseMatrix<3>(C);
-    EvalBlockJacobiPrec<Scalar, ColumnVector<Scalar>, ColumnVector<Scalar>>(bSpC);
-    EvalBlockJacobiPrec<Scalar, Matrix<Scalar>, Matrix<Scalar>>(bSpC);
-    EvalBlockJacobiPrec<Scalar, Matrix<Scalar>, RowMatrix<Scalar>>(bSpC);
-    EvalBlockJacobiPrec<Scalar, RowMatrix<Scalar>, Matrix<Scalar>>(bSpC);
-    EvalBlockJacobiPrec<Scalar, RowMatrix<Scalar>, RowMatrix<Scalar>>(bSpC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, ColumnVector<Scalar>, ColumnVector<Scalar>>(bSpC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, Matrix<Scalar>, Matrix<Scalar>>(bSpC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, Matrix<Scalar>, RowMatrix<Scalar>>(bSpC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, RowMatrix<Scalar>, Matrix<Scalar>>(bSpC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, RowMatrix<Scalar>, RowMatrix<Scalar>>(bSpC);
   }
   {
     auto dC = ToMatrix(C);
-    EvalBlockJacobiPrec<Scalar, ColumnVector<Scalar>, ColumnVector<Scalar>>(dC);
-    EvalBlockJacobiPrec<Scalar, Matrix<Scalar>, Matrix<Scalar>>(dC);
-    EvalBlockJacobiPrec<Scalar, Matrix<Scalar>, RowMatrix<Scalar>>(dC);
-    EvalBlockJacobiPrec<Scalar, RowMatrix<Scalar>, Matrix<Scalar>>(dC);
-    EvalBlockJacobiPrec<Scalar, RowMatrix<Scalar>, RowMatrix<Scalar>>(dC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, ColumnVector<Scalar>, ColumnVector<Scalar>>(dC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, Matrix<Scalar>, Matrix<Scalar>>(dC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, Matrix<Scalar>, RowMatrix<Scalar>>(dC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, RowMatrix<Scalar>, Matrix<Scalar>>(dC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, RowMatrix<Scalar>, RowMatrix<Scalar>>(dC);
   }
   {
     RowMatrix<Scalar> dC(6, 6); // Row-major, dynamic
     dC = ToMatrix(C);
-    EvalBlockJacobiPrec<Scalar, ColumnVector<Scalar>, ColumnVector<Scalar>>(dC);
-    EvalBlockJacobiPrec<Scalar, Matrix<Scalar>, Matrix<Scalar>>(dC);
-    EvalBlockJacobiPrec<Scalar, Matrix<Scalar>, RowMatrix<Scalar>>(dC);
-    EvalBlockJacobiPrec<Scalar, RowMatrix<Scalar>, Matrix<Scalar>>(dC);
-    EvalBlockJacobiPrec<Scalar, RowMatrix<Scalar>, RowMatrix<Scalar>>(dC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, ColumnVector<Scalar>, ColumnVector<Scalar>>(dC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, Matrix<Scalar>, Matrix<Scalar>>(dC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, Matrix<Scalar>, RowMatrix<Scalar>>(dC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, RowMatrix<Scalar>, Matrix<Scalar>>(dC);
+    EvalBlockJacobiPrec<kIsSymmetric, Scalar, RowMatrix<Scalar>, RowMatrix<Scalar>>(dC);
   }
+}
+
+TEST(BlockJacobiPrec, BlockJacobiPrec) {
+  TestBlockJacobiPrec</*kIsSymmetric*/ false>();
+  TestBlockJacobiPrec</*kIsSymmetric*/ true>();
 }

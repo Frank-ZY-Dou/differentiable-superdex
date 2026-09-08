@@ -85,6 +85,11 @@ struct ActorPreconditioner {
   virtual constexpr PreconditionerType GetType() const = 0;
 };
 
+/**
+ * @brief Block Jacobi actor preconditioner.
+ *
+ * @note Only valid for symmetric actors.
+ */
 template <typename T, int kBlockSize>
 class BlockJacobiActorPrec : public ActorPreconditioner<T> {
  public:
@@ -111,7 +116,7 @@ class BlockJacobiActorPrec : public ActorPreconditioner<T> {
     return kBlockSize > 1 ? PreconditionerType::BlockJacobi : PreconditionerType::Jacobi;
   }
 
-  krylov::BlockJacobiPrec<T, kBlockSize> prec;
+  krylov::BlockJacobiPrec<T, kBlockSize, /*kIsSymmetric*/ true> prec;
 };
 
 /** @brief Symmetric inverse actor preconditioner. */

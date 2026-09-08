@@ -237,7 +237,7 @@ struct AMGPrec : Preconditioner<Scalar> {
 
   DynamicArray<AMGLevel<Scalar, kDofsPerNode>> _coarsenings = {};
   using SmootherType = typename std::variant<
-      BlockJacobiPrec<Scalar, kDofsPerNode>,
+      BlockJacobiPrec<Scalar, kDofsPerNode, /*kIsSymmetric*/ true>,
       ColoredSSORPrec<BlockSparseMatrixView<Scalar const, kDofsPerNode, int const, int const>>>;
   DynamicArray<SmootherType> _relaxOps = {};
   RowMatrix<Scalar> _coarseInverse;

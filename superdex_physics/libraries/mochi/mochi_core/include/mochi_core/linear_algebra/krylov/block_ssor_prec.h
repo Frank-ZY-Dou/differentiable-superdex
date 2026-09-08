@@ -39,6 +39,7 @@ namespace mochi::krylov {
 ///
 /// @note It is recommended to use SSORPrec for a pointwise implementation (and not to use
 /// BlockSSORPrec<..., 1, ...>).
+/// @pre The input matrix must be symmetric.
 template <typename Scalar, int kPrecBlockSize, typename MatrixType>
 struct BlockSSORPrec final : Preconditioner<Scalar> {
   static_assert(!std::is_const_v<Scalar>, "Implementation assumes Scalar is non-const.");
@@ -576,8 +577,7 @@ void BlockSSORPrec<Scalar, kPrecBlockSize, MatrixType>::Update(MatrixType const&
   auto numBlocks = A.Rows() / kPrecBlockSize;
   _inverseDiagBlocks.resize(numBlocks);
   ExtractBlockDiagonal(A, MakeSpan(_inverseDiagBlocks));
-  // If needed for performance, BatchedInverse could be replaced by a BatchedSymInverse.
-  BatchedInverse(MakeSpan(_inverseDiagBlocks));
+  BatchedInverse<true>(MakeSpan(_inverseDiagBlocks));
   //--- Scale the diagonal blocks if needed
   if (Abs(_omega_s - 1) > 2 * std::numeric_limits<Scalar>::epsilon()) {
     //--- Scale the inverse diagonal blocks with _omega_s
