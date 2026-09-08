@@ -2,7 +2,7 @@
 
 All notable changes to this repository will be documented here.
 
-## [1.0.0+diffsim.1] - 2026-09-07
+## [1.0.0+diffsim.1] - 2026-09-08
 
 The differentiable-simulation fork of SuperDex 1.0.0. `+diffsim.N` counts this fork's releases on
 that base; its wheels are built from this repository, not from PyPI. Includes the upstream `main`
