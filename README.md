@@ -24,10 +24,11 @@ The same grasp with four more hands, each an FR3 assembly of this fork:
 | **XHand1 (`xhand`)** | **Wuji Hand 2 beta 2 (`wuji2b2`)** |
 | ![xhand](superdex_physics/examples/media/robot_xhand_grasp.gif) | ![wuji2b2](superdex_physics/examples/media/robot_wuji2b2_grasp.gif) |
 
-Each animation is one optimization: the controller targets of the robot are updated by gradient
-descent through the simulator until the object reaches its goal, and the adjoint gradient is
-checked against finite differences at the first iteration. The animations are rendered with
-Blender from the simulated trajectories (`superdex_physics/examples/render_diffsim_blender.py`).
+Each animation is the motion found by gradient descent through the simulator: the controller
+targets of the robot are updated with the adjoint gradient, checked against finite differences at
+the first iteration, until the object reaches its goal. The animations show the final iteration,
+rendered with Blender from the simulated trajectories
+(`superdex_physics/examples/render_diffsim_blender.py`).
 
 ## 📢 Updates
 
