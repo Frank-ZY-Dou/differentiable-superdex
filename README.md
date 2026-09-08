@@ -18,7 +18,16 @@ SuperDex.
 
 Each animation is one optimization: the controller targets of the robot are updated by gradient
 descent through the simulator until the object reaches its goal, and the adjoint gradient is
-checked against finite differences at the first iteration.
+checked against finite differences at the first iteration. The animations are rendered with
+Blender from the simulated trajectories (`superdex_physics/examples/render_diffsim_blender.py`).
+
+## News
+
+- **2026-09-08** First release, `1.0.0+diffsim.1`: the discrete adjoint of SuperDex Physics
+  through frictional contact for rigid, articulated, soft and rod bodies, a PyTorch bridge,
+  closed-loop policy training with contact-force observations, ten manipulation demos and a
+  suite of 174 gradient checks. Based on Project SuperDex 1.0.0 and its `main` branch of
+  2026-09-06.
 
 What this fork adds to SuperDex:
 
@@ -29,7 +38,8 @@ What this fork adds to SuperDex:
   checkpoints, running losses and adaptive substepping, a PyTorch autograd bridge, and closed-loop
   policy training with contact-force observations.
 - Examples in `superdex_physics/examples/example_diffsim_*.py`: the adjoint API by hand, system
-  identification, and ten manipulation tasks solved by gradient descent through contact.
+  identification, inverse kinematics through the simulator (with a contact-force objective), and
+  ten manipulation tasks solved by gradient descent through contact.
 - A gradient test suite (`superdex_physics/wheels/superdex-physics/test/diffsim`) that checks every
   path against finite differences and closed-form references, run in both precisions by CI.
 

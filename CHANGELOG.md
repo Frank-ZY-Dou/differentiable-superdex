@@ -31,9 +31,12 @@ branch as of 2026-09-06.
   measured from the engine's contact samples, with a report and an assertion.
 - Examples in `superdex_physics/examples`: `example_diffsim_throw.py` (the per-step API by hand),
   `example_diffsim_video.py` (a rigid throw and a soft landing), `example_diffsim_sysid.py`
-  (friction and density, or soft material parameters, identified from trajectories) and
-  `example_diffsim_robot_video.py` (ten manipulation tasks on video, with finite-difference
-  checks).
+  (friction and density, or soft material parameters, identified from trajectories),
+  `example_diffsim_ik.py` (inverse kinematics through the simulator: joint targets solved by
+  L-BFGS on the settled pose, compensating the controller's sag under gravity, and with a
+  contact-force objective against a box) and `example_diffsim_robot_video.py` (ten manipulation
+  tasks on video, with finite-difference checks). With `--export-scenes` the demos also write the recorded frames' bodies, meshes,
+  textures and camera, and `render_diffsim_blender.py` renders them with Blender.
 - Tests: 174 gradient checks against central finite differences and closed-form references in
   `superdex_physics/wheels/superdex-physics/test/diffsim`, run in both precisions by the
   `diffsim-tests` workflow, plus C++ unit tests of the engine-side pieces.

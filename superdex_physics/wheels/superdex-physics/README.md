@@ -194,6 +194,7 @@ All examples live in `superdex_physics/examples` and need `SUPERDEX_PRECISION=do
 | `example_diffsim_throw.py` | The per-step adjoint API written out by hand: a thrown cube lands on a target after impact and sliding. No assets, no GUI. |
 | `example_diffsim_video.py` | A rigid throw and a soft landing optimized by gradient descent, rendered to video. |
 | `example_diffsim_sysid.py` | System identification. A sliding cube's friction coefficient and density, or (`--mode soft`) a dropped soft cube's Young's modulus and Poisson's ratio, recovered from observed trajectories to 0.01%. |
+| `example_diffsim_ik.py` | Inverse kinematics through the simulator. L-BFGS on the FR3's joint targets with the adjoint gradient of the settled end-effector pose: in free space it reaches a position and orientation to 0.01 mm where the kinematic solution held by the controller sags 55 mm under gravity; on a box it rests the wrist at a point with exactly 10 N of contact force, the height set by the force objective. 25 rollouts, half a minute in all. |
 | `example_diffsim_robot_video.py` | Ten manipulation tasks solved by gradient descent through contact, each recorded as a video. |
 
 ```bash
@@ -201,7 +202,9 @@ SUPERDEX_PRECISION=double python superdex_physics/examples/example_diffsim_robot
 ```
 
 `--check` compares the adjoint with central finite differences along its own direction before
-optimizing. The tasks (`--task`): `reach`, an FR3 arm reaching a point; `push`, `push_soft`,
+optimizing; `--export-scenes` also writes each recorded frame's bodies, meshes and camera next to
+the video, and `render_diffsim_blender.py` renders those with Blender (Cycles) into the
+animations shown here. The tasks (`--task`): `reach`, an FR3 arm reaching a point; `push`, `push_soft`,
 `push_multi`, the arm pushing a rigid cube, a soft cube, or a cube that pushes a second one;
 `push_policy`, a feedback policy trained through the simulator on three cube starts, on top of an
 optimized open-loop plan and against an open-loop baseline; `grasp` and `grasp_soft`, a 2F-85

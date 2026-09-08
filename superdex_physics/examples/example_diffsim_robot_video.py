@@ -154,6 +154,7 @@ from superdex.physics.utils import render_model_registry
 from superdex.physics.utils.penetration import PenetrationChecker
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import example_diffsim_video  # noqa: E402
 from example_diffsim_video import GRAVITY, Recorder, box_tet_mesh, save_loss_curve  # noqa: E402
 
 diffsim = physics.diffsim
@@ -463,14 +464,19 @@ def configure(scene, newton_tol: float = 1e-9) -> None:
     diffsim.set_back_propagation_solver_params(scene, params)
 
 
-def ik_joint_poses(waypoints, spawner=None):
-    """Joint poses reaching the end-effector waypoints, from a dedicated
-    zero-gravity IK scene (the engine solves IK as a quasi-static simulation).
-    ``spawner`` builds the bot (default: the FR3 arm)."""
+def ik_joint_poses(waypoints, spawner=None, link_name=None):
+    """Joint poses reaching the waypoints with the end-effector link (or the link whose
+    name ends with ``link_name``), from a dedicated zero-gravity IK scene (the engine
+    solves IK as a quasi-static simulation). ``spawner`` builds the bot (default: the
+    FR3 arm)."""
     spawner = spawn_arm if spawner is None else spawner
     scene = physics.create_scene("ik")
     scene.set_gravity([0.0, 0.0, 0.0])
     bot, arm, ee, context = spawner(scene, with_controller=False, with_contact=False)
+    if link_name is not None:
+        links = []
+        scene.for_each_actor(lambda a: links.append(a) if a.is_nested_link_actor() else None)
+        ee = [a for a in links if a.get_name().endswith(link_name)][0]
     solver = physics.experimental.create_ik_solver(scene)
     params = solver.get_solver_params()
     # The IK defaults (abs_tol 1e-2, 1 cm position threshold) treat targets a few
@@ -2127,7 +2133,13 @@ def main() -> None:
         default="all",
     )
     parser.add_argument("--check", action="store_true", help="finite-difference gradient check first")
+    parser.add_argument(
+        "--export-scenes",
+        action="store_true",
+        help="also export the recorded frames for render_diffsim_blender.py",
+    )
     args = parser.parse_args()
+    example_diffsim_video.EXPORT_SCENES = args.export_scenes
     args.output_dir.mkdir(parents=True, exist_ok=True)
     physics.initialize(num_worker_threads=0)
     start = time.time()

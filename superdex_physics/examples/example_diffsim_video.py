@@ -51,6 +51,7 @@ import), ``polyscope`` (offscreen rendering), ``imageio`` with ffmpeg, OpenCV
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pathlib
 import time
@@ -62,12 +63,17 @@ import cv2
 import imageio.v3 as iio
 import numpy as np
 import superdex.physics as physics
+from superdex.physics.utils import render_model_registry
+from superdex.physics.utils.transformations import make_transform, transformrt_to_numpy
 from superdex.physics.viewer import Viewer, ViewerCfg
 
 diffsim = physics.diffsim
 
 FRAME_SIZE = (960, 540)
 FPS = 25
+# With --export-scenes, every recorded video also gets a <video>.scene.json/.npz pair that
+# render_diffsim_blender.py turns into a Blender rendering of the same frames.
+EXPORT_SCENES = False
 GRAVITY = [0.0, 0.0, -9.81]
 
 
@@ -139,8 +145,181 @@ CUBE_CONN = np.array([
 # ---------------------------------------------------------------------------
 
 
+def _load_render_model(glb_path: str, scale) -> dict:
+    """The geometry and material of a registered render model, in the frame the viewer
+    draws it in (per-axis scale in the model frame, then the model's Y/Z axes unflipped
+    into the shape frame, as GlbActorRenderer does)."""
+    import trimesh
+
+    loaded = trimesh.load(glb_path, force="mesh")
+    if not isinstance(loaded, trimesh.Trimesh):
+        raise ValueError(f"render model is not a single mesh: {glb_path}")
+    unflip = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
+    vertices = np.asarray(loaded.vertices, dtype=np.float64) * np.asarray(scale, dtype=np.float64)
+    vertices = vertices @ unflip.T
+    faces = np.asarray(loaded.faces, dtype=np.int32).reshape(-1, 3)
+    material = {"base_color": None, "metallic": None, "roughness": None}
+    uv = None
+    texture = None
+    visual = loaded.visual
+    if hasattr(visual, "uv") and visual.uv is not None and len(visual.uv) == len(vertices):
+        uv = np.asarray(visual.uv, dtype=np.float32)
+    mat = getattr(visual, "material", None)
+    if mat is not None:
+        color = getattr(mat, "baseColorFactor", None)
+        if color is None:
+            color = getattr(mat, "diffuse", None)
+        if color is not None:
+            color = np.asarray(color, dtype=np.float64).reshape(-1)[:4]
+            if color.max() > 1.0:
+                color = color / 255.0
+            material["base_color"] = [float(c) for c in color]
+        for key in ("metallicFactor", "roughnessFactor"):
+            value = getattr(mat, key, None)
+            if value is not None:
+                material[key.replace("Factor", "")] = float(value)
+        texture = getattr(mat, "baseColorTexture", None)
+        if texture is None:
+            texture = getattr(mat, "image", None)
+    return {"vertices": vertices, "faces": faces, "uv": uv, "texture": texture, "material": material}
+
+
+class SceneExport:
+    """Everything a re-rendering of the recorded frames needs, gathered while the
+    polyscope video is recorded: each body's mesh (the registered render model with its
+    texture, or the physics surface mesh) and its world transform per frame, the soft
+    bodies' vertices per frame, the curves, the trail, the target and the camera.
+    ``Recorder.write`` stores it as ``<video>.scene.json`` plus ``<video>.scene.npz`` (and
+    the textures as PNG files); ``render_diffsim_blender.py`` renders it with Blender."""
+
+    def __init__(self, scene, target, look_from, look_at, title: str):
+        self.scene = scene
+        self.meta = {
+            "title": title,
+            "target": [float(v) for v in target],
+            "look_from": [float(v) for v in look_from],
+            "look_at": [float(v) for v in look_at],
+            "fps": FPS,
+            "size": list(FRAME_SIZE),
+            "ground": False,
+            "bodies": [],
+            "frames": [],
+        }
+        self.arrays: dict[str, np.ndarray] = {}
+        self.textures: dict[int, object] = {}
+        self.bodies: list[dict] = []
+        self.new_iteration = True
+        scene.for_each_actor(self._add_actor)
+
+    def _add_actor(self, actor) -> None:
+        index = len(self.bodies)
+        meta = {"name": actor.get_name(), "index": index, "static": bool(actor.is_static())}
+        entry = render_model_registry.get(self.scene.get_handle(), actor.get_handle())
+        if entry is not None:
+            model = _load_render_model(entry.glb_path, entry.scale)
+            meta.update(kind="rigid", source="render_model", material=model["material"])
+            self.arrays[f"body{index}_vertices"] = model["vertices"].astype(np.float32)
+            self.arrays[f"body{index}_faces"] = model["faces"]
+            if model["uv"] is not None:
+                self.arrays[f"body{index}_uv"] = model["uv"]
+            if model["texture"] is not None:
+                self.textures[index] = model["texture"]
+                meta["texture"] = True
+            self.bodies.append({"actor": actor, "local": entry.local_transform, "meta": meta, "transforms": []})
+            self.meta["bodies"].append(meta)
+            return
+        surface = actor.get_surface_mesh()
+        if surface.is_empty():
+            # The demos' ground is an infinite plane at z = 0; rods are drawn from their
+            # centerlines, which the curves carry.
+            if actor.is_static():
+                self.meta["ground"] = True
+            return
+        faces = np.asarray(surface.connectivity, dtype=np.int32).reshape(-1, 3)
+        soft = actor.get_type() in (physics.ActorType.SOFT, physics.ActorType.SHELL)
+        meta.update(
+            kind="soft" if soft else "rigid",
+            source="physics_mesh",
+            material={"base_color": None, "metallic": None, "roughness": None},
+        )
+        self.arrays[f"body{index}_faces"] = faces
+        body = {"actor": actor, "local": None, "meta": meta}
+        if soft:
+            body["vertex_frames"] = []
+        else:
+            self.arrays[f"body{index}_vertices"] = self._local_vertices(actor).astype(np.float32)
+            body["transforms"] = []
+        self.bodies.append(body)
+        self.meta["bodies"].append(meta)
+
+    @staticmethod
+    def _local_vertices(actor) -> np.ndarray:
+        actor.register_query_and_compute(physics.QueryType.SURFACE_NODE_POSITIONS)
+        return np.asarray(actor.get_surface_mesh_node_positions_local(), dtype=np.float64).reshape(-1, 3)
+
+    @staticmethod
+    def _world_from(actor, local) -> np.ndarray:
+        transform = actor.get_root_transform()
+        if local is not None:
+            transform = transform * local
+        position, rotvec = transformrt_to_numpy(transform)
+        return np.asarray(make_transform(position, rotvec), dtype=np.float64)
+
+    def begin_iteration(self) -> None:
+        self.new_iteration = True
+
+    def capture(self, tracked_point, caption: str, hold: int, curves) -> None:
+        frame = {
+            "caption": caption,
+            "hold": int(hold),
+            "tracked": [float(v) for v in np.asarray(tracked_point, dtype=np.float64)],
+            "new_iteration": self.new_iteration,
+            "curves": [],
+        }
+        self.new_iteration = False
+        for body in self.bodies:
+            actor = body["actor"]
+            if body["meta"]["kind"] == "soft":
+                local = self._local_vertices(actor)
+                if actor.has_root_transform():
+                    world_from_local = self._world_from(actor, None)
+                    local = local @ world_from_local[:3, :3].T + world_from_local[:3, 3]
+                body["vertex_frames"].append(local.astype(np.float32))
+            elif not body["meta"]["static"] or not body["transforms"]:
+                body["transforms"].append(self._world_from(actor, body["local"]))
+        if curves is not None:
+            for name, points, edges, radius, color in curves():
+                frame["curves"].append(
+                    {
+                        "name": str(name),
+                        "points": np.asarray(points, dtype=np.float64).tolist(),
+                        "edges": np.asarray(edges, dtype=np.int64).tolist(),
+                        "radius": float(radius),
+                        "color": [float(c) for c in color],
+                    }
+                )
+        self.meta["frames"].append(frame)
+
+    def write(self, stem: pathlib.Path) -> None:
+        arrays = dict(self.arrays)
+        for body in self.bodies:
+            index = body["meta"]["index"]
+            if body["meta"]["kind"] == "soft":
+                arrays[f"body{index}_vertex_frames"] = np.stack(body["vertex_frames"])
+            else:
+                arrays[f"body{index}_transforms"] = np.stack(body["transforms"])
+        np.savez_compressed(stem.with_suffix(".scene.npz"), **arrays)
+        for index, texture in self.textures.items():
+            texture.save(stem.parent / f"{stem.name}.scene.body{index}.png")
+        with open(stem.with_suffix(".scene.json"), "w") as handle:
+            json.dump(self.meta, handle)
+        print(f"wrote {stem.with_suffix('.scene.json')} ({len(self.meta['frames'])} frames)")
+
+
 class Recorder:
-    """Offscreen viewer + MP4 writer with text overlays and a tracked-point trail."""
+    """Offscreen viewer + MP4 writer with text overlays and a tracked-point trail.
+    With ``EXPORT_SCENES`` set, the recorded frames are also exported for Blender
+    (see :class:`SceneExport`)."""
 
     def __init__(self, scene, target, look_from, look_at, title: str, curves=None):
         # The scene is Z-up FLU (X forward, Y left, Z up) - the "ros" preset.
@@ -158,9 +337,14 @@ class Recorder:
         self.curves = curves
         self.frames: list[np.ndarray] = []
         self.trail: list[np.ndarray] = []
+        self.export = (
+            SceneExport(scene, target, look_from, look_at, title) if EXPORT_SCENES else None
+        )
 
     def begin_iteration(self) -> None:
         self.trail = []
+        if self.export is not None:
+            self.export.begin_iteration()
 
     def capture(self, tracked_point, caption: str, hold: int = 1) -> None:
         self.trail.append(np.asarray(tracked_point, dtype=np.float64))
@@ -177,6 +361,8 @@ class Recorder:
         self._overlay(frame, caption)
         for _ in range(hold):
             self.frames.append(frame)
+        if self.export is not None:
+            self.export.capture(tracked_point, caption, hold, self.curves)
 
     def _overlay(self, frame: np.ndarray, caption: str) -> None:
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -189,6 +375,8 @@ class Recorder:
     def write(self, path: pathlib.Path) -> None:
         iio.imwrite(path, np.stack(self.frames), fps=FPS, codec="libx264", macro_block_size=1)
         print(f"wrote {path} ({len(self.frames)} frames, {len(self.frames) / FPS:.1f} s)")
+        if self.export is not None:
+            self.export.write(pathlib.Path(path).with_suffix(""))
         self.viewer.close()
 
 
@@ -437,7 +625,14 @@ def main() -> None:
     parser.add_argument("--output-dir", type=pathlib.Path, default=pathlib.Path("diffsim_videos"))
     parser.add_argument("--iterations", type=int, default=40)
     parser.add_argument("--task", choices=["rigid", "soft", "both"], default="both")
+    parser.add_argument(
+        "--export-scenes",
+        action="store_true",
+        help="also export the recorded frames for render_diffsim_blender.py",
+    )
     args = parser.parse_args()
+    global EXPORT_SCENES
+    EXPORT_SCENES = args.export_scenes
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     physics.initialize(num_worker_threads=0)
