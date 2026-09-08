@@ -41,7 +41,11 @@ struct IncompleteCholeskyPrec {
   IncompleteCholeskyPrec() = delete;
 };
 
-/// @brief Implementation of incomplete Cholesky for BlockSparseMatrix input
+/// @brief Incomplete Cholesky preconditioner for @ref BlockSparseMatrix input.
+///
+/// @pre The input matrix must be symmetric positive definite (SPD).
+/// @warning Factorization breakdown is not reported to the caller. Block pivots must remain finite,
+/// positive definite, and numerically safe to invert.
 template <
     typename Scalar,
     int kBlockSize,
@@ -63,7 +67,6 @@ struct IncompleteCholeskyPrec<BlockSparseMatrix<Scalar, kBlockSize, CRIdx, Ptr, 
   ///
   /// @note When shifting the input matrix, the incomplete factor is the one for A + alphaShift *
   /// (trace(A) / N) * I where N is the dimension of A.
-  /// @note Only the upper triangular part of the input is used.
   explicit IncompleteCholeskyPrec(
       BlockSparseMatrix<Scalar, kBlockSize, CRIdx, Ptr, Storage> const& A,
       int level,
@@ -107,23 +110,30 @@ struct IncompleteCholeskyPrec<BlockSparseMatrix<Scalar, kBlockSize, CRIdx, Ptr, 
   void Update(BlockSparseMatrix<ScalarA, kBlockSize, CRIdxA, PtrA, StorageA> const& A);
 
  protected:
+  static constexpr auto kInvalidPosition = static_cast<NonConstPtr>(-1);
+
+  /// @brief Cache data that depends only on the factor sparsity pattern.
+  void InitializeFactorData();
+
   /// @brief Perform the incomplete Cholesky factorization.
-  /// @warning Assumes that _rChol has already been initialized with the matrix values.
-  void Factorize();
+  /// @param[in] alpha Scalar diagonal shift.
+  /// @warning Assumes that _factorization has already been initialized with the matrix values.
+  void Factorize(NonConstScalar alpha);
 
-  /// @brief Storage for the incomplete factor R
-  /// - The upper triangular part is calculated
-  /// - The lower triangular part is obtained by symmetry
-  /// - The diagonal entries are inverted for faster solve
-  BlockSparseMatrix<NonConstScalar, kBlockSize, NonConstIdx, NonConstPtr> _rChol;
+  /// @brief In-place block LDLT factorization and numerical workspace.
+  /// - The strict lower part stores L; its unit diagonal is implicit.
+  /// - The diagonal stores D.
+  /// - The strict upper part stores W = D * L^T.
+  BlockSparseMatrix<NonConstScalar, kBlockSize, NonConstIdx, NonConstPtr> _factorization;
 
-  /// @brief Array pointing to the start of the upper part (inc. diagonal) for each block row
-  /// The value for each block row is a "local" integer (local to the block row)
+  /// @brief Inverses of the diagonal D blocks.
+  DynamicArray<RowMatrix<NonConstScalar, kBlockSize, kBlockSize>> _inverseDiagBlocks;
+
+  /// @brief Start of the upper part, including the diagonal, as a global block index.
   DynamicArray<NonConstPtr> _uStart;
 
-  /// @brief Scalar for diagonal shift (A + _alpha * trace(A) / N * I)
-  /// _alpha = 0 yields no shift
-  NonConstScalar _alpha;
+  /// @brief Scratch map from block column to its local position in the current row.
+  DynamicArray<NonConstPtr> _columnToLocal;
 
   /// @brief Original shift factor passed to the constructor.
   NonConstScalar _alphaShift;
@@ -334,54 +344,6 @@ struct IncompleteCholeskyPrec<SparseMatrix<Scalar, CRIdx, Ptr, Storage>>
 //--- Implementation of class member functions
 //
 
-namespace mochi::krylov::details {
-
-/// @brief Do a block-row update needed during a block Cholesky factorization
-/// The steps involve a Cholesky factorization (computing an upper triangular matrix)
-/// and a forward triangular solve along the block row.
-///
-/// @note We assume that the number of columns of R is a multiple of kBlockSize
-/// @note The first (kBlockSize x kBlockSize) block in R comes from the diagonal block
-/// in a block matrix.
-template <int kBlockSize, typename NonConstScalar, int kLeadDim>
-int UpdateBlockRow(RowMatrixView<NonConstScalar, kBlockSize, krylov::kDynamic, kLeadDim> R) {
-  MOCHI_ASSERT_VERBOSE(
-      (R.Cols() >= kBlockSize) && (R.Cols() % kBlockSize == 0), "Incompatible input matrix");
-  //--- Do a Cholesky factorization of D
-  RowMatrix<NonConstScalar, kBlockSize, kBlockSize> D =
-      R.template Block<kBlockSize, kBlockSize>(0, 0, kBlockSize, kBlockSize);
-  for (int i = 0; i < kBlockSize; ++i) {
-    if ((D(i, i) < std::numeric_limits<NonConstScalar>::min()) || (!std::isfinite(D(i, i))))
-      MOCHI_UNLIKELY {
-        return i + 1;
-      }
-    D(i, i) = NonConstScalar(1) / Sqrt(D(i, i));
-    D.template Block<1, krylov::kDynamic>(i, i + 1, 1, kBlockSize - i - 1) *= D(i, i);
-    for (int k = i + 1; k < kBlockSize; ++k) {
-      auto const d_ik = D(i, k);
-      // Update D_{k,j} <- D_{k,j} - D_{k,i} D_{i,j}
-      D.template Block<1, krylov::kDynamic>(k, k, 1, kBlockSize - k) -=
-          d_ik * D.template Block<1, krylov::kDynamic>(i, k, 1, kBlockSize - k);
-    }
-  }
-  //--- Solve triangular linear system with multiple columns in place
-  R.Row(0) *= D(0, 0);
-  for (int i = 1; i < kBlockSize; ++i) {
-    auto Ri = R.Row(i);
-    Ri -=
-        D.template Block<krylov::kDynamic, 1>(0, i, i, 1).Transpose() * R.Block(0, 0, i, R.Cols());
-    Ri *= D(i, i);
-  }
-  //--- Overwrite the diagonal of the block-diagonal in R
-  auto R0 = R.template Block<kBlockSize, kBlockSize>(0, 0, kBlockSize, kBlockSize);
-  for (int i = 0; i < kBlockSize; ++i) {
-    R0(i, i) = D(i, i);
-  }
-  return 0;
-}
-
-} // namespace mochi::krylov::details
-
 namespace mochi::krylov {
 
 //
@@ -399,17 +361,18 @@ IncompleteCholeskyPrec<BlockSparseMatrix<Scalar, kBlockSize, CRIdx, Ptr, Storage
         BlockSparseMatrix<Scalar, kBlockSize, CRIdx, Ptr, Storage> const& A,
         int level,
         Scalar alphaShift)
-    : _uStart(A.BlockRows()), _alpha(alphaShift), _alphaShift(alphaShift), _level(level) {
+    : _alphaShift(alphaShift), _level(level) {
   static_assert(
       std::signed_integral<CRIdx> && sizeof(CRIdx) <= sizeof(int),
       "IncompleteCholeskyPrec requires signed matrix indices representable as int.");
+  MOCHI_ASSERT_VERBOSE(A.Rows() == A.Cols(), "Input matrix must be square.");
   MOCHI_ASSERT_VERBOSE(_level >= 0, "Fill-in level must not be negative.");
   MOCHI_ASSERT_VERBOSE(_alphaShift >= Scalar{0}, "Out-of-range shifting factor.")
-  if (_alphaShift > Scalar{0}) {
-    _alpha = _alphaShift * (Trace(A) / A.Rows());
-  }
-  mochi::details::ConvertToFillLevel(_level, A, _rChol);
-  Factorize();
+  mochi::details::ConvertToFillLevel(_level, A, _factorization);
+  InitializeFactorData();
+  auto const alpha = _alphaShift > Scalar{0} && A.Rows() > 0 ? _alphaShift * (Trace(A) / A.Rows())
+                                                             : NonConstScalar{0};
+  Factorize(alpha);
 }
 
 template <
@@ -429,22 +392,21 @@ void IncompleteCholeskyPrec<BlockSparseMatrix<Scalar, kBlockSize, CRIdx, Ptr, St
   static_assert(std::is_same_v<CRIdx const, CRIdxA const>, "Inconsistent integer types");
   static_assert(std::is_same_v<Ptr const, PtrA const>, "Inconsistent integer types");
   MOCHI_ASSERT_VERBOSE(A.Rows() == A.Cols(), "Input matrix must be square.");
-  MOCHI_ASSERT_VERBOSE(A.Rows() == _rChol.Rows(), "Matrix size mismatch.");
+  MOCHI_ASSERT_VERBOSE(A.Rows() == _factorization.Rows(), "Matrix size mismatch.");
   if (_level == 0) {
     auto srcValues = A.Values();
-    auto dstValues = _rChol.Values();
+    auto dstValues = _factorization.Values();
     MOCHI_ASSERT_VERBOSE(srcValues.size() == dstValues.size(), "Value array size mismatch.");
-    MOCHI_ASSERT_VERBOSE(_rChol.Pointers() == A.Pointers(), "Sparsity pattern mismatch.");
-    MOCHI_ASSERT_VERBOSE(_rChol.Indices() == A.Indices(), "Sparsity pattern mismatch.");
+    MOCHI_ASSERT_VERBOSE(_factorization.Pointers() == A.Pointers(), "Sparsity pattern mismatch.");
+    MOCHI_ASSERT_VERBOSE(_factorization.Indices() == A.Indices(), "Sparsity pattern mismatch.");
     std::copy(srcValues.begin(), srcValues.end(), dstValues.begin());
   } else {
-    _rChol.SetZero();
-    _rChol += A;
+    _factorization.SetZero();
+    _factorization += A;
   }
-  if (_alphaShift > Scalar{0}) {
-    _alpha = _alphaShift * (Trace(A) / A.Rows());
-  }
-  Factorize();
+  auto const alpha = _alphaShift > Scalar{0} && A.Rows() > 0 ? _alphaShift * (Trace(A) / A.Rows())
+                                                             : NonConstScalar{0};
+  Factorize(alpha);
 }
 
 template <
@@ -454,120 +416,80 @@ template <
     typename Ptr,
     template <typename, typename...> typename Storage>
 void IncompleteCholeskyPrec<
-    BlockSparseMatrix<Scalar, kBlockSize, CRIdx, Ptr, Storage>>::Factorize() {
-  auto const rPtr = _rChol.Pointers();
-  for (NonConstIdx i = 0; i < _rChol.BlockRows(); ++i) {
-    auto const cIdx = _rChol.Indices(i);
-    auto values = _rChol.Values(i);
+    BlockSparseMatrix<Scalar, kBlockSize, CRIdx, Ptr, Storage>>::InitializeFactorData() {
+  auto const rPtr = _factorization.Pointers();
+  _uStart.resize_noinit(_factorization.BlockRows());
+  _columnToLocal.clear();
+  _columnToLocal.resize(_factorization.BlockRows(), kInvalidPosition);
+  _inverseDiagBlocks.resize(_factorization.BlockRows());
+  for (NonConstIdx i = 0; i < _factorization.BlockRows(); ++i) {
+    auto const cIdx = _factorization.Indices(i);
     MOCHI_ASSERT_VERBOSE(
         std::is_sorted(cIdx.begin(), cIdx.end()), "Column entries need to be sorted");
-    auto ptr = std::lower_bound(cIdx.begin(), cIdx.end(), i);
-    MOCHI_ASSERT_VERBOSE((ptr != cIdx.end()) && (*ptr == i), "Missing diagonal block");
-    auto const k = static_cast<int>(ptr - cIdx.begin());
-    _uStart[i] = k + rPtr[i];
-    if (_alpha > NonConstScalar(0)) {
-      auto mat = values[k];
-      for (int ii = 0; ii < kBlockSize; ++ii) {
-        mat(ii, ii) += _alpha;
+    auto const diagonal = std::lower_bound(cIdx.begin(), cIdx.end(), i);
+    MOCHI_ASSERT_VERBOSE(diagonal != cIdx.end() && *diagonal == i, "Missing diagonal block");
+    _uStart[i] = rPtr[i] + static_cast<NonConstPtr>(diagonal - cIdx.begin());
+  }
+}
+
+template <
+    typename Scalar,
+    int kBlockSize,
+    typename CRIdx,
+    typename Ptr,
+    template <typename, typename...> typename Storage>
+void IncompleteCholeskyPrec<BlockSparseMatrix<Scalar, kBlockSize, CRIdx, Ptr, Storage>>::Factorize(
+    NonConstScalar alpha) {
+  auto* const columnToLocal = _columnToLocal.data();
+  MOCHI_ASSERT_VERBOSE(
+      std::ranges::all_of(
+          _columnToLocal, [](NonConstPtr position) { return position == kInvalidPosition; }),
+      "Factorization workspace is not clear.");
+  auto const rPtr = _factorization.Pointers();
+  RowMatrix<NonConstScalar, kBlockSize, kBlockSize> scaling;
+  if (alpha > NonConstScalar{0}) {
+    for (NonConstIdx i = 0; i < _factorization.BlockRows(); ++i) {
+      auto diagonal = _factorization.Values(i)[_uStart[i] - rPtr[i]];
+      for (int j = 0; j < kBlockSize; ++j) {
+        diagonal(j, j) += alpha;
       }
     }
   }
-  //
-  auto const dummyFlag = static_cast<NonConstPtr>(-1);
-  auto zero = Matrix<NonConstScalar, kBlockSize, kBlockSize>::Zero();
-  DynamicArray<NonConstPtr> iw(_rChol.BlockRows(), dummyFlag);
-  NonConstIdx info = 0;
-  //
-  auto const rIdx = _rChol.Indices();
-  for (NonConstIdx i = 0; i < _rChol.BlockRows(); ++i) {
-    //--- Do a block-row update
-    auto values = _rChol.Values(i);
-    {
-      auto start1 = (_uStart[i] - rPtr[i]) * kBlockSize;
-      auto size = values.Underlying().Cols() - start1;
-      info = krylov::details::UpdateBlockRow(
-          values.Underlying().template Block<kBlockSize, krylov::kDynamic>(
-              0, start1, kBlockSize, size));
-      if (info != 0)
-        MOCHI_UNLIKELY {
-          info = i + 1;
-          break;
+
+  // For the current Schur row S, store L_ik = S_ik D_k^-1 and update S_ij -= L_ik W_kj.
+  // Intended for bounded-degree FEM sparsity and small fixed fill. High-degree rows may be
+  // superlinear.
+  for (NonConstIdx i = 0; i < _factorization.BlockRows(); ++i) {
+    auto const colIdx = _factorization.Indices(i);
+    auto values = _factorization.Values(i);
+    for (NonConstPtr p = 0; p < colIdx.size(); ++p) {
+      columnToLocal[colIdx[p]] = p;
+    }
+    auto const localDiag = _uStart[i] - rPtr[i];
+    for (NonConstPtr p = 0; p < localDiag; ++p) {
+      auto const k = colIdx[p];
+      auto const sourceIdx = _factorization.Indices(k);
+      auto const sourceValues = _factorization.Values(k);
+      scaling = values[p] * _inverseDiagBlocks[k];
+      values[p] = scaling;
+      auto const sourceDiag = _uStart[k] - rPtr[k];
+      for (NonConstPtr q = sourceDiag + 1; q < sourceIdx.size(); ++q) {
+        auto const targetPosition = columnToLocal[sourceIdx[q]];
+        if (targetPosition == kInvalidPosition) {
+          continue;
         }
-    }
-    //--- Get inverse map of colIdx for the upper "triangular" part
-    auto const colIdx = _rChol.Indices(i);
-    for (int j = int(_uStart[i] - rPtr[i]); j < isize(colIdx); ++j) {
-      iw[colIdx[j]] = NonConstPtr(j);
-    }
-    auto const lastBlockCol = colIdx.back();
-    //--- Use 'p' as pointer integer
-    //--- TODO Explore whether a `ParallelFor` can accelerate the computation
-    NonConstPtr p = _uStart[i] + 1;
-    for (; p < rPtr[i + 1]; ++p) {
-      auto k = rIdx[p]; // <- Non-zero block column index in the block row 'i' (with k > i)
-      auto rk = _rChol.Values(k);
-      auto const rik_t = values[p - rPtr[i]].Transpose();
-      //--- Explore the "upper part" block row 'k'
-      //--- only for the blocks that could be updated by block row 'i'
-      NonConstPtr pos = _uStart[k], localPos = _uStart[k] - rPtr[k];
-      NonConstIdx j;
-      for (; (pos < rPtr[k + 1]) && ((j = rIdx[pos]) <= lastBlockCol); pos += 1, localPos += 1) {
-        auto jp = iw[j]; // <- Check whether block column 'j' is present in the block row 'i'
-        // r_{kj} <- r_{kj} - r_{ik}^T r_{ij}
-        rk[localPos] -= (jp == dummyFlag) ? zero : rik_t * values[jp];
+        values[targetPosition] -= scaling * sourceValues[q];
       }
     }
-    for (int j = int(_uStart[i] - rPtr[i]); j < isize(colIdx); ++j) {
-      iw[colIdx[j]] = dummyFlag;
+    _inverseDiagBlocks[i] = SymInverse(values[localDiag]);
+    for (NonConstPtr p = 0; p < colIdx.size(); ++p) {
+      columnToLocal[colIdx[p]] = kInvalidPosition;
     }
   }
-  if (info != 0) {
-    MOCHI_LOG_ERROR("Non positive pivot at block %d", info - 1);
-  }
-  //
-  /// Symmetrize the block sparse matrix
-  //
-  DynamicArray<int> countBlocks(_rChol.BlockRows(), 0);
-  for (int i = 0; i < _rChol.BlockRows(); ++i) {
-    auto const rColIdx = _rChol.Indices(i);
-    for (int k = int(_uStart[i] - rPtr[i]) + 1; k < isize(rColIdx); ++k) {
-      countBlocks[rColIdx[k]] += 1;
-    }
-  }
-  DynamicArray<
-      DynamicArray<RowMatrixView<NonConstScalar, kBlockSize, kBlockSize, krylov::kDynamic>>>
-      transposeGraph(_rChol.BlockCols());
-  for (int i = 0; i < _rChol.BlockRows(); ++i) {
-    transposeGraph[i].reserve(countBlocks[i]);
-  }
-  for (int i = 0; i < _rChol.BlockRows(); ++i) {
-    auto const rColIdx = _rChol.Indices(i);
-    auto rValues = _rChol.Values(i);
-    for (int k = int(_uStart[i] - rPtr[i]) + 1; k < isize(rColIdx); ++k) {
-      transposeGraph[rColIdx[k]].push_back(rValues[k]);
-    }
-  }
-  //
-  // Fill the lower triangular part
-  //
-  for (int i = 0; i < _rChol.BlockRows(); ++i) {
-    auto const& list = transposeGraph[i];
-    MOCHI_ASSERT_VERBOSE(list.size() == _uStart[i] - rPtr[i], "Incompatible size");
-    int k = 0;
-    [[maybe_unused]] auto const rColIdx = _rChol.Indices(i);
-    auto rValues = _rChol.Values(i);
-    for (auto rval : list) {
-      MOCHI_ASSERT_VERBOSE(rColIdx[k] <= i, "Incorrect location");
-      rValues[k++] = Transpose(rval);
-    }
-    //--- Symmetrize the diagonal block
-    auto diag = rValues[_uStart[i] - rPtr[i]];
-    for (int ii = 0; ii < kBlockSize; ++ii) {
-      for (int jj = 0; jj < ii; ++jj) {
-        diag(ii, jj) = diag(jj, ii);
-      }
-    }
-  }
+  MOCHI_ASSERT_VERBOSE(
+      std::ranges::all_of(
+          _columnToLocal, [](NonConstPtr position) { return position == kInvalidPosition; }),
+      "Factorization workspace was not restored.");
 }
 
 template <
@@ -580,10 +502,7 @@ template <typename Input, typename Output>
 void IncompleteCholeskyPrec<BlockSparseMatrix<Scalar, kBlockSize, CRIdx, Ptr, Storage>>::operator()(
     Input const& xin,
     Output&& yout) const {
-  Preconditioner<NonConstScalar>::ValidateInputOutput(_rChol.Rows(), xin, yout);
-  //
-  //--- Convert input and output to MatrixView
-  //
+  Preconditioner<NonConstScalar>::ValidateInputOutput(_factorization.Rows(), xin, yout);
   MatrixView<
       typename details::MatTraits<Input>::Scalar const,
       details::MatTraits<Input>::kNumRows,
@@ -598,98 +517,72 @@ void IncompleteCholeskyPrec<BlockSparseMatrix<Scalar, kBlockSize, CRIdx, Ptr, St
       details::MatTraits<Output>::kMajorDir,
       krylov::kDynamic>
       y(yout.data(), yout.Rows(), yout.Cols(), yout.LeadDim());
-  //
   y = x;
-  //
+
   [[maybe_unused]] ColumnVector<NonConstScalar> xTmp;
   [[maybe_unused]] auto const xTmpRequiredSize = static_cast<NonConstIdx>(
       mochi::details::RowMultiplier<NonConstScalar, kBlockSize>::GetWorkspaceSize(
-          _rChol.MaxNnzPerRow()));
-  [[maybe_unused]] ColumnVector<NonConstScalar, kBlockSize> Ly;
-  [[maybe_unused]] auto aLy = mochi::details::GetAccessor(Ly);
-  //
-  auto rPtr = _rChol.Pointers();
-  //
-  for (int jc = 0; jc < x.Cols(); ++jc) {
-    auto yjc = y.Col(jc);
-    [[maybe_unused]] auto aY = mochi::details::GetAccessor(yjc);
-    for (int irb = 0; irb < _rChol.BlockRows(); ++irb) {
-      auto colIdx = _rChol.Indices(irb);
-      auto values = _rChol.Values(irb);
-      auto yij = yjc.MiddleRows(irb * kBlockSize, kBlockSize);
-      auto const localShift = _uStart[irb] - rPtr[irb];
+          _factorization.MaxNnzPerRow()));
+  ColumnVector<NonConstScalar, kBlockSize> product;
+  [[maybe_unused]] auto productAccessor = mochi::details::GetAccessor(product);
+  auto const rPtr = _factorization.Pointers();
+  for (int c = 0; c < y.Cols(); ++c) {
+    auto yc = y.Col(c);
+    [[maybe_unused]] auto yAccessor = mochi::details::GetAccessor(yc);
+    for (int i = 0; i < _factorization.BlockRows(); ++i) {
+      auto const colIdx = _factorization.Indices(i);
+      auto const values = _factorization.Values(i);
+      auto yi = yc.template MiddleRows<kBlockSize>(i * kBlockSize, kBlockSize);
+      auto const localDiag = _uStart[i] - rPtr[i];
       if constexpr (mochi::details::MatTraits<Output>::kMajorDir == krylov::Direction::ColMajor) {
-        mochi::details::RowMultiplier<Scalar, kBlockSize>::ApplyToColVector(
+        mochi::details::RowMultiplier<NonConstScalar, kBlockSize>::ApplyToColVector(
             colIdx.data(),
             values.data(),
-            localShift,
+            localDiag,
             values.LeadDim(),
-            aY,
-            aLy,
+            yAccessor,
+            productAccessor,
             /*br*/ 0,
             /*c*/ 0,
             xTmp,
             xTmpRequiredSize);
-        yij -= Ly;
+        yi -= product;
       } else {
         static_assert(mochi::details::MatTraits<Output>::kMajorDir == krylov::Direction::RowMajor);
-        for (int kk = 0; kk + rPtr[irb] < _uStart[irb]; ++kk) {
-          yij -=
-              values[kk] * yjc.template MiddleRows<kBlockSize>(colIdx[kk] * kBlockSize, kBlockSize);
+        for (int p = 0; p < localDiag; ++p) {
+          yi -= values[p] * yc.template MiddleRows<kBlockSize>(colIdx[p] * kBlockSize, kBlockSize);
         }
-      }
-      auto const& D = values[localShift];
-      //
-      // TODO Explore whether kernels from `LDLt.h` can be re-used
-      //
-      for (int i = 0; i < kBlockSize; ++i) {
-        auto v = yij.Row(i);
-        for (int j = 0; j < i; ++j) {
-          v -= D(i, j) * yij.Row(j);
-        }
-        v *= D(i, i);
       }
     }
-    //
-    for (int irb = _rChol.BlockRows() - 1; irb >= 0; --irb) {
-      auto colIdx = _rChol.Indices(irb);
-      auto values = _rChol.Values(irb);
-      Ly.SetZero();
-      auto yij = yjc.template MiddleRows<kBlockSize>(irb * kBlockSize, kBlockSize);
-      auto const localShift = _uStart[irb] - rPtr[irb];
+
+    for (int i = _factorization.BlockRows(); i-- > 0;) {
+      auto const colIdx = _factorization.Indices(i);
+      auto const values = _factorization.Values(i);
+      auto yi = yc.template MiddleRows<kBlockSize>(i * kBlockSize, kBlockSize);
+      auto const localDiag = _uStart[i] - rPtr[i];
       if constexpr (mochi::details::MatTraits<Output>::kMajorDir == krylov::Direction::ColMajor) {
-        mochi::details::RowMultiplier<Scalar, kBlockSize>::ApplyToColVector(
-            colIdx.data() + localShift + 1,
-            values.data() + (localShift + 1) * kBlockSize,
-            isize(colIdx) - (localShift + 1),
+        mochi::details::RowMultiplier<NonConstScalar, kBlockSize>::ApplyToColVector(
+            colIdx.data() + localDiag + 1,
+            values.data() + (localDiag + 1) * kBlockSize,
+            isize(colIdx) - localDiag - 1,
             values.LeadDim(),
-            aY,
-            aLy,
+            yAccessor,
+            productAccessor,
             /*br*/ 0,
             /*c*/ 0,
             xTmp,
             xTmpRequiredSize);
-        yij = yij - Ly;
+        yi -= product;
       } else {
         static_assert(mochi::details::MatTraits<Output>::kMajorDir == krylov::Direction::RowMajor);
-        for (int kk = localShift + 1; kk < colIdx.size(); ++kk) {
-          yij -=
-              values[kk] * yjc.template MiddleRows<kBlockSize>(colIdx[kk] * kBlockSize, kBlockSize);
+        for (int p = localDiag + 1; p < isize(colIdx); ++p) {
+          yi -= values[p] * yc.template MiddleRows<kBlockSize>(colIdx[p] * kBlockSize, kBlockSize);
         }
       }
-      //
-      // TODO Explore whether kernels from `LDLt.h` can be re-used
-      //
-      auto const& D = values[localShift];
-      for (int i = kBlockSize - 1; i >= 0; --i) {
-        auto v = yij.Row(i);
-        for (int j = i + 1; j < kBlockSize; ++j) {
-          v -= D(i, j) * yij.Row(j);
-        }
-        v *= D(i, i);
-      }
+      product = _inverseDiagBlocks[i] * yi;
+      yi = product;
     }
-  } // for (int jc = 0; jc < x.Cols(); ++jc)
+  }
 }
 
 //
