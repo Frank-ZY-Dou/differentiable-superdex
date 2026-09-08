@@ -2,7 +2,7 @@
 
 > Gradients through contact for Meta's Project SuperDex
 
-*Part of [Dynamics-Modeling](https://github.com/Frank-ZY-Dou/Dynamics-Modeling), research code and projects by [Frank Zhiyang Dou](https://github.com/Frank-ZY-Dou).*
+*Part of [Dynamics-Modeling](https://github.com/Frank-ZY-Dou/Dynamics-Modeling), research code and projects by [Frank Zhiyang Dou](https://frank-zy-dou.github.io/).*
 
 This repository is a fork of [Project SuperDex](https://github.com/facebookresearch/project_superdex)
 that makes SuperDex Physics differentiable. It adds the discrete adjoint of the engine's implicit
