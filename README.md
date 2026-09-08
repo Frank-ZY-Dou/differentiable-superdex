@@ -12,19 +12,18 @@ A PyTorch bridge turns a rollout into an autograd node, so policies and paramete
 on the gradients of the simulator's own discrete steps. Scenes that do not ask for gradients run
 exactly as in upstream SuperDex.
 
-| A feedback policy pushes a cube (`push_policy`) | A five-finger hand carries a cube (`hand`) |
-| :-: | :-: |
-| ![push_policy](superdex_physics/examples/media/robot_push_policy.gif) | ![hand](superdex_physics/examples/media/robot_hand_grasp.gif) |
-| **A gripper carries a cube (`grasp`)** | **An arm pushes a cube (`push`)** |
-| ![grasp](superdex_physics/examples/media/robot_grasp.gif) | ![push](superdex_physics/examples/media/robot_push.gif) |
+| A feedback policy pushes a cube (`push_policy`) | A gripper carries a cube (`grasp`) | An arm pushes a cube (`push`) |
+| :-: | :-: | :-: |
+| ![push_policy](superdex_physics/examples/media/robot_push_policy.gif) | ![grasp](superdex_physics/examples/media/robot_grasp.gif) | ![push](superdex_physics/examples/media/robot_push.gif) |
 
-The same grasp with four more hands, each an FR3 assembly of this fork:
+A five-finger hand carries a cube, with SuperDex's Tesollo DG-5F and five hands assembled on the
+FR3 by this fork:
 
-| Wuji Hand 2 (`wuji2`) | Wuji Hand 1 (`wuji1`) |
-| :-: | :-: |
-| ![wuji2](superdex_physics/examples/media/robot_wuji2_grasp.gif) | ![wuji1](superdex_physics/examples/media/robot_wuji1_grasp.gif) |
-| **XHand1 (`xhand`)** | **Wuji Hand 2 beta 2 (`wuji2b2`)** |
-| ![xhand](superdex_physics/examples/media/robot_xhand_grasp.gif) | ![wuji2b2](superdex_physics/examples/media/robot_wuji2b2_grasp.gif) |
+| Tesollo DG-5F (`hand`) | Wuji Hand 2 (`wuji2`) | Wuji Hand 1 (`wuji1`) |
+| :-: | :-: | :-: |
+| ![hand](superdex_physics/examples/media/robot_hand_grasp.gif) | ![wuji2](superdex_physics/examples/media/robot_wuji2_grasp.gif) | ![wuji1](superdex_physics/examples/media/robot_wuji1_grasp.gif) |
+| **XHand1 (`xhand`)** | **Wuji Hand 2 beta 2 (`wuji2b2`)** | **Sharpa Wave (`sharpa`)** |
+| ![xhand](superdex_physics/examples/media/robot_xhand_grasp.gif) | ![wuji2b2](superdex_physics/examples/media/robot_wuji2b2_grasp.gif) | ![sharpa](superdex_physics/examples/media/robot_sharpa_grasp.gif) |
 
 Each animation is the motion found by gradient descent through the simulator: the controller
 targets of the robot are updated with the adjoint gradient, checked against finite differences at
@@ -41,10 +40,10 @@ rendered with Blender from the simulated trajectories
   (`superdex.physics.diffsim_rollout`, `superdex.physics.diffsim_torch`), including closed-loop
   policy training on joint-pose, position, orientation, soft-centroid and contact-force
   observations; examples for the per-step API, system identification, inverse kinematics through
-  the simulator, and fourteen manipulation demos solved by gradient descent through contact and
-  rendered with Blender, among them grasps with five hands (Tesollo DG-5F, Wuji Hand 2 beta 1 and
-  beta 2, Wuji Hand 1, RobotEra XHand1); hand packages for the Wuji Hand 1, the Wuji Hand 2 beta 2
-  and the XHand1 with their FR3 assemblies (`assets/bots`) and the URDF conversion tool
+  the simulator, and fifteen manipulation demos solved by gradient descent through contact and
+  rendered with Blender, among them grasps with six hands (Tesollo DG-5F, Wuji Hand 2 beta 1 and
+  beta 2, Wuji Hand 1, RobotEra XHand1, Sharpa Wave); hand packages for the Wuji Hand 1, the Wuji
+  Hand 2 beta 2, the XHand1 and the Sharpa Wave with their FR3 assemblies (`assets/bots`) and the URDF conversion tool
   (`tools/urdf_to_superdex_bot.py`); and 174 gradient checks against finite differences and
   closed-form references, run in both precisions by CI. Based on Project SuperDex 1.0.0 and its
   `main` branch of 2026-09-06.
@@ -59,11 +58,11 @@ What this fork adds to SuperDex:
   policy training with contact-force observations.
 - Examples in `superdex_physics/examples/example_diffsim_*.py`: the adjoint API by hand, system
   identification, inverse kinematics through the simulator (with a contact-force objective), and
-  fourteen manipulation tasks solved by gradient descent through contact, among them grasps with
-  five hands: the Tesollo DG-5F, the Wuji Hand 2 (beta 1 and beta 2), the Wuji Hand 1 and the
-  RobotEra XHand1.
-- Hand packages for the Wuji Hand 1, the Wuji Hand 2 beta 2 and the XHand1 under `assets/bots/hands`,
-  their FR3 assemblies under `assets/bots/arm_hand_combos`, and `tools/urdf_to_superdex_bot.py`, which
+  fifteen manipulation tasks solved by gradient descent through contact, among them grasps with
+  six hands: the Tesollo DG-5F, the Wuji Hand 2 (beta 1 and beta 2), the Wuji Hand 1, the
+  RobotEra XHand1 and the Sharpa Wave.
+- Hand packages for the Wuji Hand 1, the Wuji Hand 2 beta 2, the XHand1 and the Sharpa Wave under
+  `assets/bots/hands`, their FR3 assemblies under `assets/bots/arm_hand_combos`, and `tools/urdf_to_superdex_bot.py`, which
   converts a URDF description into a SuperDex bot package.
 - A gradient test suite (`superdex_physics/wheels/superdex-physics/test/diffsim`) that checks every
   path against finite differences and closed-form references, run in both precisions by CI.

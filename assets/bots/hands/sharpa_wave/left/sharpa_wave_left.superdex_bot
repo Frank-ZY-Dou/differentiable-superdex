@@ -1,0 +1,1641 @@
+{
+  "contactOverrides": [
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_index_PP"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_index_MP"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_index_DP"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_index_elastomer"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_index_fingertip"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_middle_PP"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_middle_MP"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_middle_DP"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_middle_elastomer"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_middle_fingertip"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_pinky_MCP_VL"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_pinky_PP"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_pinky_MP"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_pinky_DP"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_pinky_elastomer"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_pinky_fingertip"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_ring_PP"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_ring_MP"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_ring_DP"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_ring_elastomer"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_ring_fingertip"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_thumb_MC"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_thumb_MCP_VL"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_thumb_PP"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_thumb_DP"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_thumb_elastomer"
+    },
+    {
+      "enable": false,
+      "linkA": "left_hand_C_MC",
+      "linkB": "left_thumb_fingertip"
+    }
+  ],
+  "defaultPose": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "joints": [
+    {
+      "name": "world_joint",
+      "type": "Free"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 1.864,
+      "maxLimit": [
+        0.0,
+        0.0,
+        1.5708
+      ],
+      "minLimit": [
+        -0.0,
+        -0.0,
+        -0.17453293
+      ],
+      "name": "left_index_MCP_FE",
+      "parentLinkFromJoint": {
+        "rotation": [
+          -0.5000018366025516,
+          -0.49999999999662686,
+          -0.49999999999662686,
+          0.4999981633974483
+        ],
+        "translation": [
+          0.001,
+          -0.0303,
+          0.0959
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 1.864,
+      "maxLimit": [
+        0.0,
+        0.0,
+        0.3491
+      ],
+      "minLimit": [
+        -0.0,
+        -0.0,
+        -0.3491
+      ],
+      "name": "left_index_MCP_AA",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.7071080798594735,
+          0.0,
+          0.0,
+          0.7071054825112363
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 0.638,
+      "maxLimit": [
+        0.0,
+        0.0,
+        1.7453
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "left_index_PIP",
+      "parentLinkFromJoint": {
+        "rotation": [
+          -0.7071080798594735,
+          0.0,
+          0.0,
+          0.7071054825112363
+        ],
+        "translation": [
+          0.047,
+          0.0,
+          0.0
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 0.189369,
+      "maxLimit": [
+        0.0,
+        0.0,
+        1.3963
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "left_index_DIP",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0315,
+          0.0,
+          0.0
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "name": "left_index_elastomer_fix_joint",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.5,
+          -0.5,
+          0.5000000000000018,
+          0.49999999999999817
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "left_index_fingertip_fix_joint",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.5,
+          0.5,
+          -0.5000000000000018,
+          0.49999999999999817
+        ],
+        "translation": [
+          0.0,
+          -0.0260092574262508,
+          0.0
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 1.864,
+      "maxLimit": [
+        0.0,
+        0.0,
+        1.5708
+      ],
+      "minLimit": [
+        -0.0,
+        -0.0,
+        -0.17453293
+      ],
+      "name": "left_middle_MCP_FE",
+      "parentLinkFromJoint": {
+        "rotation": [
+          -0.5000018366025516,
+          -0.49999999999662686,
+          -0.49999999999662686,
+          0.4999981633974483
+        ],
+        "translation": [
+          0.0,
+          -0.01,
+          0.0989
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 1.864,
+      "maxLimit": [
+        0.0,
+        0.0,
+        0.3491
+      ],
+      "minLimit": [
+        -0.0,
+        -0.0,
+        -0.3491
+      ],
+      "name": "left_middle_MCP_AA",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.7071080798594735,
+          0.0,
+          0.0,
+          0.7071054825112363
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 0.638,
+      "maxLimit": [
+        0.0,
+        0.0,
+        1.7453
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "left_middle_PIP",
+      "parentLinkFromJoint": {
+        "rotation": [
+          -0.7071080798594735,
+          0.0,
+          0.0,
+          0.7071054825112363
+        ],
+        "translation": [
+          0.047,
+          0.0,
+          0.0
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 0.189369,
+      "maxLimit": [
+        0.0,
+        0.0,
+        1.3963
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "left_middle_DIP",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0315,
+          0.0,
+          0.0
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "name": "left_middle_elastomer_fix_joint",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.5,
+          -0.5,
+          0.5000000000000018,
+          0.49999999999999817
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "left_middle_fingertip_fix_joint",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.5,
+          0.5,
+          -0.5000000000000018,
+          0.49999999999999817
+        ],
+        "translation": [
+          0.0,
+          -0.0260092574262507,
+          0.0
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 0.5285,
+      "maxLimit": [
+        0.0,
+        0.0,
+        0.2618
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "left_pinky_CMC",
+      "parentLinkFromJoint": {
+        "rotation": [
+          3.6732051033217936e-06,
+          -0.9999999999865075,
+          -3.6732051033217936e-06,
+          1.3492435731251315e-11
+        ],
+        "translation": [
+          0.01136,
+          0.0263,
+          0.0869
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 1.864,
+      "maxLimit": [
+        0.0,
+        0.0,
+        1.5708
+      ],
+      "minLimit": [
+        -0.0,
+        -0.0,
+        -0.17453293
+      ],
+      "name": "left_pinky_MCP_FE",
+      "parentLinkFromJoint": {
+        "rotation": [
+          -0.49999999999662686,
+          0.49999999999662686,
+          0.5000018366025516,
+          0.4999981633974483
+        ],
+        "translation": [
+          0.00836,
+          0.0048,
+          0.0
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 1.864,
+      "maxLimit": [
+        0.0,
+        0.0,
+        0.3491
+      ],
+      "minLimit": [
+        -0.0,
+        -0.0,
+        -0.3491
+      ],
+      "name": "left_pinky_MCP_AA",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.7071080798594735,
+          0.0,
+          0.0,
+          0.7071054825112363
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 0.638,
+      "maxLimit": [
+        0.0,
+        0.0,
+        1.7453
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "left_pinky_PIP",
+      "parentLinkFromJoint": {
+        "rotation": [
+          -0.7071080798594735,
+          0.0,
+          0.0,
+          0.7071054825112363
+        ],
+        "translation": [
+          0.047,
+          0.0,
+          0.0
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 0.189369,
+      "maxLimit": [
+        0.0,
+        0.0,
+        1.3963
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "left_pinky_DIP",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0315,
+          0.0,
+          0.0
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "name": "left_pinky_elastomer_fix_joint",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.5,
+          -0.5,
+          0.5000000000000018,
+          0.49999999999999817
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "left_pinky_fingertip_fix_joint",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.5,
+          0.5,
+          -0.5000000000000018,
+          0.49999999999999817
+        ],
+        "translation": [
+          0.0,
+          -0.0260092574262507,
+          0.0
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 1.864,
+      "maxLimit": [
+        0.0,
+        0.0,
+        1.5708
+      ],
+      "minLimit": [
+        -0.0,
+        -0.0,
+        -0.17453293
+      ],
+      "name": "left_ring_MCP_FE",
+      "parentLinkFromJoint": {
+        "rotation": [
+          -0.5000018366025516,
+          -0.49999999999662686,
+          -0.49999999999662686,
+          0.4999981633974483
+        ],
+        "translation": [
+          0.0015,
+          0.0103,
+          0.0929
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 1.864,
+      "maxLimit": [
+        0.0,
+        0.0,
+        0.3491
+      ],
+      "minLimit": [
+        -0.0,
+        -0.0,
+        -0.3491
+      ],
+      "name": "left_ring_MCP_AA",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.7071080798594735,
+          0.0,
+          0.0,
+          0.7071054825112363
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 0.638,
+      "maxLimit": [
+        0.0,
+        0.0,
+        1.7453
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "left_ring_PIP",
+      "parentLinkFromJoint": {
+        "rotation": [
+          -0.7071080798594735,
+          0.0,
+          0.0,
+          0.7071054825112363
+        ],
+        "translation": [
+          0.047,
+          0.0,
+          0.0
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 0.189369,
+      "maxLimit": [
+        0.0,
+        0.0,
+        1.3963
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "left_ring_DIP",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0315,
+          0.0,
+          0.0
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "name": "left_ring_elastomer_fix_joint",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.49999999999662686,
+          -0.49999999999662686,
+          0.5000018366025516,
+          0.4999981633974483
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "left_ring_fingertip_fix_joint",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.5,
+          0.5,
+          -0.5000000000000018,
+          0.49999999999999817
+        ],
+        "translation": [
+          0.0,
+          -0.0260092574262507,
+          0.0
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 3.3,
+      "maxLimit": [
+        0.0,
+        0.0,
+        1.9199
+      ],
+      "minLimit": [
+        -0.0,
+        -0.0,
+        -0.1745
+      ],
+      "name": "left_thumb_CMC_FE",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.0,
+          0.0,
+          -0.7071080798594735,
+          0.7071054825112363
+        ],
+        "translation": [
+          0.01,
+          -0.026,
+          0.0214
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 3.3,
+      "maxLimit": [
+        0.0,
+        0.0,
+        0.3491
+      ],
+      "minLimit": [
+        -0.0,
+        -0.0,
+        -0.3491
+      ],
+      "name": "left_thumb_CMC_AA",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.6532824337642575,
+          -0.2705981529995758,
+          0.27059914696391785,
+          0.6532800341282952
+        ],
+        "translation": [
+          0.0,
+          -0.005,
+          0.0
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 1.864,
+      "maxLimit": [
+        0.0,
+        0.0,
+        1.3963
+      ],
+      "minLimit": [
+        -0.0,
+        -0.0,
+        -0.5236
+      ],
+      "name": "left_thumb_MCP_FE",
+      "parentLinkFromJoint": {
+        "rotation": [
+          -0.2588196364430847,
+          0.0,
+          0.0,
+          0.9659256678396477
+        ],
+        "translation": [
+          0.065,
+          -0.006,
+          -0.010392
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 1.864,
+      "maxLimit": [
+        0.0,
+        0.0,
+        0.3491
+      ],
+      "minLimit": [
+        -0.0,
+        -0.0,
+        -0.3491
+      ],
+      "name": "left_thumb_MCP_AA",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.7071080798594735,
+          0.0,
+          0.0,
+          0.7071054825112363
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "effortLimit": 0.638,
+      "maxLimit": [
+        0.0,
+        0.0,
+        1.7453
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "left_thumb_IP",
+      "parentLinkFromJoint": {
+        "rotation": [
+          -0.7071080798594735,
+          0.0,
+          0.0,
+          0.7071054825112363
+        ],
+        "translation": [
+          0.039,
+          0.0,
+          0.0
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "name": "left_thumb_elastomer_fix_joint",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.5,
+          -0.5,
+          0.5000000000000018,
+          0.49999999999999817
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "left_thumb_fingertip_fix_joint",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.5,
+          0.5,
+          -0.5000000000000018,
+          0.49999999999999817
+        ],
+        "translation": [
+          0.0,
+          -0.0276109346321216,
+          0.0
+        ]
+      },
+      "type": "Hard"
+    }
+  ],
+  "links": [
+    {
+      "centerOfMass": [
+        -0.00216,
+        -0.00536,
+        0.04011
+      ],
+      "mass": 0.6506,
+      "momentOfInertia": [
+        0.000674245,
+        -2.498e-06,
+        -7.348e-06,
+        0.000793354,
+        0.000105749,
+        0.000294753
+      ],
+      "name": "left_hand_C_MC",
+      "renderModel": "render/left_hand_C_MC_render.glb",
+      "shape": "collision/left_hand_C_MC_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.0092,
+        -0.0013,
+        0.0
+      ],
+      "mass": 0.00221,
+      "momentOfInertia": [
+        1.77e-07,
+        5.4e-09,
+        0.0,
+        1.104e-07,
+        0.0,
+        2.23e-07
+      ],
+      "name": "left_index_MCP_VL",
+      "parentLink": 0,
+      "renderModel": "render/left_index_MCP_VL_render.glb",
+      "shape": "collision/left_index_MCP_VL_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.027,
+        -0.00055,
+        -0.00068
+      ],
+      "mass": 0.04741,
+      "momentOfInertia": [
+        2.168e-06,
+        -3.29e-07,
+        -1.34e-07,
+        1.1394e-05,
+        -1.608e-08,
+        1.1045e-05
+      ],
+      "name": "left_index_PP",
+      "parentLink": 1,
+      "renderModel": "render/left_index_PP_render.glb",
+      "shape": "collision/left_index_PP_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.01212,
+        -0.00116,
+        0.00058
+      ],
+      "mass": 0.01824,
+      "momentOfInertia": [
+        5.77e-07,
+        -1.835e-08,
+        1.0615e-07,
+        1.923e-06,
+        -4.01e-09,
+        1.9986e-06
+      ],
+      "name": "left_index_MP",
+      "parentLink": 2,
+      "renderModel": "render/left_index_MP_render.glb",
+      "shape": "collision/left_index_MP_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.01276,
+        -0.00263,
+        -0.00011
+      ],
+      "mass": 0.00455,
+      "momentOfInertia": [
+        1.343e-07,
+        -1.48e-09,
+        5.97e-09,
+        2.9365e-07,
+        -8.7e-10,
+        2.981e-07
+      ],
+      "name": "left_index_DP",
+      "parentLink": 3,
+      "renderModel": "render/left_index_DP_render.glb",
+      "shape": "collision/left_index_DP_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mass": 0.0001,
+      "momentOfInertia": [
+        1e-10,
+        0.0,
+        0.0,
+        1e-10,
+        0.0,
+        1e-10
+      ],
+      "name": "left_index_elastomer",
+      "parentLink": 4,
+      "renderModel": "render/left_index_elastomer_render.glb",
+      "shape": "collision/left_index_elastomer_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mass": 1e-06,
+      "momentOfInertia": [
+        2e-12,
+        0.0,
+        0.0,
+        2e-12,
+        0.0,
+        2e-12
+      ],
+      "name": "left_index_fingertip",
+      "parentLink": 5
+    },
+    {
+      "centerOfMass": [
+        -0.0092,
+        -0.0013,
+        0.0
+      ],
+      "mass": 0.00221,
+      "momentOfInertia": [
+        1.77e-07,
+        5.4e-09,
+        0.0,
+        1.104e-07,
+        0.0,
+        2.23e-07
+      ],
+      "name": "left_middle_MCP_VL",
+      "parentLink": 0,
+      "renderModel": "render/left_middle_MCP_VL_render.glb",
+      "shape": "collision/left_middle_MCP_VL_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.027,
+        -0.00055,
+        -0.00068
+      ],
+      "mass": 0.04741,
+      "momentOfInertia": [
+        2.168e-06,
+        -3.29e-07,
+        -1.34e-07,
+        1.1394e-05,
+        -1.608e-08,
+        1.1045e-05
+      ],
+      "name": "left_middle_PP",
+      "parentLink": 7,
+      "renderModel": "render/left_middle_PP_render.glb",
+      "shape": "collision/left_middle_PP_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.01212,
+        -0.00116,
+        0.00058
+      ],
+      "mass": 0.01824,
+      "momentOfInertia": [
+        5.77e-07,
+        -1.835e-08,
+        1.0615e-07,
+        1.923e-06,
+        -4.01e-09,
+        1.9986e-06
+      ],
+      "name": "left_middle_MP",
+      "parentLink": 8,
+      "renderModel": "render/left_middle_MP_render.glb",
+      "shape": "collision/left_middle_MP_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.01276,
+        -0.00263,
+        -0.00011
+      ],
+      "mass": 0.00455,
+      "momentOfInertia": [
+        1.343e-07,
+        -1.48e-09,
+        5.97e-09,
+        2.9365e-07,
+        -8.7e-10,
+        2.981e-07
+      ],
+      "name": "left_middle_DP",
+      "parentLink": 9,
+      "renderModel": "render/left_middle_DP_render.glb",
+      "shape": "collision/left_middle_DP_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mass": 0.0001,
+      "momentOfInertia": [
+        1e-10,
+        0.0,
+        0.0,
+        1e-10,
+        0.0,
+        1e-10
+      ],
+      "name": "left_middle_elastomer",
+      "parentLink": 10,
+      "renderModel": "render/left_middle_elastomer_render.glb",
+      "shape": "collision/left_middle_elastomer_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mass": 1e-06,
+      "momentOfInertia": [
+        2e-12,
+        0.0,
+        0.0,
+        2e-12,
+        0.0,
+        2e-12
+      ],
+      "name": "left_middle_fingertip",
+      "parentLink": 11
+    },
+    {
+      "centerOfMass": [
+        0.0107985,
+        0.00598801,
+        -0.0335125
+      ],
+      "mass": 0.12541,
+      "momentOfInertia": [
+        3.7226e-05,
+        -3.22784e-08,
+        -7.9079e-07,
+        4.4739e-05,
+        -1.019e-06,
+        1.7056e-05
+      ],
+      "name": "left_pinky_MC",
+      "parentLink": 0,
+      "renderModel": "render/left_pinky_MC_render.glb",
+      "shape": "collision/left_pinky_MC_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.0092,
+        -0.0013,
+        0.0
+      ],
+      "mass": 0.00221,
+      "momentOfInertia": [
+        1.77e-07,
+        5.4e-09,
+        0.0,
+        1.104e-07,
+        0.0,
+        2.23e-07
+      ],
+      "name": "left_pinky_MCP_VL",
+      "parentLink": 13,
+      "renderModel": "render/left_pinky_MCP_VL_render.glb",
+      "shape": "collision/left_pinky_MCP_VL_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.027,
+        -0.00055,
+        -0.00068
+      ],
+      "mass": 0.04741,
+      "momentOfInertia": [
+        2.168e-06,
+        -3.29e-07,
+        -1.34e-07,
+        1.1394e-05,
+        -1.608e-08,
+        1.1045e-05
+      ],
+      "name": "left_pinky_PP",
+      "parentLink": 14,
+      "renderModel": "render/left_pinky_PP_render.glb",
+      "shape": "collision/left_pinky_PP_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.01212,
+        -0.00116,
+        0.00058
+      ],
+      "mass": 0.01824,
+      "momentOfInertia": [
+        5.77e-07,
+        -1.835e-08,
+        1.0615e-07,
+        1.923e-06,
+        -4.01e-09,
+        1.9986e-06
+      ],
+      "name": "left_pinky_MP",
+      "parentLink": 15,
+      "renderModel": "render/left_pinky_MP_render.glb",
+      "shape": "collision/left_pinky_MP_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.01276,
+        -0.00263,
+        -0.00011
+      ],
+      "mass": 0.00455,
+      "momentOfInertia": [
+        1.343e-07,
+        -1.48e-09,
+        5.97e-09,
+        2.9365e-07,
+        -8.7e-10,
+        2.981e-07
+      ],
+      "name": "left_pinky_DP",
+      "parentLink": 16,
+      "renderModel": "render/left_pinky_DP_render.glb",
+      "shape": "collision/left_pinky_DP_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mass": 0.0001,
+      "momentOfInertia": [
+        1e-10,
+        0.0,
+        0.0,
+        1e-10,
+        0.0,
+        1e-10
+      ],
+      "name": "left_pinky_elastomer",
+      "parentLink": 17,
+      "renderModel": "render/left_pinky_elastomer_render.glb",
+      "shape": "collision/left_pinky_elastomer_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mass": 1e-06,
+      "momentOfInertia": [
+        2e-12,
+        0.0,
+        0.0,
+        2e-12,
+        0.0,
+        2e-12
+      ],
+      "name": "left_pinky_fingertip",
+      "parentLink": 18
+    },
+    {
+      "centerOfMass": [
+        -0.0092,
+        -0.0013,
+        0.0
+      ],
+      "mass": 0.00221,
+      "momentOfInertia": [
+        1.77e-07,
+        5.4e-09,
+        0.0,
+        1.104e-07,
+        0.0,
+        2.23e-07
+      ],
+      "name": "left_ring_MCP_VL",
+      "parentLink": 0,
+      "renderModel": "render/left_ring_MCP_VL_render.glb",
+      "shape": "collision/left_ring_MCP_VL_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.027,
+        -0.00055,
+        -0.00068
+      ],
+      "mass": 0.04741,
+      "momentOfInertia": [
+        2.168e-06,
+        -3.29e-07,
+        -1.34e-07,
+        1.1394e-05,
+        -1.608e-08,
+        1.1045e-05
+      ],
+      "name": "left_ring_PP",
+      "parentLink": 20,
+      "renderModel": "render/left_ring_PP_render.glb",
+      "shape": "collision/left_ring_PP_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.01212,
+        -0.00116,
+        0.00058
+      ],
+      "mass": 0.01824,
+      "momentOfInertia": [
+        5.77e-07,
+        -1.835e-08,
+        1.0615e-07,
+        1.923e-06,
+        -4.01e-09,
+        1.9986e-06
+      ],
+      "name": "left_ring_MP",
+      "parentLink": 21,
+      "renderModel": "render/left_ring_MP_render.glb",
+      "shape": "collision/left_ring_MP_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.01276,
+        -0.00263,
+        -0.00011
+      ],
+      "mass": 0.00455,
+      "momentOfInertia": [
+        1.343e-07,
+        -1.48e-09,
+        5.97e-09,
+        2.9365e-07,
+        -8.7e-10,
+        2.981e-07
+      ],
+      "name": "left_ring_DP",
+      "parentLink": 22,
+      "renderModel": "render/left_ring_DP_render.glb",
+      "shape": "collision/left_ring_DP_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mass": 0.0001,
+      "momentOfInertia": [
+        1e-10,
+        0.0,
+        0.0,
+        1e-10,
+        0.0,
+        1e-10
+      ],
+      "name": "left_ring_elastomer",
+      "parentLink": 23,
+      "renderModel": "render/left_ring_elastomer_render.glb",
+      "shape": "collision/left_ring_elastomer_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mass": 1e-06,
+      "momentOfInertia": [
+        2e-12,
+        0.0,
+        0.0,
+        2e-12,
+        0.0,
+        2e-12
+      ],
+      "name": "left_ring_fingertip",
+      "parentLink": 24
+    },
+    {
+      "centerOfMass": [
+        -0.00065,
+        -0.0002,
+        0.0
+      ],
+      "mass": 0.0025,
+      "momentOfInertia": [
+        2.08e-07,
+        -1.853e-08,
+        0.0,
+        1.39e-07,
+        0.0,
+        2.6e-07
+      ],
+      "name": "left_thumb_CMC_VL",
+      "parentLink": 0,
+      "renderModel": "render/left_thumb_CMC_VL_render.glb"
+    },
+    {
+      "centerOfMass": [
+        0.03643,
+        -0.01024,
+        -0.00517
+      ],
+      "mass": 0.13587,
+      "momentOfInertia": [
+        1.922e-05,
+        -1.981e-08,
+        -5.1687e-07,
+        4.3621e-05,
+        1.534e-06,
+        4.6191e-05
+      ],
+      "name": "left_thumb_MC",
+      "parentLink": 26,
+      "renderModel": "render/left_thumb_MC_render.glb",
+      "shape": "collision/left_thumb_MC_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -1.29e-09,
+        1.1e-10,
+        0.0
+      ],
+      "mass": 8e-05,
+      "momentOfInertia": [
+        6.4e-08,
+        1.61e-09,
+        0.0,
+        3.8e-08,
+        0.0,
+        7.9e-08
+      ],
+      "name": "left_thumb_MCP_VL",
+      "parentLink": 27,
+      "renderModel": "render/left_thumb_MCP_VL_render.glb"
+    },
+    {
+      "centerOfMass": [
+        0.021256,
+        -0.00095,
+        0.00092
+      ],
+      "mass": 0.03078,
+      "momentOfInertia": [
+        1.255e-06,
+        -4e-07,
+        4.267e-08,
+        6.047e-06,
+        -2.004e-08,
+        5.915e-06
+      ],
+      "name": "left_thumb_PP",
+      "parentLink": 28,
+      "renderModel": "render/left_thumb_PP_render.glb",
+      "shape": "collision/left_thumb_PP_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.00832,
+        -0.0018,
+        -0.00101
+      ],
+      "mass": 0.00988,
+      "momentOfInertia": [
+        3.1462e-07,
+        -1.026e-07,
+        7.094e-08,
+        1.038e-06,
+        -1.4e-08,
+        1.05884e-06
+      ],
+      "name": "left_thumb_DP",
+      "parentLink": 29,
+      "renderModel": "render/left_thumb_DP_render.glb",
+      "shape": "collision/left_thumb_DP_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mass": 0.0001,
+      "momentOfInertia": [
+        1e-10,
+        0.0,
+        0.0,
+        1e-10,
+        0.0,
+        1e-10
+      ],
+      "name": "left_thumb_elastomer",
+      "parentLink": 30,
+      "renderModel": "render/left_thumb_elastomer_render.glb",
+      "shape": "collision/left_thumb_elastomer_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mass": 1e-06,
+      "momentOfInertia": [
+        2e-12,
+        0.0,
+        0.0,
+        2e-12,
+        0.0,
+        2e-12
+      ],
+      "name": "left_thumb_fingertip",
+      "parentLink": 31
+    }
+  ],
+  "name": "sharpa_wave_left"
+}

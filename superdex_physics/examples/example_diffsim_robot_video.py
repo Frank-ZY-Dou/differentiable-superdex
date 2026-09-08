@@ -99,9 +99,10 @@ like the gripper grasp (27 controlled DoFs, the finger pads in frictional contac
 at the engine's default stiffness; see ``DG5F_GRASP`` for the geometry and why a
 wrap is not reachable). The same pinch runs with the other hands of the
 ``HAND_GRASPS`` profiles: ``--task wuji2`` (Wuji Hand 2, beta 1, the SuperDex
-asset), ``wuji2b2`` (Wuji Hand 2, beta 2), ``wuji1`` (Wuji Hand 1) and ``xhand``
-(XHand1); their hand packages under ``assets/bots/hands`` and the FR3 + hand
-recipes under ``assets/bots/arm_hand_combos`` are part of this fork.
+asset), ``wuji2b2`` (Wuji Hand 2, beta 2), ``wuji1`` (Wuji Hand 1), ``xhand``
+(XHand1) and ``sharpa`` (Sharpa Wave); their hand packages under
+``assets/bots/hands`` and the FR3 + hand recipes under
+``assets/bots/arm_hand_combos`` are part of this fork.
 
 ``robot_push_multi.mp4`` (``--task push_multi``) is the push with two cubes in a
 row: the end effector pushes the first cube, which pushes the second; the loss
@@ -378,7 +379,42 @@ XHAND_GRASP = HandGrasp(
     lifted_cube=(0.453, -0.001, 0.250),
 )
 
-HAND_GRASPS = {p.name: p for p in (DG5F_GRASP, WUJI2_GRASP, WUJI2B2_GRASP, WUJI1_GRASP, XHAND_GRASP)}
+# Sharpa Wave (right). In the frame of the hand's base link (right_hand_C_MC) the fingers
+# extend along +z and curl toward +x (the palm side), the thumb rests on the +y side: the same
+# placement as the Wuji Hand 1 (base x -> -Z, y -> -X, z -> +Y). The cube is centered 105 mm
+# ahead of and 75 mm below the base, 10 mm toward the thumb side, so that the index, middle
+# and ring fingertips (30, 10 and -10 mm across the hand) land on its far face; each finger
+# flexes on its MCP, PIP and DIP joints and, closed, the fingertips reach 6-9 mm past the far
+# face at the cube's mid-height. The thumb descends bent across the palm and fully flexed
+# (open), its tip 16 mm in front of the cube's near face, and the closure unrolls its
+# interphalangeal joint onto that face (tip 8 mm inside, at the mid-height); closing the
+# straight thumb instead sweeps it in from the side through the cube's place.
+_SHARPA_THUMB_OPEN = {
+    "right_thumb_CMC_FE": 1.06,
+    "right_thumb_CMC_AA": -0.3,
+    "right_thumb_MCP_FE": 1.35,
+    "right_thumb_MCP_AA": -0.3,
+    "right_thumb_IP": 1.65,
+}
+SHARPA_GRASP = HandGrasp(
+    name="sharpa",
+    title="FR3 + Sharpa Wave grasp",
+    bot="bots/arm_hand_combos/fr3_sharpa_wave/right/fr3_sharpa_wave_right.superdex_bot",
+    wrist_link="right_hand_C_MC",
+    rotation=np.array([[0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]).T,
+    flange_start=0.0,
+    offset=(0.01, -0.105, 0.075),
+    fingers={
+        f"right_{finger}_{joint}": amount
+        for finger in ("index", "middle", "ring", "pinky")
+        for joint, amount in zip(("MCP_FE", "PIP", "DIP"), (0.6, 1.0, 0.5))
+    },
+    thumb={**_SHARPA_THUMB_OPEN, "right_thumb_IP": 0.33},
+    open=_SHARPA_THUMB_OPEN,
+    lifted_cube=(0.453, 0.005, 0.264),
+)
+
+HAND_GRASPS = {p.name: p for p in (DG5F_GRASP, WUJI2_GRASP, WUJI2B2_GRASP, WUJI1_GRASP, XHAND_GRASP, SHARPA_GRASP)}
 TENDON_SCENE = "samples/tendon_comparison_articulation.mochi_scene"
 TENDON_SLIDER_GAINS = (200.0, 5.0)  # pose-controller gains of the tendon slider (prismatic joint)
 TENDON_HINGE_DAMPING = 0.02  # the finger hinges are passive: no stiffness, light damping

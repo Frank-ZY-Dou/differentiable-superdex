@@ -1,0 +1,6 @@
+Sharpa Wave description from https://github.com/sharpa-robotics/sharpa-urdf-usd-xml
+(wave_01/right_sharpa_wave and wave_01/left_sharpa_wave, package version 1.0.0, commit
+0d447b6889e6d993758169dfc0aa75ee9f6ad8d7), Apache License 2.0, Copyright 2025 Sharpa Group.
+
+Converted to the SuperDex bot format with tools/urdf_to_superdex_bot.py: collision meshes kept or
+replaced by convex hulls, visual meshes converted to GLB, root-finger contact pairs disabled.

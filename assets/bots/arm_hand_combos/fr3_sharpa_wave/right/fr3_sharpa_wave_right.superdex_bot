@@ -1,0 +1,22 @@
+{
+  "base": "//arms/fr3/fr3.superdex_bot",
+  "modifications": [
+    {
+      "AttachBot": {
+        "enabled": true,
+        "joint": {
+          "name": "sharpa_wave_to_fr3",
+          "parentLinkFromJoint": {
+            "rotation": [0, 0, 0, 1],
+            "translation": [0, 0, 0.01]
+          },
+          "type": "Hard"
+        },
+        "name": "sharpa_wave_right",
+        "parentLinkName": "fr3_link8",
+        "path": "//hands/sharpa_wave/right/sharpa_wave_right.superdex_bot"
+      }
+    }
+  ],
+  "name": "fr3_sharpa_wave_right"
+}

@@ -20,9 +20,10 @@ The kinematics, inertias and joint limits come from SuperDex's own URDF importer
 URDF are written next to the bot file: collision meshes as binary STL (the engine bakes
 their signed distance fields when the bot is created) and visual meshes as GLB in the
 Y-up convention of the shipped assets, colored with the URDF material. A collision mesh
-is kept when it is watertight and has at most MAX_COLLISION_FACES faces; otherwise its
-convex hull replaces it (an open mesh has no inside for a distance field). Hulls are
-subdivided until their mean edge is below COLLISION_MAX_EDGE, which sets the engine's voxel size.
+is kept when it is a closed volume with at most MAX_COLLISION_FACES faces (faces without
+area dropped); otherwise its convex hull replaces it (an open mesh has no inside for a
+distance field). Hulls are subdivided until their mean edge is below COLLISION_MAX_EDGE,
+which sets the engine's voxel size.
 Contact between the root link and the links not attached to it is disabled, as in the
 shipped hand assets. Mesh scales of the URDF are baked into the written meshes.
 
@@ -71,7 +72,10 @@ def load_scaled(source: pathlib.Path, scale) -> trimesh.Trimesh:
 def write_collision(source: pathlib.Path, target: pathlib.Path, scale) -> str:
     """Writes the collision mesh (or its convex hull) as binary STL; returns a note."""
     mesh = load_scaled(source, scale)
-    if mesh.is_watertight and len(mesh.faces) <= MAX_COLLISION_FACES:
+    # A face without area has no normal and the engine's volume of the shape is not finite.
+    # Slivers with an area are left alone: some vendors' meshes are closed only through them.
+    mesh.update_faces(mesh.area_faces > 0.0)
+    if mesh.is_volume and len(mesh.faces) <= MAX_COLLISION_FACES:
         out = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces, process=False)
         note = f"{len(mesh.faces)} faces kept"
     else:
@@ -88,7 +92,7 @@ def write_collision(source: pathlib.Path, target: pathlib.Path, scale) -> str:
         out = trimesh.Trimesh(vertices=out.vertices, faces=out.faces, process=True)  # merge split vertices
         if not out.is_watertight:
             raise RuntimeError(f"the convex hull of {source} is not watertight after subdivision")
-        why = "open" if not mesh.is_watertight else f"{len(mesh.faces)} faces"
+        why = "open" if not mesh.is_volume else f"{len(mesh.faces)} faces"
         note = f"{why} -> convex hull, {len(out.faces)} faces"
     target.parent.mkdir(parents=True, exist_ok=True)
     out.export(str(target))
@@ -269,6 +273,9 @@ def verify(urdf_prefab, bot_path: pathlib.Path) -> None:
     for i in range(len(urdf_prefab.links)):
         link = urdf_prefab.links[i]
         link.collider_type = physics.ColliderType.NONE
+        # The comparison is about kinematics; the package's collision meshes stand in for
+        # upstream meshes the engine may reject (a zero-area triangle, an open surface).
+        link.shape_file = reloaded.links[i].shape_file
         urdf_prefab.links[i] = link
     poses = {}
     for label, prefab in (("urdf", urdf_prefab), ("package", reloaded)):
