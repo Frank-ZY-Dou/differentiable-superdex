@@ -292,9 +292,10 @@ video replays included.
 - What the gradients are: first-order derivatives of the discrete implicit steps at the solution
   the forward Newton solve reached (its tolerance is part of the gradient's accuracy; the demos
   use 1e-9), for the contact branch and the substep schedule the forward pass took. The bridges
-  are first-order only: a second differentiation (`create_graph`, Hessian-vector products) raises
-  instead of returning an incomplete derivative. A forward step whose Newton residual is not a
-  finite number raises `ForwardSolveError` in every mode.
+  are first-order only: a request to build a graph through them (`create_graph`, Hessians,
+  differentiating through an optimizer step) raises instead of returning an incomplete derivative.
+  A forward step whose Newton residual is not a finite number raises `ForwardSolveError` in every
+  mode, the closed-loop bridge's own steps and its probe step included.
 - The adjoint is exact for steps of any size and across consecutive steps of different sizes.
   Torque gradients on rigid bodies are exact to 1e-8 (the adjoint operator carries the
   moving-chart term of an external torque). Contact-force losses reach the contact parameters of

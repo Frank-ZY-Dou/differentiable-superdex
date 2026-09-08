@@ -71,8 +71,9 @@ produce trajectories identical to upstream SuperDex.
 - A forward step whose Newton residual is not a finite number is a failure in every mode (a
   NaN residual used to pass the threshold comparison); `TorchRollout` refuses rod actors as force
   actors like the driver and `PolicyRollout` do (a rod used to be given six rigid force DoFs);
-  the bridges' backward passes are `once_differentiable`, so a second differentiation raises
-  instead of returning an incomplete derivative.
+  the bridges refuse to build a graph through their backward passes (`create_graph`, Hessians),
+  raising instead of returning an incomplete derivative; the closed-loop bridge checks its own
+  plain steps and its probe step for non-finite residuals as the driver does.
 
 ### Upstream
 

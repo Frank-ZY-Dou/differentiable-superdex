@@ -30,10 +30,12 @@ the simulator's own discrete steps, and torch optimizers drive them.
 
 First order only. Both bridges compute the adjoint gradients inside their
 forward pass and hand them to autograd in backward; nothing in that path
-depends on the upstream graph, so a second differentiation (``create_graph``,
-Hessian-vector products, differentiating through an optimizer step) has no
-derivative to return. The backward passes are marked ``once_differentiable``:
-such a request raises instead of yielding an incomplete second derivative.
+depends on the upstream graph, so a second differentiation has no derivative
+to return. A request to build a graph through a bridge - ``create_graph=True``,
+``torch.autograd.functional.hessian`` and the like, differentiating through an
+optimizer step - raises ``RuntimeError`` in the bridge's backward instead of
+yielding an incomplete second derivative (a bare ``once_differentiable`` would
+let the request through and return zeros from the non-strict Hessian API).
 
 Differentiable inputs (each group is opt-in at construction):
 
@@ -121,6 +123,7 @@ Example::
 from __future__ import annotations
 
 import dataclasses
+import functools
 from collections.abc import Callable, Sequence
 
 import numpy as np
@@ -132,6 +135,7 @@ from superdex.physics.diffsim_rollout import (
     RIGID_POSE_SIZE,
     RolloutResult,
     _StepRecord,
+    _raise_if_not_finite,
     _real_dtype,
     step_with_substeps,
 )
@@ -272,6 +276,26 @@ class _ForceEntry:
     dofs: np.ndarray  # int32 DoF indices receiving forces
 
 
+def _first_order_only(backward):
+    """Wraps an autograd ``backward`` so that a request to differentiate through it
+    (grad mode enabled during backward: ``create_graph=True`` and the APIs built on it)
+    raises at once. Runs outside ``once_differentiable``, which would already have
+    disabled grad mode."""
+
+    @functools.wraps(backward)
+    def wrapped(ctx, *grad_outputs):
+        if torch.is_grad_enabled():
+            raise RuntimeError(
+                "the simulation bridge supports first-order gradients only: the adjoint "
+                "gradients are computed in its forward pass, a graph cannot be built through "
+                "its backward (no create_graph, Hessians or differentiation through an "
+                "optimizer step)"
+            )
+        return backward(ctx, *grad_outputs)
+
+    return wrapped
+
+
 class _RolloutLoss(torch.autograd.Function):
     """(controls, forces, gravity, contact, densities, initial_states,
     soft_materials) -> loss.
@@ -280,8 +304,8 @@ class _RolloutLoss(torch.autograd.Function):
     captured step states); backward scales the stashed input gradients by
     ``grad_output``. The first argument is the owning bridge (non-tensor,
     non-differentiable). First order only: the stashed gradients are numbers,
-    not graph nodes, so backward is ``once_differentiable`` and a second
-    differentiation raises.
+    not graph nodes, so a request to differentiate through backward raises
+    (see :func:`_first_order_only`).
     """
 
     @staticmethod
@@ -295,6 +319,7 @@ class _RolloutLoss(torch.autograd.Function):
         return torch.tensor(bridge.last_result.loss, dtype=torch.float64)
 
     @staticmethod
+    @_first_order_only
     @once_differentiable
     def backward(ctx, grad_output):
         scale = grad_output.detach().cpu().to(torch.float64)
@@ -815,6 +840,7 @@ class _PolicyRolloutLoss(torch.autograd.Function):
         return torch.tensor(loss, dtype=torch.float64)
 
     @staticmethod
+    @_first_order_only
     @once_differentiable
     def backward(ctx, grad_output):
         return (None, *[grad_output * g for g in ctx.grads])
@@ -960,13 +986,18 @@ class PolicyRollout:
         under the controls standing in the scene, then the initial state is restored (the
         queries keep the probe's values). Call it after ``scene.restore_state(initial_state)``
         and before reading the observations of the initial state, as :meth:`__call__` does;
-        a no-op without such observations."""
+        a no-op without such observations. A probe whose Newton residual is not a finite
+        number raises :class:`ForwardSolveError` labelled step -1; the initial state is
+        restored either way."""
         if self._state_init is None:
             raise RuntimeError("PolicyRollout is closed")
         if not self.needs_probe_step:
             return
-        self.scene.step(self.dt)
-        self.scene.restore_state(self._state_init, False)
+        try:
+            self.scene.step(self.dt)
+            _raise_if_not_finite(self.scene, -1, self.dt)
+        finally:
+            self.scene.restore_state(self._state_init, False)
 
     def _inject_observation_grad(self, grad: np.ndarray) -> None:
         offset = 0
@@ -1046,6 +1077,7 @@ class PolicyRollout:
                     pre = scene.capture_state()
                     try:
                         scene.step(self.dt)
+                        _raise_if_not_finite(scene, step, self.dt)
                         post = scene.capture_state()
                     except BaseException:
                         scene.release_state(pre)

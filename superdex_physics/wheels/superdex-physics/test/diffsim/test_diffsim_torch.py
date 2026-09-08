@@ -48,6 +48,8 @@ from unittest import mock
 
 import numpy as np
 import superdex.physics as physics
+from superdex.physics import diffsim_rollout
+from superdex.physics.diffsim_rollout import ForwardSolveError
 
 diffsim = physics.diffsim
 
@@ -591,8 +593,6 @@ class ContractTest(unittest.TestCase):
             bridge(densities=torch.tensor([1000.0], dtype=torch.float64))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class RodForceActorTest(unittest.TestCase):
@@ -622,9 +622,11 @@ class RodForceActorTest(unittest.TestCase):
 
 
 class FirstOrderOnlyTest(unittest.TestCase):
-    """The bridges hand autograd the gradients computed in their forward pass; a second
-    differentiation has nothing to differentiate and must raise rather than return an
-    incomplete second derivative (before 2026-09-08 it returned one silently)."""
+    """The bridges hand autograd the gradients computed in their forward pass; a request to
+    build a graph through them (``create_graph``, a Hessian) has nothing to differentiate and
+    must raise at once rather than return an incomplete second derivative (before 2026-09-08
+    it returned one silently; a bare ``once_differentiable`` still let ``create_graph`` and the
+    non-strict Hessian API through, the latter returning zeros)."""
 
     def test_open_loop_bridge(self) -> None:
         diffsim_torch = _make_bridge_module()
@@ -638,10 +640,14 @@ class FirstOrderOnlyTest(unittest.TestCase):
         self.addCleanup(bridge.close)
         controls = torch.zeros((3, 2), dtype=torch.float64, requires_grad=True)
         (plain,) = torch.autograd.grad(bridge(controls=controls), controls)
-        (first,) = torch.autograd.grad(bridge(controls=controls), controls, create_graph=True)
-        self.assertTrue(torch.equal(first.detach(), plain))
-        with self.assertRaises(RuntimeError):
-            torch.autograd.grad(first.sum(), controls)
+        self.assertTrue(np.all(np.isfinite(plain.numpy())))
+        with self.assertRaisesRegex(RuntimeError, "first-order gradients only"):
+            torch.autograd.grad(bridge(controls=controls), controls, create_graph=True)
+        with self.assertRaisesRegex(RuntimeError, "first-order gradients only"):
+            torch.autograd.functional.hessian(lambda c: bridge(controls=c), controls.detach())
+        # The plain first-order path still works afterwards.
+        (again,) = torch.autograd.grad(bridge(controls=controls), controls)
+        self.assertTrue(torch.equal(again, plain))
 
     def test_closed_loop_bridge(self) -> None:
         diffsim_torch = _make_bridge_module()
@@ -661,11 +667,86 @@ class FirstOrderOnlyTest(unittest.TestCase):
         self.addCleanup(rollout.close)
         params = list(policy.parameters())
         plain = torch.autograd.grad(rollout(), params)
-        first = torch.autograd.grad(rollout(), params, create_graph=True)
-        for a, b in zip(first, plain):
-            self.assertTrue(torch.equal(a.detach(), b))
-        with self.assertRaises(RuntimeError):
-            torch.autograd.grad(sum(g.sum() for g in first), params)
+        with self.assertRaisesRegex(RuntimeError, "first-order gradients only"):
+            torch.autograd.grad(rollout(), params, create_graph=True)
+        again = torch.autograd.grad(rollout(), params)
+        for a, b in zip(again, plain):
+            self.assertTrue(torch.equal(a, b))
+
+
+class PolicyRolloutNonFiniteTest(unittest.TestCase):
+    """The closed-loop bridge steps the scene itself (its own plain-step path, the
+    substepping helper, and the probe step for per-step queries): a step whose Newton
+    residual is not a finite number raises ``ForwardSolveError`` on each of them (before
+    2026-09-08 only the driver's own paths checked), and the probe restores the initial
+    state either way."""
+
+    def _rollout(self, levels: int = 0):
+        diffsim_torch = _make_bridge_module()
+        scene, chain = scenes.pendulum(with_controller=True)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        n = chain.get_num_dofs()
+        policy = torch.nn.Linear(n, n).double()
+        kwargs = {"max_substep_levels": levels}
+        if levels:
+            kwargs["substep_residual_tolerance"] = 1e-7
+        rollout = diffsim_torch.PolicyRollout(
+            scene, dt=DT, num_steps=3, policy=policy,
+            observations=[diffsim_torch.ArticulatedPoseObservation(chain)],
+            control_actors=[chain],
+            terminal_losses=[ArticulatedPoseErrorLoss(chain, ref=np.full(n, 0.1))],
+            **kwargs,
+        )
+        self.addCleanup(rollout.close)
+        return scene, chain, rollout
+
+    @staticmethod
+    def _stats(status, residual: float):
+        class Stats:
+            convergence_status = status
+            residual_norm = residual
+            max_non_linear_iters = 7
+
+        return Stats()
+
+    def _statuses(self):
+        return (physics.ConvergenceStatus.STOPPED, physics.ConvergenceStatus.CONVERGED)
+
+    def _check_steps(self, levels: int) -> None:
+        for status in self._statuses():
+            for residual in (float("nan"), float("inf"), -float("inf")):
+                with self.subTest(status=status, residual=residual, levels=levels):
+                    scene, chain, rollout = self._rollout(levels)
+                    stats = self._stats(status, residual)
+                    with mock.patch.object(diffsim_rollout, "_solver_stats", lambda s: stats):
+                        with self.assertRaises(ForwardSolveError):
+                            rollout()
+                    scene.release_all_states()
+
+    def test_plain_steps(self) -> None:
+        self._check_steps(0)
+
+    def test_substeps(self) -> None:
+        self._check_steps(1)
+
+    def test_probe(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        for residual in (float("nan"), float("inf")):
+            with self.subTest(residual=residual):
+                scene, chain, rollout = self._rollout()
+                pose0 = np.zeros(chain.get_num_dofs())
+                chain.get_articulated_pose(pose0)
+                stats = self._stats(physics.ConvergenceStatus.STOPPED, residual)
+                with mock.patch.object(
+                    type(rollout), "needs_probe_step", new_callable=mock.PropertyMock, return_value=True
+                ), mock.patch.object(diffsim_rollout, "_solver_stats", lambda s: stats):
+                    with self.assertRaises(ForwardSolveError) as ctx:
+                        rollout.probe_initial_observations()
+                self.assertEqual(ctx.exception.step, -1)
+                pose = np.zeros(chain.get_num_dofs())
+                chain.get_articulated_pose(pose)
+                self.assertTrue(np.array_equal(pose, pose0))  # the initial state is restored
 
 
 class PolicyRolloutTest(unittest.TestCase):
@@ -2160,3 +2241,7 @@ class BridgeActorValidationTest(unittest.TestCase):
             self.assertEqual(cube_b.get_contact_params().coulomb_friction_coefficient, before_b)
             self.assertEqual(cube_a.get_contact_params().coulomb_friction_coefficient, before_a)
             scene_b.release_all_states()
+
+
+if __name__ == "__main__":
+    unittest.main()
