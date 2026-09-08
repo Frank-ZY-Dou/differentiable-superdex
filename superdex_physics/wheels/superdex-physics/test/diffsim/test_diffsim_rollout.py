@@ -607,6 +607,119 @@ class SubstepTest(unittest.TestCase):
         self.assertEqual(result.num_solver_steps, NUM_STEPS)
 
 
+class _Stats:
+    """A stand-in for the engine's solver statistics."""
+
+    def __init__(self, status, residual: float, iters: int = 7):
+        self.convergence_status = status
+        self.residual_norm = residual
+        self.max_non_linear_iters = iters
+
+
+class ForwardFailurePredicateTest(unittest.TestCase):
+    """``forward_solve_failed`` on every solver status and every class of residual: finite
+    residuals follow the status-and-threshold rule, a residual that is not a finite number
+    is a failure whatever the status (before 2026-09-08 ``nan > tolerance`` being false let
+    a NaN residual pass as converged)."""
+
+    STATUSES = [s for n, s in physics.ConvergenceStatus.__members__.items() if n != "COUNT"]
+    TOL = 1e-9
+
+    def _predicate(self, status, residual: float) -> bool:
+        with mock.patch.object(diffsim_rollout, "_solver_stats", lambda scene: _Stats(status, residual)):
+            return diffsim_rollout.forward_solve_failed(None, self.TOL)
+
+    def test_finite_residuals_follow_the_status_and_threshold(self) -> None:
+        for status in self.STATUSES:
+            for residual in (0.0, 1e-12, 1e-9, 2e-9, 1e-6, 1.0):
+                expected = status != physics.ConvergenceStatus.CONVERGED and residual > self.TOL
+                with self.subTest(status=status, residual=residual):
+                    self.assertEqual(self._predicate(status, residual), expected)
+
+    def test_non_finite_residuals_fail_whatever_the_status(self) -> None:
+        for status in self.STATUSES:
+            for residual in (float("nan"), float("inf"), -float("inf")):
+                with self.subTest(status=status, residual=residual):
+                    self.assertTrue(self._predicate(status, residual))
+
+
+@double_only
+class NonFiniteResidualTest(unittest.TestCase):
+    """A step whose Newton residual is NaN is an error in every mode: with substepping it
+    is subdivided and the finest level raises; without substepping (where convergence is
+    otherwise not inspected) it raises at once. Either way every capture is released."""
+
+    def _nan_stats(self, real, actual):
+        return _Stats(physics.ConvergenceStatus.STOPPED, float("nan"), actual.max_non_linear_iters)
+
+    def _nan_from_second_attempt(self) -> list:
+        """Counts the failure predicate's calls (one per solve attempt) and makes the solver
+        statistics NaN from the second attempt on, i.e. for step 1 and its substeps."""
+        real_stats = diffsim_rollout._solver_stats
+        real_failed = diffsim_rollout.forward_solve_failed
+        attempts: list[float] = []
+
+        def stats(scene):
+            actual = real_stats(scene)
+            return self._nan_stats(real_stats, actual) if len(attempts) >= 2 else actual
+
+        def failed(scene, residual_tolerance) -> bool:
+            attempts.append(residual_tolerance)
+            return real_failed(scene, residual_tolerance)
+
+        for name, replacement in (("_solver_stats", stats), ("forward_solve_failed", failed)):
+            patcher = mock.patch.object(diffsim_rollout, name, replacement)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return attempts
+
+    def _nan_from_second_step(self) -> list:
+        """Without substepping the statistics are read once per step: NaN from step 1 on."""
+        real_stats = diffsim_rollout._solver_stats
+        calls: list[int] = []
+
+        def stats(scene):
+            calls.append(len(calls))
+            actual = real_stats(scene)
+            return self._nan_stats(real_stats, actual) if len(calls) >= 2 else actual
+
+        patcher = mock.patch.object(diffsim_rollout, "_solver_stats", stats)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
+
+    def test_substepping_subdivides_then_raises(self) -> None:
+        scene, chain, targets, forces, apply_inputs = _controller_setup()
+        self.addCleanup(physics.destroy_scene, scene)
+        terminal = ArticulatedPoseErrorLoss(chain, ref=targets[:, 0] + 0.1)
+        attempts = self._nan_from_second_attempt()
+        rollout = DifferentiableRollout(
+            scene, dt=DT, num_steps=NUM_STEPS, max_substep_levels=2, substep_residual_tolerance=1e-7
+        )
+        with self.assertRaises(ForwardSolveError) as ctx:
+            rollout.run(apply_inputs=apply_inputs, terminal_losses=[terminal])
+        self.assertEqual(ctx.exception.step, 1)
+        self.assertAlmostEqual(ctx.exception.dt, DT / 4)
+        self.assertTrue(np.isnan(ctx.exception.residual_norm))
+        self.assertEqual(len(attempts), 4)  # step 0, then step 1 at DT, DT/2 and DT/4
+        scene.release_all_states()
+
+    def test_without_substepping_raises_at_once(self) -> None:
+        scene, chain, targets, forces, apply_inputs = _controller_setup()
+        self.addCleanup(physics.destroy_scene, scene)
+        terminal = ArticulatedPoseErrorLoss(chain, ref=targets[:, 0] + 0.1)
+        calls = self._nan_from_second_step()
+        with self.assertRaises(ForwardSolveError) as ctx:
+            DifferentiableRollout(scene, dt=DT, num_steps=NUM_STEPS).run(
+                apply_inputs=apply_inputs, terminal_losses=[terminal]
+            )
+        self.assertEqual(ctx.exception.step, 1)
+        self.assertAlmostEqual(ctx.exception.dt, DT)
+        self.assertTrue(np.isnan(ctx.exception.residual_norm))
+        self.assertEqual(len(calls), 2)
+        scene.release_all_states()
+
+
 @double_only
 class VariableStepSizeTest(unittest.TestCase):
     """The per-step adjoint chained across steps of different dt."""

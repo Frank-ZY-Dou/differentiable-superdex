@@ -68,6 +68,11 @@ produce trajectories identical to upstream SuperDex.
   objective; loss factories called once per step; actors resolved by identity, with actors of
   another scene and repeated actors rejected at construction; the torch bridges refuse the
   single-precision engine.
+- A forward step whose Newton residual is not a finite number is a failure in every mode (a
+  NaN residual used to pass the threshold comparison); `TorchRollout` refuses rod actors as force
+  actors like the driver and `PolicyRollout` do (a rod used to be given six rigid force DoFs);
+  the bridges' backward passes are `once_differentiable`, so a second differentiation raises
+  instead of returning an incomplete derivative.
 
 ### Upstream
 

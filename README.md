@@ -9,8 +9,8 @@ that makes SuperDex Physics differentiable. It adds the discrete adjoint of the 
 time steps, through frictional contact, with gradients for initial states, per-step controller
 targets and external forces, gravity, contact materials, densities and soft material parameters.
 A PyTorch bridge turns a rollout into an autograd node, so policies and parameter encoders train
-on exact simulation gradients. Scenes that do not ask for gradients run exactly as in upstream
-SuperDex.
+on the gradients of the simulator's own discrete steps. Scenes that do not ask for gradients run
+exactly as in upstream SuperDex.
 
 | A feedback policy pushes a cube (`push_policy`) | A five-finger hand carries a cube (`hand`) |
 | :-: | :-: |

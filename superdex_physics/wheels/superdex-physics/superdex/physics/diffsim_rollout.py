@@ -69,6 +69,7 @@ adjoints such as ``get_center_of_mass_transform_backward``. See
 from __future__ import annotations
 
 import dataclasses
+import math
 from collections.abc import Callable, Mapping, Sequence
 
 import numpy as np
@@ -169,7 +170,9 @@ class ForwardSolveError(RuntimeError):
     """The forward Newton solve of one step did not converge.
 
     Raised by :func:`step_with_substeps` (and hence by rollouts with
-    ``max_substep_levels`` > 0) when even the finest substep level fails.
+    ``max_substep_levels`` > 0) when even the finest substep level fails, and by
+    every rollout, substepping or not, when a step's Newton residual is not a
+    finite number.
     """
 
     def __init__(self, step: int, dt: float, status, residual_norm: float, iterations: int):
@@ -185,19 +188,40 @@ class ForwardSolveError(RuntimeError):
         )
 
 
+def _solver_stats(scene):
+    return scene.get_solver_stats()
+
+
 def forward_solve_failed(scene, residual_tolerance: float) -> bool:
     """Whether the last ``scene.step`` ended without convergence and with a
-    residual above ``residual_tolerance``.
+    residual above ``residual_tolerance``, or with a residual that is not a
+    finite number.
 
     A solve that stopped on round-off with a residual below the tolerance
     counts as converged; a solve that hit the iteration limit or diverged with a
-    larger residual is a failure.
+    larger residual is a failure. A NaN or infinite residual is a failure
+    whatever the status says: a comparison with NaN is false, so the threshold
+    alone would accept it (before 2026-09-08 it did).
     """
-    stats = scene.get_solver_stats()
+    stats = _solver_stats(scene)
+    residual = float(stats.residual_norm)
+    if not math.isfinite(residual):
+        return True
     return (
         stats.convergence_status != physics.ConvergenceStatus.CONVERGED
-        and stats.residual_norm > residual_tolerance
+        and residual > residual_tolerance
     )
+
+
+def _raise_if_not_finite(scene, step: int, dt: float) -> None:
+    """A step whose Newton residual is not a finite number left the scene in a
+    corrupt state: an error even for a rollout that does not inspect
+    convergence otherwise."""
+    stats = _solver_stats(scene)
+    if not math.isfinite(float(stats.residual_norm)):
+        raise ForwardSolveError(
+            step, dt, stats.convergence_status, stats.residual_norm, stats.max_non_linear_iters
+        )
 
 
 def _step_adaptive(
@@ -214,7 +238,7 @@ def _step_adaptive(
         scene.step(dt)
         failed = forward_solve_failed(scene, residual_tolerance)
         if failed:
-            stats = scene.get_solver_stats()
+            stats = _solver_stats(scene)
             if level >= max_levels:
                 raise ForwardSolveError(
                     step,
@@ -423,6 +447,7 @@ class DifferentiableRollout:
                     pre = self.scene.capture_state()
                     try:
                         self.scene.step(self.dt)
+                        _raise_if_not_finite(self.scene, step, self.dt)
                         post = self.scene.capture_state()
                     except BaseException:
                         self.scene.release_state(pre)

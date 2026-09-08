@@ -201,8 +201,8 @@ All examples live in `superdex_physics/examples` and need `SUPERDEX_PRECISION=do
 SUPERDEX_PRECISION=double python superdex_physics/examples/example_diffsim_robot_video.py --task all --check
 ```
 
-`--check` compares the adjoint with central finite differences along its own direction before
-optimizing; `--export-scenes` also writes each recorded frame's bodies, meshes and camera next to
+`--check` compares the adjoint with central finite differences before optimizing, along its own
+direction and one entry at a time on the largest entries; `--export-scenes` also writes each recorded frame's bodies, meshes and camera next to
 the video, and `render_diffsim_blender.py` renders those with Blender (Cycles) into the
 animations shown here. The tasks (`--task`): `reach`, an FR3 arm reaching a point; `push`, `push_soft`,
 `push_multi`, the arm pushing a rigid cube, a soft cube, or a cube that pushes a second one;
@@ -268,9 +268,9 @@ a cube overlaps less than it looks.
 
 ### Validation
 
-Every gradient path is checked against central finite differences of the same rollout, with
-closed-form references where they exist (free fall, the kinematic identity of a free body's
-contact force). Run the suite from `superdex_physics/wheels/superdex-physics`:
+Every gradient path is checked against central finite differences of the same rollout, one
+coordinate at a time, with closed-form references where they exist (free fall, the kinematic
+identity of a free body's contact force). Run the suite from `superdex_physics/wheels/superdex-physics`:
 
 ```bash
 SUPERDEX_PRECISION=double python -m unittest discover -s test/diffsim -t .
@@ -289,6 +289,12 @@ video replays included.
 
 ### Exactness and limitations
 
+- What the gradients are: first-order derivatives of the discrete implicit steps at the solution
+  the forward Newton solve reached (its tolerance is part of the gradient's accuracy; the demos
+  use 1e-9), for the contact branch and the substep schedule the forward pass took. The bridges
+  are first-order only: a second differentiation (`create_graph`, Hessian-vector products) raises
+  instead of returning an incomplete derivative. A forward step whose Newton residual is not a
+  finite number raises `ForwardSolveError` in every mode.
 - The adjoint is exact for steps of any size and across consecutive steps of different sizes.
   Torque gradients on rigid bodies are exact to 1e-8 (the adjoint operator carries the
   moving-chart term of an external torque). Contact-force losses reach the contact parameters of

@@ -595,6 +595,79 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class RodForceActorTest(unittest.TestCase):
+    """A rod carries no differentiable external forces (the driver records no force DoFs
+    for it); the bridge refuses it as a force actor instead of treating it as a rigid body
+    with six (before 2026-09-08 it fell through to the rigid case)."""
+
+    def test_rod_force_actor_is_rejected(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, rod, cube = scenes.rod_with_cube()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        with self.assertRaisesRegex(ValueError, "takes no external forces"):
+            diffsim_torch.TorchRollout(
+                scene, dt=DT, num_steps=2, force_actors=[rod], terminal_losses=[object()]
+            )
+        with self.assertRaisesRegex(ValueError, "takes no external forces"):
+            diffsim_torch.PolicyRollout(
+                scene,
+                dt=DT,
+                num_steps=2,
+                policy=torch.nn.Linear(3, 6).double(),
+                observations=[diffsim_torch.TranslationObservation(cube)],
+                force_actors=[rod],
+                terminal_losses=[object()],
+            )
+
+
+class FirstOrderOnlyTest(unittest.TestCase):
+    """The bridges hand autograd the gradients computed in their forward pass; a second
+    differentiation has nothing to differentiate and must raise rather than return an
+    incomplete second derivative (before 2026-09-08 it returned one silently)."""
+
+    def test_open_loop_bridge(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, chain = scenes.pendulum(with_controller=True)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        bridge = diffsim_torch.TorchRollout(
+            scene, dt=DT, num_steps=3, control_actors=[chain],
+            terminal_losses=[ArticulatedPoseErrorLoss(chain, np.array([0.4, -0.2]))],
+        )
+        self.addCleanup(bridge.close)
+        controls = torch.zeros((3, 2), dtype=torch.float64, requires_grad=True)
+        (plain,) = torch.autograd.grad(bridge(controls=controls), controls)
+        (first,) = torch.autograd.grad(bridge(controls=controls), controls, create_graph=True)
+        self.assertTrue(torch.equal(first.detach(), plain))
+        with self.assertRaises(RuntimeError):
+            torch.autograd.grad(first.sum(), controls)
+
+    def test_closed_loop_bridge(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, chain = scenes.pendulum(with_controller=True)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        num_dofs = chain.get_num_dofs()
+        pose0 = np.zeros(num_dofs)
+        chain.get_articulated_pose(pose0)
+        policy = torch.nn.Linear(num_dofs, num_dofs).double()
+        rollout = diffsim_torch.PolicyRollout(
+            scene, dt=DT, num_steps=3, policy=policy,
+            observations=[diffsim_torch.ArticulatedPoseObservation(chain)],
+            control_actors=[chain],
+            terminal_losses=[ArticulatedPoseErrorLoss(chain, ref=pose0 + 0.1)],
+        )
+        self.addCleanup(rollout.close)
+        params = list(policy.parameters())
+        plain = torch.autograd.grad(rollout(), params)
+        first = torch.autograd.grad(rollout(), params, create_graph=True)
+        for a, b in zip(first, plain):
+            self.assertTrue(torch.equal(a.detach(), b))
+        with self.assertRaises(RuntimeError):
+            torch.autograd.grad(sum(g.sum() for g in first), params)
+
+
 class PolicyRolloutTest(unittest.TestCase):
     """Closed-loop policy gradients: a linear policy on the pendulum maps the observed
     joint pose (and, with history 2, the previous one) to the controller targets; the

@@ -25,8 +25,15 @@ callable that maps input tensors to a scalar ``torch.Tensor``, with the
 backward pass served by the engine's discrete adjoint
 (:class:`superdex.physics.diffsim_rollout.DifferentiableRollout`). The
 simulator becomes a node of the autograd graph: networks upstream of it
-(policies producing controls, parameter encoders) receive exact simulation
-gradients, and torch optimizers drive them.
+(policies producing controls, parameter encoders) receive the gradients of
+the simulator's own discrete steps, and torch optimizers drive them.
+
+First order only. Both bridges compute the adjoint gradients inside their
+forward pass and hand them to autograd in backward; nothing in that path
+depends on the upstream graph, so a second differentiation (``create_graph``,
+Hessian-vector products, differentiating through an optimizer step) has no
+derivative to return. The backward passes are marked ``once_differentiable``:
+such a request raises instead of yielding an incomplete second derivative.
 
 Differentiable inputs (each group is opt-in at construction):
 
@@ -131,6 +138,7 @@ from superdex.physics.diffsim_rollout import (
 
 try:
     import torch
+    from torch.autograd.function import once_differentiable
 except ImportError as _torch_import_error:  # pragma: no cover
     raise ImportError(
         "superdex.physics.diffsim_torch requires PyTorch; install it with "
@@ -271,7 +279,9 @@ class _RolloutLoss(torch.autograd.Function):
     Forward runs the rollout AND the adjoint sweep (the engine needs the
     captured step states); backward scales the stashed input gradients by
     ``grad_output``. The first argument is the owning bridge (non-tensor,
-    non-differentiable).
+    non-differentiable). First order only: the stashed gradients are numbers,
+    not graph nodes, so backward is ``once_differentiable`` and a second
+    differentiation raises.
     """
 
     @staticmethod
@@ -285,6 +295,7 @@ class _RolloutLoss(torch.autograd.Function):
         return torch.tensor(bridge.last_result.loss, dtype=torch.float64)
 
     @staticmethod
+    @once_differentiable
     def backward(ctx, grad_output):
         scale = grad_output.detach().cpu().to(torch.float64)
         outs = tuple(
@@ -369,20 +380,16 @@ class TorchRollout:
         self._force_entries: list[_ForceEntry] = []
         for actor in force_actors:
             entry = _entry(actor, "force")
-            if entry.soft:
+            # The force DoFs the driver recorded for the actor decide: six for a
+            # standalone rigid body, the single-DoF joints of an articulated one, none
+            # for soft and rod actors (before 2026-09-08 a rod fell through to the
+            # rigid case and was given six force DoFs it does not have).
+            if not entry.force_dofs:
                 raise ValueError(
-                    f"force actor {entry.name!r} is a soft actor; soft actors "
-                    "take no external forces"
+                    f"force actor {entry.name!r} takes no external forces (soft and rod "
+                    "actors carry none; an articulated actor needs single-DoF joints)"
                 )
-            if entry.articulated:
-                if not entry.force_dofs:
-                    raise ValueError(
-                        f"force actor {entry.name!r} has no single-DoF joints "
-                        "to apply forces to"
-                    )
-                dofs = np.asarray(entry.force_dofs, dtype=np.int32)
-            else:
-                dofs = np.arange(RIGID_DOF_SIZE, dtype=np.int32)
+            dofs = np.asarray(entry.force_dofs, dtype=np.int32)
             self._force_entries.append(_ForceEntry(entry.actor, dofs))
         self.force_size = sum(len(f.dofs) for f in self._force_entries)
 
@@ -798,6 +805,9 @@ class PolicyRolloutResult:
 
 
 class _PolicyRolloutLoss(torch.autograd.Function):
+    """(rollout, *policy parameters) -> loss; first order only, like
+    :class:`_RolloutLoss` (the parameter gradients are computed in forward)."""
+
     @staticmethod
     def forward(ctx, rollout, *params):
         loss, grads = rollout._run(params)
@@ -805,6 +815,7 @@ class _PolicyRolloutLoss(torch.autograd.Function):
         return torch.tensor(loss, dtype=torch.float64)
 
     @staticmethod
+    @once_differentiable
     def backward(ctx, grad_output):
         return (None, *[grad_output * g for g in ctx.grads])
 
