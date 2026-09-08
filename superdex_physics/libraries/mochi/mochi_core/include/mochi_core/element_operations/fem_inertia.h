@@ -194,6 +194,7 @@ bool AddMassMatrixToDRes(
   return true;
 }
 
+/// @note Per-element mass matrices must be zero on entry.
 template <class ElementT>
 void ComputeMassMatrixPerElement(
     Span<ElementT const> elements,
@@ -218,6 +219,7 @@ void ComputeMassMatrixPerElement(
 
     ElementT const* element = &elements[elementId];
     NdArray<real, kNumDofs, kNumDofs>& mm = mmPerElem[elementId];
+    MOCHI_ASSERT_VERBOSE(NormSqr(mm) == 0_r, "Mass matrix must be zero on entry.");
 
     real const thisElementWeight = activeVolWeights.empty() ? 1_r : activeVolWeights[elementId];
     auto const quadWeights = element->quadWeights * thisElementWeight;
@@ -227,11 +229,19 @@ void ComputeMassMatrixPerElement(
       NdArray<real, kNumNodes> const kQuadBasis = element->basisEvaluated[q];
       real const kQuadWeight = quadWeights[q];
       for (int f = 0; f < kNumNodes; ++f) {
-        for (int g = 0; g < kNumNodes; ++g) {
+        for (int g = f; g < kNumNodes; ++g) {
+          real const contribution = density * kQuadBasis[f] * kQuadBasis[g] * kQuadWeight;
           for (int i = 0; i < kSpaceDim; ++i) {
-            mm[f * kSpaceDim + i][g * kSpaceDim + i] +=
-                density * kQuadBasis[f] * kQuadBasis[g] * kQuadWeight;
+            mm[f * kSpaceDim + i][g * kSpaceDim + i] += contribution;
           }
+        }
+      }
+    }
+
+    for (int f = 0; f < kNumNodes; ++f) {
+      for (int g = f + 1; g < kNumNodes; ++g) {
+        for (int i = 0; i < kSpaceDim; ++i) {
+          mm[g * kSpaceDim + i][f * kSpaceDim + i] = mm[f * kSpaceDim + i][g * kSpaceDim + i];
         }
       }
     }
