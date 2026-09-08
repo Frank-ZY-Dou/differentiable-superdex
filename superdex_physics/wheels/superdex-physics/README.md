@@ -218,6 +218,10 @@ cable.
 | ![push](../../examples/media/robot_push.gif) | ![grasp](../../examples/media/robot_grasp.gif) |
 | **`hand`** | **`push_policy`** |
 | ![hand](../../examples/media/robot_hand_grasp.gif) | ![push_policy](../../examples/media/robot_push_policy.gif) |
+| **`wuji2`** | **`wuji1`** |
+| ![wuji2](../../examples/media/robot_wuji2_grasp.gif) | ![wuji1](../../examples/media/robot_wuji1_grasp.gif) |
+| **`xhand`** | **`wuji2b2`** |
+| ![xhand](../../examples/media/robot_xhand_grasp.gif) | ![wuji2b2](../../examples/media/robot_wuji2b2_grasp.gif) |
 
 What the demos reach after 40 iterations (100 for `push_policy`). The loss is half the squared
 distance of the manipulated object to its goal, so 1e-4 is about 1.4 cm and 1e-6 about 1.4 mm;
