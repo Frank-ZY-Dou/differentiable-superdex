@@ -128,6 +128,28 @@ struct CNonCapturedComponent {
   MOCHI_STRUCT_END();
 };
 
+struct TagCaptureFilter {};
+
+struct CFilteredTrivial : NoCopy {
+  int32_t value{};
+
+  MOCHI_STRUCT_BEGIN(mochi_capture_test::CFilteredTrivial);
+  MOCHI_ATTRIBUTE(CaptureState(ecs::RequiredTag<TagCaptureFilter>{}));
+  MOCHI_FIELD(value);
+  MOCHI_STRUCT_END();
+};
+static_assert(std::is_trivially_copyable_v<CFilteredTrivial>);
+
+struct CFilteredNonTrivial : NoCopy {
+  DynamicArray<std::string> values;
+
+  MOCHI_STRUCT_BEGIN(mochi_capture_test::CFilteredNonTrivial);
+  MOCHI_ATTRIBUTE(CaptureState(ecs::RequiredTag<TagCaptureFilter>{}));
+  MOCHI_FIELD(values);
+  MOCHI_STRUCT_END();
+};
+static_assert(!std::is_trivially_copyable_v<CFilteredNonTrivial>);
+
 //----------------------------------------------------------------------------------------
 // Test Fixture
 //----------------------------------------------------------------------------------------
@@ -141,6 +163,9 @@ class MochiCapture : public testing::Test {
     ecs::RegisterComponent<CComponentAB>(reg);
     ecs::RegisterComponent<CComponentWithPadding>(reg);
     ecs::RegisterComponent<CNonCapturedComponent>(reg);
+    ecs::RegisterComponent<TagCaptureFilter>(reg);
+    ecs::RegisterComponent<CFilteredTrivial>(reg);
+    ecs::RegisterComponent<CFilteredNonTrivial>(reg);
     ecs::RegisterComponent<CActorInfo>(reg);
     capture::InitializeOnce(reg);
     ecs::FinalizeComponentRegistration(reg);
@@ -367,6 +392,158 @@ TEST_F(MochiCapture, NonTrivialEntityComponents) {
   CaptureState(reg, emptyAgain, test::ExpectOK{});
   EXPECT_EQ(emptyState.size(), emptyAgain.size());
   EXPECT_TRUE(IsEqualState(reg, emptyState, emptyAgain));
+}
+
+TEST_F(MochiCapture, FilteredEntityComponents) {
+  auto const excludedFirst = reg.create();
+  auto const included = reg.create();
+  auto const excludedLast = reg.create();
+  reg.emplace<TagCaptureFilter>(included);
+  reg.emplace<CFilteredTrivial>(excludedFirst).value = 10;
+  reg.emplace<CFilteredTrivial>(included).value = 11;
+  reg.emplace<CFilteredTrivial>(excludedLast).value = 12;
+  reg.emplace<CFilteredNonTrivial>(excludedFirst).values = {"excluded first"};
+  reg.emplace<CFilteredNonTrivial>(included).values = {"included"};
+  reg.emplace<CFilteredNonTrivial>(excludedLast).values = {"excluded last"};
+
+  DynamicArray<uint8_t> state;
+  CaptureState(reg, state, test::ExpectOK{});
+
+  reg.get<CFilteredTrivial>(excludedFirst).value = 100;
+  reg.get<CFilteredTrivial>(included).value = 111;
+  reg.get<CFilteredTrivial>(excludedLast).value = 122;
+  reg.get<CFilteredNonTrivial>(excludedFirst).values = {"modified excluded first"};
+  reg.get<CFilteredNonTrivial>(included).values = {"modified included"};
+  reg.get<CFilteredNonTrivial>(excludedLast).values = {"modified excluded last"};
+  RestoreState(reg, state, test::ExpectOK{});
+
+  EXPECT_EQ(100, reg.get<CFilteredTrivial const>(excludedFirst).value);
+  EXPECT_EQ(11, reg.get<CFilteredTrivial const>(included).value);
+  EXPECT_EQ(122, reg.get<CFilteredTrivial const>(excludedLast).value);
+  EXPECT_EQ(
+      (DynamicArray<std::string>{"modified excluded first"}),
+      reg.get<CFilteredNonTrivial const>(excludedFirst).values);
+  EXPECT_EQ(
+      (DynamicArray<std::string>{"included"}), reg.get<CFilteredNonTrivial const>(included).values);
+  EXPECT_EQ(
+      (DynamicArray<std::string>{"modified excluded last"}),
+      reg.get<CFilteredNonTrivial const>(excludedLast).values);
+}
+
+TEST_F(MochiCapture, ManyFilteredEntityComponents) {
+  constexpr int kCount = ENTT_PACKED_PAGE * 5 / 2;
+  DynamicArray<entt::entity> entities(kCount);
+  for (int i = 0; i < kCount; ++i) {
+    entities[i] = reg.create();
+    reg.emplace<CFilteredTrivial>(entities[i]).value = i;
+    if (i % 2 == 0) {
+      reg.emplace<TagCaptureFilter>(entities[i]);
+    }
+  }
+
+  DynamicArray<uint8_t> state;
+  CaptureState(reg, state, test::ExpectOK{});
+
+  for (int i = 0; i < kCount; ++i) {
+    reg.get<CFilteredTrivial>(entities[i]).value = i + kCount;
+  }
+  RestoreState(reg, state, test::ExpectOK{});
+
+  for (int i = 0; i < kCount; ++i) {
+    int const expected = i % 2 == 0 ? i : i + kCount;
+    EXPECT_EQ(expected, reg.get<CFilteredTrivial const>(entities[i]).value);
+  }
+}
+
+TEST_F(MochiCapture, FilteredEntityComponentsAllMatch) {
+  constexpr int kCount = ENTT_PACKED_PAGE * 5 / 2;
+  DynamicArray<entt::entity> entities(kCount);
+  for (int i = 0; i < kCount; ++i) {
+    entities[i] = reg.create();
+    reg.emplace<TagCaptureFilter>(entities[i]);
+    reg.emplace<CFilteredTrivial>(entities[i]).value = i;
+    reg.emplace<CFilteredNonTrivial>(entities[i]).values = {std::to_string(i)};
+  }
+
+  DynamicArray<uint8_t> state;
+  CaptureState(reg, state, test::ExpectOK{});
+
+  for (int i = 0; i < kCount; ++i) {
+    reg.get<CFilteredTrivial>(entities[i]).value = i + kCount;
+    reg.get<CFilteredNonTrivial>(entities[i]).values = {"modified"};
+  }
+  RestoreState(reg, state, test::ExpectOK{});
+
+  for (int i = 0; i < kCount; ++i) {
+    EXPECT_EQ(i, reg.get<CFilteredTrivial const>(entities[i]).value);
+    EXPECT_EQ(
+        (DynamicArray<std::string>{std::to_string(i)}),
+        reg.get<CFilteredNonTrivial const>(entities[i]).values);
+  }
+}
+
+TEST_F(MochiCapture, FilteredEntityComponentsEmptyIntersection) {
+  auto const entity = reg.create();
+  reg.emplace<CFilteredTrivial>(entity).value = 11;
+  reg.emplace<CFilteredNonTrivial>(entity).values = {"excluded"};
+
+  DynamicArray<uint8_t> state;
+  CaptureState(reg, state, test::ExpectOK{});
+
+  reg.get<CFilteredTrivial>(entity).value = 22;
+  reg.get<CFilteredNonTrivial>(entity).values = {"modified excluded"};
+  RestoreState(reg, state, test::ExpectOK{});
+
+  EXPECT_EQ(22, reg.get<CFilteredTrivial const>(entity).value);
+  EXPECT_EQ(
+      (DynamicArray<std::string>{"modified excluded"}),
+      reg.get<CFilteredNonTrivial const>(entity).values);
+}
+
+TEST_F(MochiCapture, FilteredEntityComponentsEmptyIntersectionIgnoresLaterMatch) {
+  auto const entity = reg.create();
+  reg.emplace<CFilteredTrivial>(entity).value = 11;
+
+  DynamicArray<uint8_t> state;
+  CaptureState(reg, state, test::ExpectOK{});
+
+  reg.get<CFilteredTrivial>(entity).value = 22;
+  reg.emplace<TagCaptureFilter>(entity);
+  RestoreState(reg, state, test::ExpectOK{});
+
+  EXPECT_EQ(22, reg.get<CFilteredTrivial const>(entity).value);
+}
+
+TEST_F(MochiCapture, FilteredEntityComponentsMembershipMismatch) {
+  auto const first = reg.create();
+  auto const second = reg.create();
+  reg.emplace<CFilteredTrivial>(first).value = 11;
+  reg.emplace<CFilteredTrivial>(second).value = 22;
+  reg.emplace<TagCaptureFilter>(first);
+
+  DynamicArray<uint8_t> state;
+  CaptureState(reg, state, test::ExpectOK{});
+
+  reg.erase<TagCaptureFilter>(first);
+  RestoreState(reg, state, test::ExpectNotOK{});
+
+  reg.emplace<TagCaptureFilter>(second);
+  RestoreState(reg, state, test::ExpectNotOK{});
+}
+
+TEST_F(MochiCapture, FilteredEntityComponentsJson) {
+  auto const included = reg.create();
+  reg.emplace<CActorInfo>(included, "Included", ActorType::Rigid);
+  reg.emplace<CFilteredTrivial>(included).value = 11;
+  reg.emplace<TagCaptureFilter>(included);
+
+  auto const excluded = reg.create();
+  reg.emplace<CActorInfo>(excluded, "Excluded", ActorType::Rigid);
+  reg.emplace<CFilteredTrivial>(excluded).value = 22;
+
+  std::string const json = CaptureStateToJson(reg, /*prettyMultiLine*/ false, test::ExpectOK{});
+  EXPECT_NE(std::string::npos, json.find("Included"));
+  EXPECT_EQ(std::string::npos, json.find("Excluded"));
 }
 
 TEST_F(MochiCapture, ManyEntities) {
