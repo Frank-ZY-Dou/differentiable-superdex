@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <limits>
+#include <cmath>
 #include "mochi_scene.h"
 
 #include "mochi_actor.h"
@@ -329,23 +331,57 @@ static void ComputeAggregateSolverSceneStats(
 }
 
 // Helper function to compute the aggregate backprop solver stats for a step.
+// The residual, the acceptance threshold and the floor are reported as one consistent triple:
+// over all islands (the norm of the concatenated residual, and the root sum of squares of the
+// thresholds and floors, so that every island within its threshold puts the residual within the
+// reported one) when the step converged, and those of the island that failed worst (the largest
+// residual-to-threshold ratio) when it did not, so that a rejection shows the numbers that
+// caused it.
 static void ComputeAggregateBackPropSolverSceneStats(
     entt::registry& reg,
     diffsim::BackPropagationSceneStats& outStats) {
   double sqrResNorm = 0.0;
+  double sqrThreshold = 0.0;
+  double sqrFloor = 0.0;
+  double worstRatio = -1.0;
+  double worstResNorm = 0.0;
+  double worstThreshold = 0.0;
+  double worstFloor = 0.0;
   outStats.maxOuterIters = 0;
   outStats.finiteDiffValid = true;
   outStats.hessianAsymmetry = 0.0;
   outStats.numMinresFallbacks = 0;
+  outStats.converged = true;
   reg.view<CIslandBackPropSolverStats>().each([&](auto& islandSolverStats) {
     auto const& stats = islandSolverStats.stats;
-    sqrResNorm += Sqr((double)stats.resNorm);
+    double const resNorm = (double)stats.resNorm;
+    sqrResNorm += Sqr(resNorm);
+    sqrThreshold += Sqr(islandSolverStats.residualThreshold);
+    sqrFloor += Sqr(islandSolverStats.residualFloor);
     outStats.maxOuterIters = Max(outStats.maxOuterIters, stats.numIterDone);
     outStats.finiteDiffValid = outStats.finiteDiffValid && islandSolverStats.finiteDiffValid;
     outStats.hessianAsymmetry = Max(outStats.hessianAsymmetry, islandSolverStats.hessianAsymmetry);
     outStats.numMinresFallbacks += islandSolverStats.usedMinresFallback ? 1 : 0;
+    outStats.converged = outStats.converged && islandSolverStats.converged;
+    double const ratio = std::isfinite(resNorm)
+        ? resNorm / Max(islandSolverStats.residualThreshold, std::numeric_limits<double>::min())
+        : std::numeric_limits<double>::infinity();
+    if (ratio > worstRatio) {
+      worstRatio = ratio;
+      worstResNorm = resNorm;
+      worstThreshold = islandSolverStats.residualThreshold;
+      worstFloor = islandSolverStats.residualFloor;
+    }
   });
-  outStats.residualNorm = Sqrt(sqrResNorm);
+  if (outStats.converged) {
+    outStats.residualNorm = Sqrt(sqrResNorm);
+    outStats.residualThreshold = Sqrt(sqrThreshold);
+    outStats.residualFloor = Sqrt(sqrFloor);
+  } else {
+    outStats.residualNorm = worstResNorm;
+    outStats.residualThreshold = worstThreshold;
+    outStats.residualFloor = worstFloor;
+  }
 }
 
 // Declared in MochiDebugDrawSystems.cpp

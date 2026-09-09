@@ -84,7 +84,7 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
   ;
 
   registry.GetClass<mochi::diffsim::BackPropagationSceneStats>()
-    .def(py::init([](py::object total_duration_sec, py::object solve_duration_sec, py::object max_outer_iters, py::object residual_norm, py::object finite_diff_valid, py::object hessian_asymmetry, py::object num_minres_fallbacks) {
+    .def(py::init([](py::object total_duration_sec, py::object solve_duration_sec, py::object max_outer_iters, py::object residual_norm, py::object finite_diff_valid, py::object hessian_asymmetry, py::object num_minres_fallbacks, py::object converged, py::object residual_threshold, py::object residual_floor) {
       mochi::diffsim::BackPropagationSceneStats result;
       result.totalDurationSec = py::cast<double>(total_duration_sec);
       result.solveDurationSec = py::cast<double>(solve_duration_sec);
@@ -93,6 +93,9 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
       result.finiteDiffValid = py::cast<bool>(finite_diff_valid);
       result.hessianAsymmetry = py::cast<double>(hessian_asymmetry);
       result.numMinresFallbacks = py::cast<int>(num_minres_fallbacks);
+      result.converged = py::cast<bool>(converged);
+      result.residualThreshold = py::cast<double>(residual_threshold);
+      result.residualFloor = py::cast<double>(residual_floor);
       return result;
     })
       , py::kw_only()
@@ -103,6 +106,9 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
       , py::arg("finite_diff_valid") = mochi::diffsim::BackPropagationSceneStats{}.finiteDiffValid
       , py::arg("hessian_asymmetry") = mochi::diffsim::BackPropagationSceneStats{}.hessianAsymmetry
       , py::arg("num_minres_fallbacks") = mochi::diffsim::BackPropagationSceneStats{}.numMinresFallbacks
+      , py::arg("converged") = mochi::diffsim::BackPropagationSceneStats{}.converged
+      , py::arg("residual_threshold") = mochi::diffsim::BackPropagationSceneStats{}.residualThreshold
+      , py::arg("residual_floor") = mochi::diffsim::BackPropagationSceneStats{}.residualFloor
     )
     .def(py::init<>())
     .def("__copy__", [](mochi::diffsim::BackPropagationSceneStats const& self) { return mochi::diffsim::BackPropagationSceneStats(self); })
@@ -114,6 +120,9 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
     .def_readwrite("finite_diff_valid", &mochi::diffsim::BackPropagationSceneStats::finiteDiffValid, "True if every finite-difference Hessian-vector product across every island\nand every product of this back-prop step converged: its quotient agreed with\nthe one at half the step size to 1e-2, after at most four halvings. A step\nwith this False has an adjoint solve built on an unconverged product; do not\ntrust its gradient.\n\nNote:\n    Only meaningful when\n    :attr:`~superdex.physics.diffsim.BackPropagationSolverParams.validate_finite_diff`\n    is set; otherwise stays at its default of true.")
     .def_readwrite("hessian_asymmetry", &mochi::diffsim::BackPropagationSceneStats::hessianAsymmetry, "Relative asymmetry of the adjoint operator (the step Jacobian ``H``), measured after\nthe solve as ``|rhs.(H z) - z.(H rhs)| / mean(|rhs.(H z)|, |z.(H rhs)|)`` with two extra\nHessian-vector products; maximum across islands.\n\nNote:\n    Only computed when\n    :attr:`~superdex.physics.diffsim.BackPropagationSolverParams.validate_finite_diff`\n    is set (0 otherwise). With the finite-difference operator the probe has a noise\n    floor set by the products' own error (measured 1.3e-4 at the default epsilon 1e-8\n    on an articulated-vs-rigid frictional island, 1.3e-3 at 1e-7; the gradients\n    themselves are unaffected at that level); with the analytic operator it is exact.\n    Values well above the floor mean the residual is not the gradient of one merit\n    function, and the symmetric adjoint solve (PCG / MINRES) is then only approximate.")
     .def_readwrite("num_minres_fallbacks", &mochi::diffsim::BackPropagationSceneStats::numMinresFallbacks, "Number of islands whose PCG adjoint solve aborted (non-SPD detection or a\npreconditioner breakdown) and whose solution comes from the MINRES fallback in the\nlast back-propagation step. Always computed.")
+    .def_readwrite("converged", &mochi::diffsim::BackPropagationSceneStats::converged, "True if every island's adjoint solve met its acceptance threshold: a finite true residual,\nevaluated with fresh operator products after the solve (the moving-chart term of external\ntorques included), at or below the larger of the outer threshold\nmax(outer_solver_abs_tol, outer_solver_rel_tol |rhs|) and 1024 times (64 in single precision) the\noperator's round-off level (residual_floor). False after an iteration budget ran out, a divergence, or a\nrefinement that stalled above the acceptance threshold: the gradients read from such a solve\nare not the adjoint of a solution. Always computed. When false, residual_norm,\nresidual_threshold and residual_floor are those of the island that failed worst (the largest\nresidual-to-threshold ratio); when true they cover all islands (the norm of the concatenated\nresidual, and the root sum of squares of the islands' thresholds and floors, so that\nresidual_norm <= residual_threshold holds).")
+    .def_readwrite("residual_threshold", &mochi::diffsim::BackPropagationSceneStats::residualThreshold, "The acceptance threshold residual_norm was judged against: the outer threshold\nmax(outer_solver_abs_tol, outer_solver_rel_tol |rhs|) or 1024 times (64 in single precision) the operator's\nround-off level (residual_floor), whichever is larger (see converged for the aggregation over islands).")
+    .def_readwrite("residual_floor", &mochi::diffsim::BackPropagationSceneStats::residualFloor, "The round-off level of the adjoint operator at the solution: machine epsilon over\neps_finite_diff (machine epsilon alone for the analytic operator) times |rhs| + |J^T z|, the\nlevel below which the finite-difference products cannot drive the residual. Always computed;\nsee converged for the aggregation over islands.")
   ;
 
     m_diffsim.def("make_scene_differentiable", [](mochi::Scene* scene) {

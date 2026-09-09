@@ -190,13 +190,13 @@ static void GetHessianVectorProduct(
 
   // Approximate Hessian-vector product with central finite differences of gradient
   ColumnVector<real> auxGrad(outHvp.Rows(), &allocator);
-  auto evalHvpAtEps = [&](real epsScale, ColumnVectorView<real> outGrad) {
-    delta = (epsScale * eps) * vector;
+  auto evalHvpAtEps = [&](real stepScale, ColumnVectorView<real> outGrad) {
+    delta = (stepScale * eps) * vector;
     evalGradient(outGrad);
     delta *= -1_r;
     evalGradient(auxGrad);
     outGrad -= auxGrad;
-    outGrad *= (0.5_r / (epsScale * eps));
+    outGrad *= (0.5_r / (stepScale * eps));
   };
   evalHvpAtEps(1_r, outHvp);
 
@@ -482,6 +482,8 @@ static void KrylovSolveZ(
   if (IsZero(rhs)) {
     outZ.SetZero();
     islandBackPropSolverStats.stats = StageSolverStats{};
+    islandBackPropSolverStats.converged = true;
+    islandBackPropSolverStats.residualThreshold = 0.0;
     return;
   }
 
@@ -664,48 +666,110 @@ static void KrylovSolveZ(
     }
   }
 
-  // The Krylov solvers need the symmetric operator H, so the antisymmetric chart term of
-  // J^T = H + 1/2 [tau]x (AddRigidTorqueChartTerm) goes in by defect correction: with
-  // res = rhs - J^T z, solve H dz = res and add dz, until res meets the outer criterion. The
-  // contraction factor |H^-1 1/2 [tau]x| is of the order of the rotation the torque induces in a
-  // step, so a few rounds reach the tolerance; a round whose symmetric solve diverges stops the
-  // correction and the true residual below reports what remains.
+  // Refinement against the true residual. The Krylov solve above stops on its recurrence
+  // residual, which the finite-difference operator's noise lets drift from the true one, and it
+  // works with the symmetric operator H while the adjoint operator carries the antisymmetric
+  // chart term of external torques, J^T = H + 1/2 [tau]x (AddRigidTorqueChartTerm). Both are
+  // handled by defect correction on the true residual: res = rhs - J^T z from fresh products,
+  // solve H dz = res, z += dz. On an island with a chart term the rounds run to convergence:
+  // while the residual is above the outer threshold and each round still lowers it (the
+  // correction contracts by |H^-1 1/2 [tau]x| per round, and its fixed point is the solution
+  // of the full operator; the former fixed budget of eight rounds is now a stall test and a
+  // budget of 32). On an island without one the plain solve is the solution already, up to the
+  // drift of the recurrence, and rounds are run only when the residual is above the acceptance
+  // threshold defined below, to bring the solve within the contract; rounds on a solve that is
+  // within it would only fit the noise of the products (a round at the noise floor lowers the
+  // measured residual without bringing z closer to the solution, and moved gradients on stiff
+  // islands by 1e-5 relative). A round that does not lower the residual (by half, in the rescue
+  // case) is discarded and ends the refinement. Each round asks its solve for a hundredth of
+  // the defect (or the outer threshold), not for the outer tolerance relative to the defect: a
+  // defect at the noise floor cannot be reduced by 1e-10, and a solve chasing that accumulates
+  // the products' noise over its iterations. The round budget is a safeguard, not the
+  // definition of success: the verdict below is taken on the true residual of the returned z.
   auto const& descendants = reg.get<CIslandDescendants const>(island);
+  real constexpr kRoundRelTol = 0.01_r;
+  krylov::StatusResidualL2<krylov::UsualDot, real> roundStatusCheck(
+      kRoundRelTol, outerThreshold, static_cast<real>(newtonParamsForward.relDivTol));
+  bool hasChartTerm = false;
+  auto trueResidual = [&](ColumnVectorView<real const> z, ColumnVectorView<real> outRes) {
+    hessianOp(z, outRes);
+    hasChartTerm = AddRigidTorqueChartTerm(reg, descendants, 1_r, z, outRes) || hasChartTerm;
+    outRes *= -1_r;
+    outRes += rhs; // rhs - J^T z
+    return outRes.Norm();
+  };
+  // The round-off level of the operator bounds what any solve can reach: a central difference
+  // of the residual with step eps carries round-off of the order of machine epsilon over eps
+  // times the scale of what is differenced, so the residual rhs - J^T z cannot be driven below
+  // that level times the scale of the products (|rhs| + |J^T z|), whatever the loss and the
+  // scene. The level depends on the build's precision and on epsFiniteDiff (2e-8 in double at
+  // the default step, 6e-4 in single), so no fixed tolerance expresses it. Measuring it instead
+  // (the difference of two plain quotients at the step and at twice the step) was tried and
+  // dropped: for a residual that is linear along z the rounding of the two quotients cancels
+  // and the difference reads zero while the solve stalls at the round-off level all the same,
+  // and in single precision a step below the configured one can fall under the state's
+  // resolution. The analytic operator carries machine epsilon only.
+  //
+  // The contract: a solve is converged when its true residual is a finite number at or below
+  // the acceptance threshold, which is the outer threshold or kFloorFactor times the round-off
+  // level, whichever is larger. The factor covers what a solve reaches above the level: it
+  // accumulates the products' round-off over its iterations, and the scale of what the residual
+  // assembly differences exceeds the products' scale by the state's magnitude, the stiffness
+  // of the island and the operator's conditioning (measured on the suite: up to 126 levels in
+  // double precision on velocity gradients through rigid contact and 284 on a rod, up to 33
+  // in single precision). A solve that failed sits orders of magnitude above that: an
+  // iteration budget that ran out, a divergence, or a refinement that stalled above the
+  // threshold all end reported as not converged. The level is a model, and a crude one in
+  // both directions (a free body in the air has products that are exact to round-off far
+  // below it, a rod's are noisier than it), so the refinement above does not use it to decide
+  // when to stop: it uses its own measured progress, and runs while the residual is above the
+  // outer threshold.
+  real constexpr kFloorFactor = MOCHI_USE_DOUBLE_PRECISION ? 1024_r : 64_r;
+  real const roundOff = std::numeric_limits<real>::epsilon() /
+      (useAnalyticHvp ? 1_r : backpropParams.epsFiniteDiff);
+  real const rhsNorm = rhs.Norm();
+  MOCHI_FILO_STACK_ALLOCATOR(refineAllocator, 6 * 256 * sizeof(real));
+  ColumnVector<real> res(rhs.Rows(), &refineAllocator);
+  real resNorm = trueResidual(AsConstView(outZ), AsView(res));
+  ColumnVector<real> jz(rhs.Rows(), &refineAllocator);
+  auto roundOffLevel = [&](ColumnVectorView<real const> resNow) {
+    jz = rhs;
+    jz -= resNow; // J^T z
+    return roundOff * (rhsNorm + jz.Norm());
+  };
+  auto acceptanceOf = [&](ColumnVectorView<real const> resNow) {
+    return Max(outerThreshold, kFloorFactor * roundOffLevel(resNow));
+  };
   {
-    MOCHI_FILO_STACK_ALLOCATOR(chartAllocator, 2 * 256 * sizeof(real));
-    ColumnVector<real> res(rhs.Rows(), &chartAllocator);
-    ColumnVector<real> dz(rhs.Rows(), &chartAllocator);
-    int constexpr kMaxChartRounds = 8;
-    for (int round = 0; round < kMaxChartRounds; ++round) {
-      hessianOp(AsConstView(outZ), AsView(res));
-      if (!AddRigidTorqueChartTerm(reg, descendants, 1_r, AsConstView(outZ), AsView(res))) {
-        break; // no external torque on a rigid actor or a Free/Spherical joint: J^T = H
-      }
-      res *= -1_r;
-      res += rhs;
-      if (res.Norm() <= outerThreshold) {
+    ColumnVector<real> zTrial(rhs.Rows(), &refineAllocator);
+    ColumnVector<real> resTrial(rhs.Rows(), &refineAllocator);
+    int constexpr kMaxRefinementRounds = 32;
+    real constexpr kRescueGain = 0.5_r;
+    for (int round = 0; round < kMaxRefinementRounds; ++round) {
+      if (!std::isfinite(resNorm) || resNorm <= outerThreshold) {
         break;
       }
-      dz.SetZero();
+      if (!hasChartTerm && !(resNorm > acceptanceOf(AsConstView(res)))) {
+        break; // a torque-free solve within the contract: the plain solve stands
+      }
+      zTrial.SetZero();
       auto const resView = AsConstView(res);
-      auto dzView = AsView(dz);
+      auto dzView = AsView(zTrial);
       auto roundResult = krylov::PCG(
           hessianOp,
           resView,
           dzView,
           precOp,
           backpropParams.outerSolverMaxIter,
-          pcgStatusCheck,
+          roundStatusCheck,
           /*abortIfNotSpd*/ true,
           backpropParams.verbosity,
           /*usePolakRibiere*/ true,
           InitialGuessHint::Zero);
       if (roundResult.convergence == LinearSolverConvergenceStatus::Diverged) {
-        dz.SetZero();
+        zTrial.SetZero();
         krylov::StatusImplicitResidualNorm<real> roundMinresStatusCheck(
-            backpropParams.outerSolverRelTol,
-            backpropParams.outerSolverAbsTol,
-            static_cast<real>(newtonParamsForward.relDivTol));
+            kRoundRelTol, outerThreshold, static_cast<real>(newtonParamsForward.relDivTol));
         roundResult = krylov::MinRes(
             hessianOp,
             resView,
@@ -718,34 +782,46 @@ static void KrylovSolveZ(
         if (roundResult.convergence == LinearSolverConvergenceStatus::Diverged) {
           if (backpropParams.verbosity >= VerbosityLevel::Warning) {
             MOCHI_LOG_WARNING(
-                "Torque chart correction: the symmetric solve diverged in round %d.", round);
+                "Adjoint refinement: the symmetric solve diverged in round %d.", round);
           }
           break;
         }
       }
-      outZ += dz;
+      zTrial += outZ;
+      real const trialNorm = trueResidual(AsConstView(zTrial), AsView(resTrial));
+      real const gain = hasChartTerm ? 1_r : kRescueGain;
+      if (!(trialNorm < gain * resNorm)) {
+        break; // no progress (or a non-finite trial): keep z as it is
+      }
+      outZ = zTrial;
+      res = resTrial;
+      resNorm = trialNorm;
       outerResult.numIterDone += roundResult.numIterDone;
     }
   }
 
-  // Replace the solver's residual estimate by the true residual of the returned solution (a
-  // fresh product of the full operator J^T: MINRES's implicit residual can be far from it, see
-  // the integrity check above), so that the reported adjoint residual never under-reports. One
-  // extra product per solve.
-  MOCHI_FILO_STACK_ALLOCATOR(probeAllocator, 2 * 256 * sizeof(real));
-  ColumnVector<real> hz(rhs.Rows(), &probeAllocator);
-  hessianOp(AsConstView(outZ), AsView(hz));
-  AddRigidTorqueChartTerm(reg, descendants, 1_r, AsConstView(outZ), AsView(hz));
-  real const rhsDotHz = hz.Dot(rhs);
-  hz -= rhs;
-  outerResult.residualNorm = static_cast<double>(hz.Norm());
+  // The true residual of the returned solution (the full operator J^T, from fresh products:
+  // MINRES's implicit residual can be far from it, see the integrity check above) replaces the
+  // solver's estimate, so that the reported adjoint residual never under-reports.
+  outerResult.residualNorm = static_cast<double>(resNorm);
+
+  real const residualFloor = roundOffLevel(AsConstView(res));
+  real const acceptance = Max(outerThreshold, kFloorFactor * residualFloor);
+  islandBackPropSolverStats.residualThreshold = static_cast<double>(acceptance);
+  islandBackPropSolverStats.residualFloor = static_cast<double>(residualFloor);
+  islandBackPropSolverStats.converged = std::isfinite(resNorm) && resNorm <= acceptance;
 
   // With validation on, also probe the symmetry of the operator. The adjoint solve assumes
   // H = H^T (the residual is the gradient of one merit function), which both PCG and MINRES rely
   // on; the probe compares rhs.(H z) with z.(H rhs), which agree for a symmetric H up to the
-  // finite-difference noise of the products. One more product per solve.
+  // finite-difference noise of the products. Two more products per solve.
+  // The probe is about H alone: with the chart term in one product, rhs.(J^T z) against
+  // z.(H rhs) reported the chart term itself as an asymmetry (18 percent on a synthetic case).
   if (backpropParams.validateFiniteDiff) {
-    ColumnVector<real> hRhs(rhs.Rows(), &probeAllocator);
+    ColumnVector<real> hz(rhs.Rows(), &refineAllocator);
+    ColumnVector<real> hRhs(rhs.Rows(), &refineAllocator);
+    hessianOp(AsConstView(outZ), AsView(hz));
+    real const rhsDotHz = hz.Dot(rhs);
     hessianOp(rhs, AsView(hRhs));
     real const zDotHRhs = hRhs.Dot(outZ);
     real const scale =
@@ -1520,10 +1596,14 @@ static void AccumulateParameterGradientsIsland(
   // conversion (soft::SetMaterialParams rebuilds the per-element Lame constants from Young's
   // modulus and Poisson's ratio; the residual reads density and mass damping directly), and
   // the component is restored bit-exactly from a copy afterwards. Mass damping is gated at
-  // zero in the assembly (a non-positive coefficient disables the term), so at
-  // massDampingCoefficient == 0 a central difference would straddle the gate and report half
-  // the derivative; the right-sided difference is used there instead - the direction an
-  // optimizer constrained to alpha >= 0 can move in.
+  // zero in the assembly (a non-positive coefficient disables the term), so a central
+  // difference whose lower sample would cross zero - at massDampingCoefficient == 0, and for
+  // any positive coefficient below the step - would straddle the gate and report about half
+  // the derivative (49.95 percent at 1e-6, 45 percent at 1e-4, measured on the extracted
+  // stencil); the right-sided difference is used whenever the lower sample would leave the
+  // domain - the direction an optimizer constrained to alpha >= 0 can move in - and the same
+  // rule keeps Young's modulus and the density positive. The three terms are affine in their
+  // coefficient, so a one-sided difference within the domain is as exact as a central one.
   //
   // Step sizes: the residual is inertia-dominated (1/dt^2 scaling), so a difference over a
   // parameter that only moves the comparatively small elastic or damping terms amplifies
@@ -1572,7 +1652,7 @@ static void AccumulateParameterGradientsIsland(
         continue;
       }
       real const h = kLinearParamRelativeStep * (1_r + std::abs(value));
-      bool const rightSided = (f == kSoftMaterialGradMassDamping && value <= 0_r);
+      bool const rightSided = value - h < 0_r; // the lower sample would leave the domain
       outMaterialGrad.value[f] += centralDifference(f, value, h, rightSided);
     }
     *material = saved;

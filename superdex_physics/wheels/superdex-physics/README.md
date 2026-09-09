@@ -305,6 +305,21 @@ video replays included.
   differentiating through an optimizer step) raises instead of returning an incomplete derivative.
   A forward step whose Newton residual is not a finite number raises `ForwardSolveError` in every
   mode, the closed-loop bridge's own steps and its probe step included.
+- The gradients are only returned under a contract. A step whose Newton solve is not a
+  finite number raises `ForwardSolveError`; with `forward_residual_tolerance` (or the substep
+  tolerance of failure-adaptive substepping) so does a solve that ended unconverged above the
+  tolerance. Every adjoint solve is checked before its statistics are aggregated: a non-finite
+  true residual raises `AdjointSolveError`, and so does, unless `require_adjoint_convergence`
+  is turned off, a solve the engine reports as not converged (`BackPropagationSceneStats.converged`:
+  the true residual of the full operator, the moving-chart term of external torques included
+  and evaluated with fresh products after the solve, at or below the larger of
+  max(abs, rel |rhs|) of the outer solver and 1024 times (64 in single precision) the operator's round-off level at the
+  solution, machine epsilon over the finite-difference step times the scale of the products,
+  below which no solve can drive the residual); a non-finite gradient raises as well. The result reports the
+  conditions separately (`forward_converged`, `max_forward_residual`, `adjoint_converged`,
+  `adjoint_residual_threshold`, `adjoint_residual_floor`, `gradients_finite`,
+  `fd_validation_ran`, `fd_validation_passed`): an available array is not a validated
+  gradient, and `fd_valid` is only a verdict when the finite-difference self-check ran.
 - The adjoint is exact for steps of any size and across consecutive steps of different sizes.
   Torque gradients on rigid bodies are exact to 1e-8 (the adjoint operator carries the
   moving-chart term of an external torque). Contact-force losses reach the contact parameters of

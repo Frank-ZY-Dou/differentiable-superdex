@@ -57,7 +57,7 @@ from unittest import mock
 import numpy as np
 import superdex.physics as physics
 from superdex.physics import diffsim_rollout
-from superdex.physics.diffsim_rollout import DifferentiableRollout, ForwardSolveError
+from superdex.physics.diffsim_rollout import AdjointSolveError, DifferentiableRollout, ForwardSolveError
 
 from . import scenes
 from .harness import (
@@ -1608,3 +1608,215 @@ class ArticulatedRotationChartTest(unittest.TestCase):
         q0 = np.concatenate([[0.5], 0.8 * axis])
         v0 = np.array([0.2, 0.3, -0.4, 0.1])
         self._check(lambda: scenes.chain_revolute_spherical(with_controller=True), q0, v0, with_targets=True)
+
+
+@double_only
+class DifferentiationContractTest(unittest.TestCase):
+    """The rollout returns gradients only when they are the adjoint of a solution: a forward
+    solve stopped short of one (``forward_residual_tolerance``), an adjoint solve the engine
+    reports as unconverged (``require_adjoint_convergence``), a non-finite adjoint residual or
+    a non-finite gradient each raise instead of being folded into a running maximum, and the
+    result reports every condition separately."""
+
+    def _pendulum(self):
+        scene, chain = scenes.pendulum(with_controller=False)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        return scene, chain
+
+    @staticmethod
+    def _starve_forward(scene) -> None:
+        params = scene.get_solver_params()
+        solver = params.non_linear_solver
+        solver.max_iter = 1
+        params.non_linear_solver = solver
+        scene.set_solver_params(params)
+
+    def test_strict_forward_tolerance_rejects_an_unconverged_step(self) -> None:
+        scene, chain = self._pendulum()
+        self._starve_forward(scene)
+        loss = ArticulatedPoseErrorLoss(chain, ref=np.array([0.4, -0.2]))
+        with self.assertRaises(ForwardSolveError):
+            DifferentiableRollout(
+                scene, dt=DT, num_steps=NUM_STEPS, forward_residual_tolerance=1e-12
+            ).run(terminal_losses=[loss])
+
+    def test_without_a_forward_tolerance_the_residual_is_reported_not_enforced(self) -> None:
+        scene, chain = self._pendulum()
+        self._starve_forward(scene)
+        loss = ArticulatedPoseErrorLoss(chain, ref=np.array([0.4, -0.2]))
+        result = DifferentiableRollout(scene, dt=DT, num_steps=NUM_STEPS).run(
+            terminal_losses=[loss]
+        )
+        self.assertIsNone(result.forward_converged)
+        self.assertGreater(result.max_forward_residual, 1e-12)
+        self.assertIsInstance(result.gradients["chain"].initial_pose, np.ndarray)
+
+    def test_forward_tolerance_contracts(self) -> None:
+        scene, _ = self._pendulum()
+        with self.assertRaisesRegex(ValueError, "forward_residual_tolerance"):
+            DifferentiableRollout(scene, dt=DT, num_steps=2, forward_residual_tolerance=0.0)
+        with self.assertRaisesRegex(ValueError, "substep_residual_tolerance is the contract"):
+            DifferentiableRollout(
+                scene, dt=DT, num_steps=2, max_substep_levels=1,
+                substep_residual_tolerance=1e-6, forward_residual_tolerance=1e-6,
+            )
+
+    def test_converged_rollout_reports_the_contract(self) -> None:
+        scene, chain = self._pendulum()
+        loss = ArticulatedPoseErrorLoss(chain, ref=np.array([0.4, -0.2]))
+        result = DifferentiableRollout(
+            scene, dt=DT, num_steps=NUM_STEPS, forward_residual_tolerance=1e-8
+        ).run(terminal_losses=[loss])
+        self.assertTrue(result.forward_converged)
+        self.assertLessEqual(result.max_forward_residual, 1e-8)
+        self.assertTrue(result.adjoint_converged)
+        self.assertGreater(result.adjoint_residual_threshold, 0.0)
+        self.assertLessEqual(result.max_adjoint_residual, result.adjoint_residual_threshold)
+        self.assertGreaterEqual(result.adjoint_residual_floor, 0.0)
+        self.assertTrue(result.gradients_finite)
+        # the harness turns the finite-difference self-check on: ran and passed
+        self.assertTrue(result.fd_validation_ran)
+        self.assertTrue(result.fd_validation_passed)
+        self.assertTrue(result.fd_valid)
+
+    def test_without_the_self_check_validation_is_neither_passed_nor_failed(self) -> None:
+        scene, chain = self._pendulum()
+        params = diffsim.get_back_propagation_solver_params(scene)
+        params.validate_finite_diff = False
+        diffsim.set_back_propagation_solver_params(scene, params)
+        loss = ArticulatedPoseErrorLoss(chain, ref=np.array([0.4, -0.2]))
+        result = DifferentiableRollout(scene, dt=DT, num_steps=NUM_STEPS).run(
+            terminal_losses=[loss])
+        self.assertTrue(result.adjoint_converged)
+        self.assertFalse(result.fd_validation_ran)
+        self.assertIsNone(result.fd_validation_passed)
+        self.assertTrue(result.fd_valid)
+
+    def test_a_solve_at_the_operators_floor_is_accepted(self) -> None:
+        # A request below what the finite-difference products can reach: the engine accepts a
+        # residual within a factor (1024 in double precision, 64 in single) of the operator's
+        # round-off level and reports the level; a
+        # starved solve (see below) stays rejected.
+        scene, chain = self._pendulum()
+        params = diffsim.get_back_propagation_solver_params(scene)
+        params.outer_solver_abs_tol = 0.0
+        params.outer_solver_rel_tol = 1e-14
+        diffsim.set_back_propagation_solver_params(scene, params)
+        loss = ArticulatedPoseErrorLoss(chain, ref=np.array([0.4, -0.2]))
+        result = DifferentiableRollout(scene, dt=DT, num_steps=NUM_STEPS).run(
+            terminal_losses=[loss])
+        self.assertTrue(result.adjoint_converged)
+        self.assertGreater(result.adjoint_residual_floor, 0.0)
+        self.assertGreaterEqual(result.adjoint_residual_threshold, 64.0 * result.adjoint_residual_floor)
+        self.assertLessEqual(result.max_adjoint_residual, result.adjoint_residual_threshold)
+        # the level is the round-off of the products, far below the loss scale
+        self.assertLess(result.adjoint_residual_floor, 1e-5)
+
+    def _starve_adjoint(self, scene) -> None:
+        # No outer iterations at all: the solve returns z = 0 with the residual |rhs|, far
+        # above any tolerance and above the operator's floor (a budget of one iteration is
+        # not a starved solve any more: the refinement rounds against the true residual
+        # would carry it to the floor).
+        params = diffsim.get_back_propagation_solver_params(scene)
+        params.outer_solver_abs_tol = 1e-30
+        params.outer_solver_rel_tol = 0.0
+        params.outer_solver_max_iter = 0
+        diffsim.set_back_propagation_solver_params(scene, params)
+
+    def test_unconverged_adjoint_is_rejected_by_default(self) -> None:
+        scene, chain = self._pendulum()
+        self._starve_adjoint(scene)
+        loss = ArticulatedPoseErrorLoss(chain, ref=np.array([0.4, -0.2]))
+        with self.assertRaises(AdjointSolveError) as raised:
+            DifferentiableRollout(scene, dt=DT, num_steps=NUM_STEPS).run(terminal_losses=[loss])
+        self.assertIn("not converged", str(raised.exception))
+        self.assertGreater(raised.exception.residual_norm, raised.exception.threshold)
+
+    def test_unconverged_adjoint_is_reported_when_not_required(self) -> None:
+        scene, chain = self._pendulum()
+        self._starve_adjoint(scene)
+        loss = ArticulatedPoseErrorLoss(chain, ref=np.array([0.4, -0.2]))
+        result = DifferentiableRollout(
+            scene, dt=DT, num_steps=NUM_STEPS, require_adjoint_convergence=False
+        ).run(terminal_losses=[loss])
+        self.assertFalse(result.adjoint_converged)
+        self.assertGreater(result.max_adjoint_residual, result.adjoint_residual_threshold)
+
+    def test_non_finite_adjoint_residual_raises_before_aggregation(self) -> None:
+        scene, chain = self._pendulum()
+        loss = ArticulatedPoseErrorLoss(chain, ref=np.array([0.4, -0.2]))
+        real_stats = diffsim.get_back_propagation_scene_stats
+        calls = []
+
+        def poisoned(scene_):
+            stats = real_stats(scene_)
+            calls.append(stats.residual_norm)
+            if len(calls) == 2:  # the second sweep step: a maximum would hide it
+                stats.residual_norm = float("nan")
+            return stats
+
+        with mock.patch.object(diffsim, "get_back_propagation_scene_stats", poisoned):
+            with self.assertRaises(AdjointSolveError) as raised:
+                DifferentiableRollout(scene, dt=DT, num_steps=NUM_STEPS).run(
+                    terminal_losses=[loss]
+                )
+        self.assertIn("non-finite adjoint residual", str(raised.exception))
+
+    def test_non_finite_gradient_raises(self) -> None:
+        scene, chain = self._pendulum()
+        loss = ArticulatedPoseErrorLoss(chain, ref=np.array([0.4, -0.2]))
+        real_backward = diffsim.set_articulated_joint_velocities_backward
+
+        def poisoned(actor, out):
+            real_backward(actor, out)
+            out[0] = float("inf")
+
+        with mock.patch.object(diffsim, "set_articulated_joint_velocities_backward", poisoned):
+            with self.assertRaises(AdjointSolveError) as raised:
+                DifferentiableRollout(scene, dt=DT, num_steps=NUM_STEPS).run(
+                    terminal_losses=[loss]
+                )
+        self.assertIn("non-finite gradient", str(raised.exception))
+
+
+@double_only
+class AdjointSymmetryProbeTest(unittest.TestCase):
+    """The engine's symmetry probe (``validate_finite_diff``) compares rhs.(H z) with
+    z.(H rhs) for the symmetric step Jacobian H alone. With an external torque the adjoint
+    operator is J^T = H + 1/2 [tau]x; the probe used to take rhs.(J^T z) on one side and
+    reported the antisymmetric chart term as an asymmetry of H."""
+
+    def _asymmetry(self, scene, actor, torque_dofs, torque, ref_loss) -> float:
+        configure_for_differentiability(scene)
+        params = diffsim.get_back_propagation_solver_params(scene)
+        params.validate_finite_diff = True
+        diffsim.set_back_propagation_solver_params(scene, params)
+        dofs = np.asarray(torque_dofs, dtype=np.int32)
+        result = DifferentiableRollout(scene, dt=DT, num_steps=3).run(
+            apply_inputs=lambda step: actor.set_external_forces_on_dofs(dofs, np.asarray(torque)),
+            terminal_losses=[ref_loss],
+        )
+        self.assertTrue(result.adjoint_converged)
+        return result.max_hessian_asymmetry
+
+    def test_rigid_cube_with_a_torque(self) -> None:
+        scene, cube = scenes.rigid_free()
+        self.addCleanup(physics.destroy_scene, scene)
+        asym = self._asymmetry(
+            scene, cube, range(6), [0.2, -0.1, 0.05, 3.0, -2.0, 1.5],
+            TranslationErrorLoss(cube, np.array([0.02, -0.01, 0.03])),
+        )
+        # the finite-difference products' own noise floor is about 1e-3 (see the engine's
+        # documentation of hessian_asymmetry); the chart term of this torque would read 0.1
+        self.assertLess(asym, 5e-3, f"symmetry probe reports {asym:.2e}")
+
+    def test_free_root_with_a_torque(self) -> None:
+        scene, chain = scenes.free_chain()
+        self.addCleanup(physics.destroy_scene, scene)
+        n = chain.get_num_dofs()
+        asym = self._asymmetry(
+            scene, chain, range(n), [0.2, -0.1, 0.05, 3.0, -2.0, 1.5, 0.2],
+            ArticulatedPoseErrorLoss(chain, ref=0.05 * np.arange(1, n + 1) / n),
+        )
+        self.assertLess(asym, 5e-3, f"symmetry probe reports {asym:.2e}")

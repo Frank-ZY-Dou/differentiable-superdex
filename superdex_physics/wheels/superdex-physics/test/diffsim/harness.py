@@ -140,7 +140,11 @@ def configure_for_differentiability(scene) -> None:
     # cost 3e-3 on a loss scaled by 1e-4). These tests measure gradient
     # correctness: solve to 1e-10 relative with no absolute floor and allow more
     # iterations, so the solves run to the finite-difference operator's floor
-    # (the suite takes the same 6.4 s either way, 2026-09-02).
+    # (the suite takes the same 6.4 s either way, 2026-09-02). The rollouts'
+    # convergence contract accepts a solve at that floor: the engine takes 1024
+    # times (64 in single precision) the operator's round-off level (machine epsilon over the
+    # finite-difference step, times the scale of the products) as the acceptance
+    # threshold when the request lies below it (2026-09-09).
     dp.outer_solver_abs_tol = 0.0
     dp.outer_solver_rel_tol = 1e-10
     dp.outer_solver_max_iter = 100

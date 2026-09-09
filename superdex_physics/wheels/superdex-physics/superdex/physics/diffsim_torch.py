@@ -130,6 +130,7 @@ import numpy as np
 
 import superdex.physics as physics
 from superdex.physics.diffsim_rollout import (
+    AdjointSolveError,
     DifferentiableRollout,
     RIGID_DOF_SIZE,
     RIGID_POSE_SIZE,
@@ -137,6 +138,9 @@ from superdex.physics.diffsim_rollout import (
     _StepRecord,
     _raise_if_not_finite,
     _real_dtype,
+    _solver_stats,
+    check_adjoint_stats,
+    check_gradients_finite,
     step_with_substeps,
 )
 
@@ -350,6 +354,8 @@ class TorchRollout:
         step_losses: Callable[[int], Sequence] | None = None,
         max_substep_levels: int = 0,
         substep_residual_tolerance: float | None = None,
+        forward_residual_tolerance: float | None = None,
+        require_adjoint_convergence: bool = True,
     ):
         _require_double_precision()
         if not terminal_losses and step_losses is None:
@@ -359,14 +365,17 @@ class TorchRollout:
         self.differentiate_gravity = bool(differentiate_gravity)
         self._terminal_losses = list(terminal_losses)
         self._step_losses = step_losses
-        # Failure-adaptive substepping is forwarded verbatim (see
-        # DifferentiableRollout); ``last_result.split_steps`` reports what was split.
+        # Failure-adaptive substepping and the differentiation contract (strict forward
+        # tolerance, required adjoint convergence) are forwarded verbatim (see
+        # DifferentiableRollout); ``last_result`` reports what was split and what converged.
         self._rollout = DifferentiableRollout(
             scene,
             dt=dt,
             num_steps=num_steps,
             max_substep_levels=max_substep_levels,
             substep_residual_tolerance=substep_residual_tolerance,
+            forward_residual_tolerance=forward_residual_tolerance,
+            require_adjoint_convergence=require_adjoint_convergence,
         )
         # Actors are resolved by identity (handle), never by name: names label the
         # gradient dictionaries only. Every group is validated before any state is
@@ -829,6 +838,23 @@ class PolicyRolloutResult:
     split_steps: list
     # The auxiliary losses' share of ``loss`` (0 without ``aux_losses``).
     aux_loss: float = 0.0
+    # The differentiation contract, as in RolloutResult: forward convergence (None when no
+    # forward tolerance was given and nothing was substepped), the largest forward residual,
+    # adjoint convergence against the engine's acceptance threshold (with that threshold and
+    # the operator's round-off level), finiteness of every gradient read (always
+    # True on return: a non-finite one raises), and whether the finite-difference self-check
+    # ran (``fd_valid`` stays True when it did not).
+    forward_converged: bool | None = None
+    max_forward_residual: float = 0.0
+    adjoint_converged: bool = True
+    adjoint_residual_threshold: float = 0.0
+    adjoint_residual_floor: float = 0.0
+    gradients_finite: bool = True
+    fd_validation_ran: bool = False
+
+    @property
+    def fd_validation_passed(self) -> bool | None:
+        return self.fd_valid if self.fd_validation_ran else None
 
 
 class _PolicyRolloutLoss(torch.autograd.Function):
@@ -902,6 +928,8 @@ class PolicyRollout:
         aux_losses: Callable[[int, object], torch.Tensor] | None = None,
         max_substep_levels: int = 0,
         substep_residual_tolerance: float | None = None,
+        forward_residual_tolerance: float | None = None,
+        require_adjoint_convergence: bool = True,
     ):
         _require_double_precision()
         if not terminal_losses and step_losses is None and aux_losses is None:
@@ -928,6 +956,8 @@ class PolicyRollout:
             num_steps=num_steps,
             max_substep_levels=max_substep_levels,
             substep_residual_tolerance=substep_residual_tolerance,
+            forward_residual_tolerance=forward_residual_tolerance,
+            require_adjoint_convergence=require_adjoint_convergence,
         )
         # Actors are resolved by identity (handle), never by name (see _check_group); the
         # observations' actors must belong to this scene as well.
@@ -1065,6 +1095,7 @@ class PolicyRollout:
         obs_history = [self._observe()] * self.history  # newest first
         graphs = []  # (obs_tensor, control_tensor, aux_loss_tensor or None) per step
         aux_total = 0.0
+        max_forward_residual = 0.0
         records: list[_StepRecord] = []
         # step_losses(step) is called once per step, on the step's final state; the sweep
         # differentiates those instances (see DifferentiableRollout.run).
@@ -1102,7 +1133,9 @@ class PolicyRollout:
                     pre = scene.capture_state()
                     try:
                         scene.step(self.dt)
-                        _raise_if_not_finite(scene, step, self.dt)
+                        max_forward_residual = max(
+                            max_forward_residual, driver.check_forward_step(step, self.dt)
+                        )
                         post = scene.capture_state()
                     except BaseException:
                         scene.release_state(pre)
@@ -1118,6 +1151,9 @@ class PolicyRollout:
                         on_substep=lambda pre, post, sub_dt, step=step: records.append(
                             _StepRecord(step, sub_dt, pre, post)
                         ),
+                    )
+                    max_forward_residual = max(
+                        max_forward_residual, float(_solver_stats(scene).residual_norm)
                     )
                 if self._step_losses is not None:
                     losses = list(self._step_losses(step))
@@ -1137,6 +1173,12 @@ class PolicyRollout:
             param_grads = [np.zeros(p.shape) for p in params]
             fd_valid = True
             max_residual = 0.0
+            max_threshold = 0.0
+            max_floor = 0.0
+            adjoint_converged = True
+            fd_validation_ran = bool(
+                diffsim.get_back_propagation_solver_params(scene).validate_finite_diff
+            )
             steps_swept = 0
             lambda_u = np.zeros(self.control_size)  # the current step's control gradient
             diffsim.reset_back_propagation(scene)
@@ -1157,6 +1199,10 @@ class PolicyRollout:
                 diffsim.back_propagate(scene)
                 steps_swept += 1
                 stats = diffsim.get_back_propagation_scene_stats(scene)
+                check_adjoint_stats(stats, record.step, driver.require_adjoint_convergence)
+                adjoint_converged = adjoint_converged and bool(stats.converged)
+                max_threshold = max(max_threshold, float(stats.residual_threshold))
+                max_floor = max(max_floor, float(stats.residual_floor))
                 fd_valid = fd_valid and stats.finite_diff_valid
                 max_residual = max(max_residual, stats.residual_norm)
                 if last_of_step:
@@ -1169,7 +1215,14 @@ class PolicyRollout:
                         objective = (u_t * torch.tensor(lambda_u, dtype=torch.float64)).sum()
                         if aux_loss_t is not None:
                             objective = objective + aux_loss_t
-                    grads = torch.autograd.grad(objective, [obs_t, *params], allow_unused=True)
+                    vjp_inputs = [obs_t, *params]
+                    if objective.requires_grad:
+                        grads = torch.autograd.grad(objective, vjp_inputs, allow_unused=True)
+                    else:
+                        # A constant control (and no differentiable auxiliary loss) at this
+                        # step: no graph, so every vector-Jacobian product is zero
+                        # (torch.autograd.grad would raise on a graph-less scalar).
+                        grads = (None,) * len(vjp_inputs)
                     for accum, g in zip(param_grads, grads[1:]):
                         if g is not None:
                             accum += g.detach().numpy()
@@ -1187,6 +1240,9 @@ class PolicyRollout:
                     split_steps[-1] = (record.step, split_steps[-1][1] + 1)
                 else:
                     split_steps.append((record.step, 1))
+            check_gradients_finite(
+                [(f"parameter {i}", g) for i, g in enumerate(param_grads)], "policy sweep",
+                max_threshold)
             self.last_result = PolicyRolloutResult(
                 loss=loss_value,
                 fd_valid=fd_valid,
@@ -1194,6 +1250,14 @@ class PolicyRollout:
                 steps_swept=steps_swept,
                 split_steps=[entry for entry in split_steps if entry[1] > 1],
                 aux_loss=aux_total,
+                forward_converged=(None if driver.forward_residual_tolerance is None
+                                   and driver.max_substep_levels == 0 else True),
+                max_forward_residual=max_forward_residual,
+                adjoint_converged=adjoint_converged,
+                adjoint_residual_threshold=max_threshold,
+                adjoint_residual_floor=max_floor,
+                gradients_finite=True,
+                fd_validation_ran=fd_validation_ran,
             )
             return loss_value, [torch.tensor(g, dtype=torch.float64) for g in param_grads]
         finally:

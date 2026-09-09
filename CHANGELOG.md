@@ -6,6 +6,27 @@ All notable changes to this repository will be documented here.
 
 ### Fixed
 
+- The mass-damping parameter gradient of a soft actor near zero. The material parameters are
+  differentiated by finite differences of the assembled residual with a step of about 1e-3, and
+  the damping term is gated at zero (a non-positive coefficient disables it); the lower sample of
+  a central difference at any positive coefficient below the step crossed that gate and the
+  gradient came out at about half its value (49.95 percent low at 1e-6, 45 percent at 1e-4 on
+  the extracted stencil; only the coefficient exactly zero had been treated). The lower sample
+  now stays in the domain (a right-sided difference, exact for a term affine in the coefficient),
+  and the same rule keeps Young's modulus and the density positive.
+  `test_diffsim_torch.py::SoftMassDampingStencilTest` compares the gradient at 0, 1e-8, 1e-6,
+  1e-4 and 5e-4 with the one at 2e-3, where an in-domain central difference of the rollout
+  loss confirms it.
+- The adjoint operator's symmetry probe (`validate_finite_diff`) took rhs.(J^T z) on one side
+  and z.(H rhs) on the other, so with an external torque it reported the antisymmetric
+  moving-chart term 1/2 [tau]x as an asymmetry of the step Jacobian H (18 percent on the
+  audit's synthetic case). It now probes H alone;
+  `test_diffsim_rollout.py::AdjointSymmetryProbeTest` (a rigid cube and a Free root under a
+  torque) reads it below 5e-3.
+- `PolicyRollout`: a policy whose control at a step is a constant tensor (no graph) made the
+  step's vector-Jacobian product raise inside torch; the step now contributes zero, as it
+  should, and a policy may switch between constant and differentiable controls
+  (`PolicyRolloutConstantActionTest`, with a finite-difference check of the mixed case).
 - The rotation gradients of Free and Spherical joints. The chart transport of an output gradient
   (`diffsim.get_articulated_pose_backward`, the seed of every rollout loss on a joint pose)
   applied the rotation-vector Jacobian where a gradient needs its transpose, so a round trip
@@ -67,6 +88,54 @@ All notable changes to this repository will be documented here.
 
 ### Added
 
+- The differentiation contract of the rollouts, reported and enforced instead of assumed. The
+  adjoint is the derivative of the step equations at a solution, so the driver and both torch
+  bridges now (1) accept `forward_residual_tolerance`, which makes a step whose Newton solve ended
+  unconverged above it raise `ForwardSolveError` in a rollout without substepping (with
+  substepping the substep tolerance already is the contract); (2) check every adjoint solve before
+  aggregating its statistics: a non-finite true residual raises `AdjointSolveError`, and so does,
+  by default (`require_adjoint_convergence`), a solve the engine reports as not converged; (3)
+  reject a non-finite gradient before returning it; (4) report each condition in its own field of
+  `RolloutResult` and `PolicyRolloutResult` (`forward_converged`, None when no tolerance was
+  given; `max_forward_residual`; `adjoint_converged`; `adjoint_residual_threshold`;
+  `adjoint_residual_floor`; `gradients_finite`; `fd_validation_ran`, and `fd_validation_passed`,
+  None when the engine's finite-difference self-check did not run, so that `fd_valid`'s default of
+  True is not read as a pass). A NaN residual used to disappear into `max(...)`. The engine
+  reports the verdict itself: `BackPropagationSceneStats.converged`, `residual_threshold` and
+  `residual_floor`. Every adjoint solve is now checked against its true residual, evaluated with
+  fresh products of the full operator J^T (the Krylov solve stops on a recurrence residual that
+  the finite-difference noise lets drift from the true one). On an island with an external torque
+  the defect correction of the chart term runs to convergence, while each round still lowers the
+  true residual (the former fixed budget of eight rounds is now a stall test and a budget of 32);
+  on an island without one the plain solve stands, and rounds are run only to bring a solve that
+  is above the acceptance threshold within the contract (a round on a solve at the noise floor of
+  the products lowers the measured residual without bringing the solution closer, and moved
+  gradients on stiff islands by 1e-5 relative). A solve is converged when its finite true residual
+  is at or below the larger of the outer threshold max(abs, rel |rhs|) and 1024 times (64 in
+  single precision) the operator's round-off level, machine epsilon over the finite-difference
+  step times |rhs| + |J^T z| (2e-8 relative in double precision at the default step, 6e-4 in
+  single: the round-off of a central difference of the residual, which depends on the precision
+  and the step and not on the loss, so no fixed tolerance expresses it and a request below it used
+  to be met only by the recurrence residual; the factor covers what a solve reaches above the
+  level through the state's magnitude, the island's stiffness and its conditioning, up to 126
+  levels in double precision on velocity gradients through rigid contact and 284 on a rod, 33 in
+  single precision, while a failed solve sits orders of magnitude above; measuring the level from
+  two quotients at different steps was tried and dropped, the rounding of the two cancels for a
+  residual that is linear along the solution). A solve that stopped on its budget, diverged, or
+  stalled above the threshold is reported as not converged rather than returned as a gradient. The
+  scene statistics report the residual, the threshold and the level as one consistent triple: over
+  all islands when the step converged (so that `residual_norm` is at or below
+  `residual_threshold`), and those of the island that failed worst when it did not. The
+  double-precision reference gradients of `test_precision_reference.py` are unchanged to the last
+  bit: the healthy solves of the suite are the ones the engine produced before (a version of the
+  refinement that ran rounds on torque-free islands moved the free chain on the plane by 3.4e-6
+  relative, where the stored and the moved gradient were 1.6e-6 and 2.5e-6 from a central
+  difference stable to 1e-9 across four step sizes, the accuracy the operator's 1e-8 noise leaves
+  at that island's conditioning).
+  `test_diffsim_rollout.py::DifferentiationContractTest` and
+  `test_diffsim_torch.py::PolicyRolloutContractTest` starve the forward and the adjoint
+  solvers, inject NaN into the statistics and into a gradient, request a tolerance below the
+  floor, and read the fields back.
 - `test/diffsim/test_diffsim_rollout.py::ArticulatedRotationChartTest`: the driver's initial-pose,
   initial-velocity, external-force and controller-target gradients against finite differences
   for a Free root in free fall (`scenes.free_chain`, at 1.2 rad and near the identity) and for a

@@ -112,6 +112,13 @@ struct CIslandBackPropSolverStats : NoCopy {
   // preconditioner breakdown) and the solution comes from the MINRES fallback. Counted into
   // BackPropagationSceneStats::numMinresFallbacks.
   bool usedMinresFallback = false;
+  // Whether the island's adjoint solve met its acceptance threshold (a finite true residual at
+  // or below the larger of the outer threshold and 1024 times (64 in single precision) the operator's round-off level),
+  // that threshold, and the round-off level. Aggregated into BackPropagationSceneStats (see
+  // ComputeAggregateBackPropSolverSceneStats).
+  bool converged = true;
+  double residualThreshold = 0.0;
+  double residualFloor = 0.0;
 };
 
 // Stores information on the size of the differentiable input of an actor, necessary for indexing

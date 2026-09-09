@@ -50,19 +50,41 @@ struct BackPropagationSceneStats {
   // Number of islands whose PCG adjoint solve aborted (non-SPD detection or a preconditioner
   // breakdown) and whose solution comes from the MINRES fallback. Always computed.
   int numMinresFallbacks = 0;
+  // True if every island's adjoint solve met its acceptance threshold: a finite true residual
+  // |J^T z - rhs|, evaluated with fresh operator products after the solve (the moving-chart
+  // term of external torques included), at or below the larger of the outer threshold
+  // max(outerSolverAbsTol, outerSolverRelTol |rhs|) and 1024 times (64 in single precision) the
+  // operator's round-off level (residualFloor). Every solve is refined against that residual until it
+  // meets the outer threshold or stops decreasing. False when a solve stopped on its iteration
+  // budget, diverged, or stalled above the acceptance threshold: the returned z is then not
+  // the adjoint of a solution and the gradients read from it are not trustworthy. Always
+  // computed. When false, residualNorm, residualThreshold and residualFloor are those of the
+  // island that failed worst (the largest residual-to-threshold ratio); when true they cover
+  // all islands (the norm of the concatenated residual, and the root sum of squares of the
+  // islands' thresholds and floors, so that residualNorm <= residualThreshold holds).
+  bool converged = true;
+  // The acceptance threshold residualNorm was judged against (see converged).
+  double residualThreshold = 0.0;
+  // The round-off level of the adjoint operator at the solution: machine epsilon over
+  // epsFiniteDiff (machine epsilon alone for the analytic operator) times |rhs| + |J^T z|, the
+  // level below which the finite-difference products cannot drive the residual. Always
+  // computed; see converged for the aggregation.
+  double residualFloor = 0.0;
 };
 
 struct BackPropagationSolverParams {
   VerbosityLevel verbosity = NonLinearSolverParams{}.verbosity;
   bool useNewtonOuterSolver = false;
-  // The adjoint solve stops when |H z - rhs| <= max(outerSolverAbsTol, outerSolverRelTol |rhs|)
+  // The adjoint solve stops when |J^T z - rhs| <= max(outerSolverAbsTol, outerSolverRelTol |rhs|)
   // or after outerSolverMaxIter iterations (each costing two residual assemblies for the
-  // finite-difference operator). The right-hand side scales with the loss, so the criterion is
-  // relative by default and the absolute floor is off: with the former floor of 1e-3 an
-  // ordinary rod-on-pendulum controller gradient was 2 percent off and the same loss scaled by
-  // 1e-4 gave an exactly zero gradient with every self-check passing (2026-09-02). The relative
-  // tolerance sits at the finite-difference operator's accuracy floor; tighter values run to
-  // outerSolverMaxIter on stiff islands.
+  // finite-difference operator); the same threshold is the acceptance criterion behind
+  // BackPropagationSceneStats::converged. The right-hand side scales with the loss, so the
+  // criterion is relative by default and the absolute floor is off: with the former floor of
+  // 1e-3 an ordinary rod-on-pendulum controller gradient was 2 percent off and the same loss
+  // scaled by 1e-4 gave an exactly zero gradient with every self-check passing (2026-09-02).
+  // The relative tolerance sits at the finite-difference operator's accuracy floor of the
+  // build's precision; tighter values run to outerSolverMaxIter on stiff islands and end
+  // reported as not converged.
   int outerSolverMaxIter = 30;
   real outerSolverAbsTol = 0_r;
   real outerSolverRelTol = 1e-8_r;

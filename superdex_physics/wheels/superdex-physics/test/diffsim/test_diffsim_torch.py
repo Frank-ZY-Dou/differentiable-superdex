@@ -2322,3 +2322,247 @@ class BridgeActorValidationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SoftMassDampingStencilTest(unittest.TestCase):
+    """The mass-damping parameter gradient near zero. The engine differentiates the material
+    parameters by finite differences of the assembled residual with a step of about 1e-3;
+    the damping term is gated at zero, so a central difference whose lower sample crossed
+    zero (every positive coefficient below the step) reported about half the derivative.
+    The term is affine in the coefficient, so the derivative is nearly the same at 0, 1e-6
+    and 2e-3, and at 2e-3 an in-domain central difference of the rollout loss confirms it."""
+
+    FIELDS = (1.0e5, 0.45, 1000.0, 0.0)  # Young's modulus, Poisson's ratio, density, damping
+
+    def _gradient(self, bridge, damping: float):
+        base = torch.tensor([list(self.FIELDS[:3]) + [damping]], dtype=torch.float64, requires_grad=True)
+        loss = bridge(soft_materials=base)
+        loss.backward()
+        return float(loss.detach()), float(base.grad[0, 3])
+
+    def _loss(self, bridge, damping: float) -> float:
+        base = torch.tensor([list(self.FIELDS[:3]) + [damping]], dtype=torch.float64)
+        return float(bridge(soft_materials=base).detach())
+
+    def test_small_positive_damping_gradient(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, cube = scenes.soft_cube_on_plane("rich", mass_damping=1e-3)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        bridge = diffsim_torch.TorchRollout(
+            scene, dt=DT, num_steps=3, soft_material_actors=[cube],
+            terminal_losses=[DisplacementErrorLoss(cube)],
+        )
+        self.addCleanup(bridge.close)
+        # the reference: an in-domain central difference at 2e-3 (samples 1e-3 and 3e-3)
+        _, analytic_ref = self._gradient(bridge, 2e-3)
+        h = 1e-3
+        fd_ref = (self._loss(bridge, 2e-3 + h) - self._loss(bridge, 2e-3 - h)) / (2.0 * h)
+        self.assertGreater(abs(fd_ref), 0.0, "the damping gradient must not vanish")
+        self.assertLess(abs(analytic_ref - fd_ref) / abs(fd_ref), 1e-3,
+                        f"reference: analytic {analytic_ref:.6e} vs fd {fd_ref:.6e}")
+        for damping in (0.0, 1e-8, 1e-6, 1e-4, 5e-4):
+            _, analytic = self._gradient(bridge, damping)
+            rel = abs(analytic - analytic_ref) / abs(analytic_ref)
+            self.assertLess(rel, 1e-2, f"damping {damping:g}: {analytic:.6e} vs {analytic_ref:.6e} at 2e-3 ({rel:.2e})")
+
+
+class PolicyRolloutConstantActionTest(unittest.TestCase):
+    """A policy whose control at a step is a constant tensor (no graph): the step's
+    vector-Jacobian products are zero, parameters unused at that step get no gradient from
+    it, and the rest of the rollout differentiates as usual."""
+
+    def _scene(self):
+        scene, chain = scenes.pendulum(with_controller=False)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        return scene, chain
+
+    def test_always_constant_policy_gives_zero_gradients(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, chain = self._scene()
+        n = chain.get_num_dofs()
+
+        class Constant(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.unused = torch.nn.Parameter(torch.zeros(3, dtype=torch.float64))
+
+            def forward(self, x):
+                return torch.full((n,), 0.1, dtype=torch.float64)
+
+        policy = Constant()
+        rollout = diffsim_torch.PolicyRollout(
+            scene, dt=DT, num_steps=4, policy=policy,
+            observations=[diffsim_torch.ArticulatedPoseObservation(chain)],
+            force_actors=[chain], terminal_losses=[ArticulatedPoseErrorLoss(chain, ref=np.full(n, 0.1))],
+        )
+        self.addCleanup(rollout.close)
+        loss = rollout()
+        loss.backward()
+        self.assertTrue(np.isfinite(float(loss)))
+        self.assertTrue(torch.equal(policy.unused.grad, torch.zeros(3, dtype=torch.float64)))
+        self.assertTrue(rollout.last_result.gradients_finite)
+
+    def test_constant_first_steps_then_linear_vs_fd(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, chain = self._scene()
+        n = chain.get_num_dofs()
+        pose0 = np.zeros(n)
+        chain.get_articulated_pose(pose0)
+        ref = pose0 + 0.1
+        constant = np.array([0.05, -0.02])
+        num_steps, switch = 5, 2
+
+        class Switching(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(n, n).double()
+                self.calls = 0
+
+            def forward(self, x):
+                step = self.calls
+                self.calls += 1
+                if step < switch:
+                    return torch.tensor(constant, dtype=torch.float64)
+                return self.linear(x)
+
+        policy = Switching()
+        with torch.no_grad():
+            policy.linear.weight.copy_(torch.tensor(0.3 * np.cos(np.arange(n * n, dtype=np.float64)).reshape(n, n)))
+            policy.linear.bias.copy_(torch.tensor(0.05 * np.arange(1, n + 1, dtype=np.float64)))
+        rollout = diffsim_torch.PolicyRollout(
+            scene, dt=DT, num_steps=num_steps, policy=policy,
+            observations=[diffsim_torch.ArticulatedPoseObservation(chain)],
+            force_actors=[chain], terminal_losses=[ArticulatedPoseErrorLoss(chain, ref=ref)],
+        )
+        self.addCleanup(rollout.close)
+        loss = rollout()
+        loss.backward()
+        analytic = {name: p.grad.detach().numpy().copy() for name, p in policy.linear.named_parameters()}
+        state_init = scene.capture_state()
+        arrays = {name: p.detach().numpy().copy() for name, p in policy.linear.named_parameters()}
+        force_dofs = np.arange(n, dtype=np.int32)
+
+        def objective() -> float:
+            scene.restore_state(state_init, False)
+            obs = np.zeros(n)
+            for step in range(num_steps):
+                chain.get_articulated_pose(obs)
+                u = constant if step < switch else arrays["weight"] @ obs + arrays["bias"]
+                chain.set_external_forces_on_dofs(force_dofs, np.ascontiguousarray(u))
+                scene.step(DT)
+            return ArticulatedPoseErrorLoss(chain, ref=ref).value()
+
+        self.assertAlmostEqual(objective(), float(loss.detach()), delta=1e-12)
+        eps = 1e-6
+        for name, array in arrays.items():
+            fd = np.zeros_like(array)
+            for index in np.ndindex(array.shape):
+                values = []
+                for sign in (+1.0, -1.0):
+                    saved = array[index]
+                    array[index] = saved + sign * eps
+                    values.append(objective())
+                    array[index] = saved
+                fd[index] = (values[0] - values[1]) / (2.0 * eps)
+            rel = np.linalg.norm(analytic[name] - fd) / np.linalg.norm(fd)
+            self.assertLessEqual(rel, 1e-5, f"{name}: rel {rel}")
+        scene.release_all_states()
+
+    def test_constant_action_with_a_differentiable_aux_loss(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, chain = self._scene()
+        n = chain.get_num_dofs()
+
+        class SideHead(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.side = torch.nn.Linear(n, 2).double()
+
+            def forward(self, x):
+                return torch.full((n,), 0.05, dtype=torch.float64), self.side(x)
+
+        policy = SideHead()
+        rollout = diffsim_torch.PolicyRollout(
+            scene, dt=DT, num_steps=3, policy=policy,
+            observations=[diffsim_torch.ArticulatedPoseObservation(chain)],
+            force_actors=[chain], terminal_losses=[ArticulatedPoseErrorLoss(chain, ref=np.full(n, 0.1))],
+            aux_losses=lambda step, aux: 0.5 * (aux ** 2).sum(),
+        )
+        self.addCleanup(rollout.close)
+        loss = rollout()
+        loss.backward()
+        self.assertGreater(rollout.last_result.aux_loss, 0.0)
+        self.assertTrue(all(torch.isfinite(p.grad).all() for p in policy.parameters()))
+        self.assertGreater(float(policy.side.weight.grad.abs().max()), 0.0)
+
+
+class PolicyRolloutContractTest(unittest.TestCase):
+    """The differentiation contract through the policy bridge."""
+
+    def _rollout(self, diffsim_torch, scene, chain, **kwargs):
+        n = chain.get_num_dofs()
+        policy = torch.nn.Linear(n, n).double()
+        with torch.no_grad():
+            policy.weight.zero_()
+            policy.bias.copy_(torch.tensor([0.05, -0.02], dtype=torch.float64))
+        rollout = diffsim_torch.PolicyRollout(
+            scene, dt=DT, num_steps=4, policy=policy,
+            observations=[diffsim_torch.ArticulatedPoseObservation(chain)],
+            force_actors=[chain], terminal_losses=[ArticulatedPoseErrorLoss(chain, ref=np.full(n, 0.1))],
+            **kwargs,
+        )
+        self.addCleanup(rollout.close)
+        return rollout
+
+    def test_strict_forward_tolerance(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, chain = scenes.pendulum(with_controller=False)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        params = scene.get_solver_params()
+        solver = params.non_linear_solver
+        solver.max_iter = 1
+        params.non_linear_solver = solver
+        scene.set_solver_params(params)
+        rollout = self._rollout(diffsim_torch, scene, chain, forward_residual_tolerance=1e-12)
+        with self.assertRaises(ForwardSolveError):
+            rollout()
+
+    def test_non_finite_adjoint_residual_raises(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, chain = scenes.pendulum(with_controller=False)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        rollout = self._rollout(diffsim_torch, scene, chain)
+        real_stats = diffsim_rollout.diffsim.get_back_propagation_scene_stats
+        seen = []
+
+        def poisoned(scene_):
+            stats = real_stats(scene_)
+            seen.append(1)
+            if len(seen) == 2:
+                stats.residual_norm = float("nan")
+            return stats
+
+        with mock.patch.object(diffsim_rollout.diffsim, "get_back_propagation_scene_stats", poisoned):
+            with self.assertRaises(diffsim_rollout.AdjointSolveError):
+                rollout()
+
+    def test_converged_rollout_reports_the_contract(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, chain = scenes.pendulum(with_controller=False)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        rollout = self._rollout(diffsim_torch, scene, chain, forward_residual_tolerance=1e-8)
+        rollout().backward()
+        result = rollout.last_result
+        self.assertTrue(result.forward_converged)
+        self.assertTrue(result.adjoint_converged)
+        self.assertLessEqual(result.max_adjoint_residual, result.adjoint_residual_threshold)
+        self.assertGreaterEqual(result.adjoint_residual_floor, 0.0)
+        self.assertTrue(result.gradients_finite)
+        # the harness turns the finite-difference self-check on
+        self.assertTrue(result.fd_validation_ran)
+        self.assertTrue(result.fd_validation_passed)

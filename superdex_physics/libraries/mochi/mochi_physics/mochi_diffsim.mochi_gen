@@ -77,6 +77,30 @@ struct diffsim::BackPropagationSceneStats [no_reflection] {
   // @note Only meaningful when @ref BackPropagationSolverParams::validateFiniteDiff is set;
   // otherwise stays at its default of true.
   bool finiteDiffValid = true;
+
+  // @brief True if every island's adjoint solve met its acceptance threshold: a finite true
+  // residual, evaluated with fresh operator products after the solve (the moving-chart term of
+  // external torques included), at or below the larger of the outer threshold
+  // max(outerSolverAbsTol, outerSolverRelTol |rhs|) and 1024 times (64 in single precision) the
+  // operator's round-off level (residualFloor). False after an iteration budget ran out, a divergence, or a
+  // refinement that stalled above the acceptance threshold: the gradients read from such a
+  // solve are not the adjoint of a solution. Always computed. When false, residualNorm,
+  // residualThreshold and residualFloor are those of the island that failed worst (the largest
+  // residual-to-threshold ratio); when true they cover all islands (the norm of the
+  // concatenated residual, and the root sum of squares of the islands' thresholds and floors,
+  // so that residualNorm <= residualThreshold holds).
+  bool converged = true;
+
+  // @brief The acceptance threshold residualNorm was judged against: the outer threshold
+  // max(outerSolverAbsTol, outerSolverRelTol |rhs|) or 1024 times (64 in single precision) the operator's
+  // round-off level (residualFloor), whichever is larger (see converged for the aggregation over islands).
+  double residualThreshold = 0.0;
+
+  // @brief The round-off level of the adjoint operator at the solution: machine epsilon over
+  // epsFiniteDiff (machine epsilon alone for the analytic operator) times |rhs| + |J^T z|, the
+  // level below which the finite-difference products cannot drive the residual. Always computed;
+  // see converged for the aggregation over islands.
+  double residualFloor = 0.0;
 }
 
 // @brief Make a scene differentiable.

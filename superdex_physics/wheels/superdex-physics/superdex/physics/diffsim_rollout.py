@@ -187,11 +187,67 @@ class ForwardSolveError(RuntimeError):
         )
 
 
+class AdjointSolveError(RuntimeError):
+    """The adjoint solve of one step cannot be trusted: its true residual is not a finite
+    number, or (``require_adjoint_convergence``) it stayed above the acceptance threshold,
+    or a gradient the sweep read is not finite.
+
+    Raised by every rollout after the offending ``back_propagate`` (``reason`` names the
+    check). The residual, the threshold and the floor are the engine's: the threshold is the
+    larger of the outer solver's max(abs_tol, rel_tol |rhs|) and 1024 times (64 in single precision) the operator's
+    round-off level at the solution (``residual_floor``: machine epsilon over the
+    finite-difference step, times the scale of the products, below which no solve can drive
+    the residual); the iteration count is the outer solver's.
+    """
+
+    def __init__(self, step: int, reason: str, residual_norm: float, threshold: float,
+                 iterations: int, residual_floor: float = 0.0):
+        self.step = step
+        self.reason = reason
+        self.residual_norm = residual_norm
+        self.threshold = threshold
+        self.iterations = iterations
+        self.residual_floor = residual_floor
+        floor = f", operator floor {residual_floor:.2e}" if residual_floor > 0.0 else ""
+        super().__init__(
+            f"adjoint solve of step {step} rejected: {reason} (true residual {residual_norm:.2e}, "
+            f"acceptance threshold {threshold:.2e}{floor}, {iterations} outer iterations)"
+        )
+
+
+def check_adjoint_stats(stats, step: int, require_convergence: bool) -> None:
+    """Rejects a back-propagation whose true residual is not finite, or, with
+    ``require_convergence``, one the engine reports as not converged (true residual above
+    its acceptance threshold: max(abs_tol, rel_tol |rhs|) of the outer solver or 1024 times (64 in single
+    precision) the operator's round-off level, whichever is larger). Checked before any
+    aggregation, so a NaN never disappears into a running maximum."""
+    residual = float(stats.residual_norm)
+    if not math.isfinite(residual):
+        raise AdjointSolveError(
+            step, "non-finite adjoint residual", residual, float(stats.residual_threshold),
+            int(stats.max_outer_iters), float(stats.residual_floor))
+    if require_convergence and not stats.converged:
+        raise AdjointSolveError(
+            step, "adjoint solve not converged", residual, float(stats.residual_threshold),
+            int(stats.max_outer_iters), float(stats.residual_floor))
+
+
+def check_gradients_finite(blocks, step_label: str, threshold: float = 0.0) -> None:
+    """Rejects gradient arrays that carry a NaN or an infinity (the finiteness of a residual
+    does not imply that of what the adjoint sweep read from the engine)."""
+    for name, block in blocks:
+        if block is None:
+            continue
+        if not np.all(np.isfinite(block)):
+            raise AdjointSolveError(-1, f"non-finite gradient in {name} ({step_label})", math.nan,
+                                    threshold, 0)
+
+
 def _solver_stats(scene):
     return scene.get_solver_stats()
 
 
-def forward_solve_failed(scene, residual_tolerance: float) -> bool:
+def forward_solve_failed(scene, residual_tolerance: float, stats=None) -> bool:
     """Whether the last ``scene.step`` ended without convergence and with a
     residual above ``residual_tolerance``, or with a residual that is not a
     finite number.
@@ -200,9 +256,11 @@ def forward_solve_failed(scene, residual_tolerance: float) -> bool:
     counts as converged; a solve that hit the iteration limit or diverged with a
     larger residual is a failure. A NaN or infinite residual is a failure
     whatever the status says: a comparison with NaN is false, so the threshold
-    alone would accept it (before 2026-09-08 it did).
+    alone would accept it (before 2026-09-08 it did). ``stats`` are the step's
+    solver statistics when the caller already read them.
     """
-    stats = _solver_stats(scene)
+    if stats is None:
+        stats = _solver_stats(scene)
     residual = float(stats.residual_norm)
     if not math.isfinite(residual):
         return True
@@ -212,11 +270,13 @@ def forward_solve_failed(scene, residual_tolerance: float) -> bool:
     )
 
 
-def _raise_if_not_finite(scene, step: int, dt: float) -> None:
+def _raise_if_not_finite(scene, step: int, dt: float, stats=None) -> None:
     """A step whose Newton residual is not a finite number left the scene in a
     corrupt state: an error even for a rollout that does not inspect
-    convergence otherwise."""
-    stats = _solver_stats(scene)
+    convergence otherwise. ``stats`` are the step's solver statistics when the
+    caller already read them."""
+    if stats is None:
+        stats = _solver_stats(scene)
     if not math.isfinite(float(stats.residual_norm)):
         raise ForwardSolveError(
             step, dt, stats.convergence_status, stats.residual_norm, stats.max_non_linear_iters
@@ -375,6 +435,28 @@ class RolloutResult:
     # of solver steps of the forward rollout (``num_steps`` when nothing was split).
     split_steps: list = dataclasses.field(default_factory=list)
     num_solver_steps: int = 0
+    # The differentiation contract, reported separately (see the class docstring of
+    # DifferentiableRollout): whether every forward solve met ``forward_residual_tolerance``
+    # (None when no tolerance was given, so nothing was checked beyond finiteness) and the
+    # largest forward residual seen; whether every adjoint solve met its acceptance
+    # threshold, the largest such threshold (the outer solver's max(abs_tol, rel_tol |rhs|) or
+    # 1024 times (64 in single precision) the operator's round-off level, whichever is larger) and the largest round-off
+    # level (machine epsilon over the finite-difference step, times the scale of the products
+    # at the solution); whether every gradient read is finite (always
+    # True on return: a non-finite one raises); and whether the engine's finite-difference
+    # self-check ran at all (``fd_valid`` stays True when it did not run).
+    forward_converged: bool | None = None
+    max_forward_residual: float = 0.0
+    adjoint_converged: bool = True
+    adjoint_residual_threshold: float = 0.0
+    adjoint_residual_floor: float = 0.0
+    gradients_finite: bool = True
+    fd_validation_ran: bool = False
+
+    @property
+    def fd_validation_passed(self) -> bool | None:
+        """``fd_valid`` when the engine's finite-difference self-check ran, else None."""
+        return self.fd_valid if self.fd_validation_ran else None
 
     @property
     def control_gradients(self) -> dict[str, np.ndarray]:
@@ -397,6 +479,8 @@ class DifferentiableRollout:
         grad_clip_norm: float | None = None,
         max_substep_levels: int = 0,
         substep_residual_tolerance: float | None = None,
+        forward_residual_tolerance: float | None = None,
+        require_adjoint_convergence: bool = True,
     ):
         """``max_substep_levels`` > 0 enables failure-adaptive substepping: a
         step whose Newton solve ends without convergence and with a residual
@@ -411,6 +495,17 @@ class DifferentiableRollout:
         the earlier steps stay zero and the initial-state gradients are
         withheld, while the reported loss still sums the running costs of every
         step - the window changes the gradient, never the objective.
+
+        The differentiation contract. The adjoint is the derivative of the step equations
+        at a solution, so a forward solve that stopped short of one, or an adjoint solve
+        that did, is not a gradient. ``forward_residual_tolerance`` (without substepping)
+        makes a step whose Newton solve ended unconverged with a residual above it raise
+        :class:`ForwardSolveError`, as the substepping tolerance does at the finest level;
+        without it only a non-finite residual raises and the largest residual is reported.
+        ``require_adjoint_convergence`` (the default) makes an adjoint solve the engine
+        reports as unconverged (true residual above the outer solver's threshold) raise
+        :class:`AdjointSolveError`; a non-finite adjoint residual or gradient always raises.
+        The result reports each condition in its own field.
         """
         if num_steps <= 0:
             raise ValueError("num_steps must be positive")
@@ -428,6 +523,17 @@ class DifferentiableRollout:
             raise ValueError(
                 "substep_residual_tolerance has no effect without max_substep_levels > 0"
             )
+        if forward_residual_tolerance is not None:
+            if max_substep_levels > 0:
+                raise ValueError(
+                    "forward_residual_tolerance is the strict check of a rollout without "
+                    "substepping; with max_substep_levels > 0 substep_residual_tolerance is the "
+                    "contract"
+                )
+            if not forward_residual_tolerance > 0.0:
+                raise ValueError("forward_residual_tolerance must be a positive float when given")
+        self.forward_residual_tolerance = forward_residual_tolerance
+        self.require_adjoint_convergence = bool(require_adjoint_convergence)
         self.scene = scene
         self.dt = dt
         self.num_steps = num_steps
@@ -439,9 +545,25 @@ class DifferentiableRollout:
 
     # -- pieces ------------------------------------------------------------
 
+    def check_forward_step(self, step: int, dt: float) -> float:
+        """After a plain ``scene.step``: raises on a non-finite residual, and with
+        ``forward_residual_tolerance`` on an unconverged solve above it; returns the
+        residual for the rollout's record. The statistics are read once."""
+        stats = _solver_stats(self.scene)
+        _raise_if_not_finite(self.scene, step, dt, stats)
+        if self.forward_residual_tolerance is not None and forward_solve_failed(
+            self.scene, self.forward_residual_tolerance, stats
+        ):
+            raise ForwardSolveError(
+                step, dt, stats.convergence_status, stats.residual_norm, stats.max_non_linear_iters
+            )
+        return float(stats.residual_norm)
+
     def _forward(self, apply_inputs, on_step_end=None) -> list[_StepRecord]:
-        """The forward rollout; ``on_step_end(step)`` runs on each step's final state."""
+        """The forward rollout; ``on_step_end(step)`` runs on each step's final state.
+        ``self._max_forward_residual`` holds the largest step residual afterwards."""
         records: list[_StepRecord] = []
+        self._max_forward_residual = 0.0
         try:
             for step in range(self.num_steps):
                 if apply_inputs is not None:
@@ -450,7 +572,9 @@ class DifferentiableRollout:
                     pre = self.scene.capture_state()
                     try:
                         self.scene.step(self.dt)
-                        _raise_if_not_finite(self.scene, step, self.dt)
+                        self._max_forward_residual = max(
+                            self._max_forward_residual, self.check_forward_step(step, self.dt)
+                        )
                         post = self.scene.capture_state()
                     except BaseException:
                         self.scene.release_state(pre)
@@ -466,6 +590,9 @@ class DifferentiableRollout:
                         on_substep=lambda pre, post, sub_dt, step=step: records.append(
                             _StepRecord(step, sub_dt, pre, post)
                         ),
+                    )
+                    self._max_forward_residual = max(
+                        self._max_forward_residual, float(_solver_stats(self.scene).residual_norm)
                     )
                 if on_step_end is not None:
                     on_step_end(step)
@@ -616,12 +743,18 @@ class DifferentiableRollout:
 
         fd_valid = True
         max_residual = 0.0
+        max_threshold = 0.0
+        max_floor = 0.0
+        adjoint_converged = True
         max_asymmetry = 0.0
         flagged_steps: list[int] = []
         max_outer_iters = 0
         minres_fallbacks = 0
         solve_time = 0.0
         steps_swept = 0
+        fd_validation_ran = bool(
+            diffsim.get_back_propagation_solver_params(self.scene).validate_finite_diff
+        )
 
         # Reverse sweep over the solver steps, newest first. A step's losses are
         # evaluated on its final state, i.e. at the last of its substeps.
@@ -649,6 +782,10 @@ class DifferentiableRollout:
             steps_swept += 1
 
             stats = diffsim.get_back_propagation_scene_stats(self.scene)
+            check_adjoint_stats(stats, record.step, self.require_adjoint_convergence)
+            adjoint_converged = adjoint_converged and bool(stats.converged)
+            max_threshold = max(max_threshold, float(stats.residual_threshold))
+            max_floor = max(max_floor, float(stats.residual_floor))
             fd_valid = fd_valid and stats.finite_diff_valid
             if not stats.finite_diff_valid and record.step not in flagged_steps:
                 flagged_steps.append(record.step)
@@ -676,6 +813,12 @@ class DifferentiableRollout:
                 split_steps.append((record.step, 1))
         split_steps = [entry for entry in split_steps if entry[1] > 1]
 
+        # A gradient that is not finite is rejected before anything is returned or clipped.
+        check_gradients_finite(
+            [(f"{name}.{field}", getattr(out, field)) for name, out in grads.items()
+             for field in ("initial_pose", "initial_velocity", "control_targets", "external_forces")],
+            "rollout sweep", max_threshold)
+
         if self.grad_clip_norm is not None:
             for out in grads.values():
                 for field in (
@@ -701,4 +844,12 @@ class DifferentiableRollout:
             minres_fallbacks=minres_fallbacks,
             split_steps=split_steps,
             num_solver_steps=len(records),
+            forward_converged=(None if self.forward_residual_tolerance is None
+                               and self.max_substep_levels == 0 else True),
+            max_forward_residual=self._max_forward_residual,
+            adjoint_converged=adjoint_converged,
+            adjoint_residual_threshold=max_threshold,
+            adjoint_residual_floor=max_floor,
+            gradients_finite=True,
+            fd_validation_ran=fd_validation_ran,
         )
