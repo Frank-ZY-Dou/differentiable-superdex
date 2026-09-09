@@ -18,6 +18,7 @@
 
 #include <mochi_core/element_operations/batched_element_utils.h>
 #include <mochi_core/materials/batched_materials.h>
+#include <mochi_core/mochi_platform.h>
 #include <mochi_core/utils/batch_types.h>
 #include <mochi_core/utils/decomposition_utils.h>
 #include <mochi_core/utils/nd_array.h>
@@ -95,6 +96,8 @@ namespace mochi::fem {
 ///   materials are handled correctly.
 /// @param[in] perElementExtraWeight  Optional per-element quadrature weight multiplier.
 /// @return true if outputs were written.
+///
+/// @note @p outDRes must be symmetric on entry.
 template <int kBatchSize, class ElementT>
 bool StressDampingWork(
     NdArray<int, kBatchSize> const& elementIndices,
@@ -371,8 +374,10 @@ bool StressDampingWork(
               geo += dbasis[f * 3 + k] * sk;
             }
           }
+
           for (int i = 0; i < 3; ++i) {
-            for (int j = 0; j < 3; ++j) {
+            int const jBegin = (f == g) ? i : 0;
+            for (int j = jBegin; j < 3; ++j) {
               V acc{0_r};
               for (int a = 0; a < 6; ++a) {
                 acc += B[f][a][i] * CB[g][a][j];
@@ -407,45 +412,77 @@ bool StressDampingWork(
         }
       }
 
-      // Upper-triangular node blocks (g >= f). The lower triangle is mirrored below.
-      for (int f = 0; f < kNumNodes; ++f) {
-        for (int g = f; g < kNumNodes; ++g) {
-          V const dbasisDot = dbasis[f * 3 + 0] * dbasis[g * 3 + 0] +
-              dbasis[f * 3 + 1] * dbasis[g * 3 + 1] + dbasis[f * 3 + 2] * dbasis[g * 3 + 2];
+      // Upper-triangular part. The lower triangle is mirrored below.
+      auto assembleIsotropicBlock = [&]<bool kIsDiagonal>(
+                                        int const f, int const g) MOCHI_FORCE_INLINE_LAMBDA {
+        V const dbasisDot = dbasis[f * 3 + 0] * dbasis[g * 3 + 0] +
+            dbasis[f * 3 + 1] * dbasis[g * 3 + 1] + dbasis[f * 3 + 2] * dbasis[g * 3 + 2];
 
-          V geo{0_r};
-          if (includeGeometricStiffness) {
-            for (int k = 0; k < 3; ++k) {
-              V sk{0_r};
-              for (int l = 0; l < 3; ++l) {
-                sk += S[k][l] * dbasis[g * 3 + l];
-              }
-              geo += dbasis[f * 3 + k] * sk;
+        V geo{0_r};
+        if (includeGeometricStiffness) {
+          for (int k = 0; k < 3; ++k) {
+            V sk{0_r};
+            for (int l = 0; l < 3; ++l) {
+              sk += S[k][l] * dbasis[g * 3 + l];
             }
+            geo += dbasis[f * 3 + k] * sk;
           }
+        }
 
+        auto assembleEntry =
+            [&](int const i, int const j, V const fiNf, V const fiNg, bool const addGeo)
+                MOCHI_FORCE_INLINE_LAMBDA {
+                  V acc = kappaLambda * fiNf * FdotDbasis[g][j] +
+                      kappaMu * (FdotF[i][j] * dbasisDot + fiNg * FdotDbasis[f][j]);
+                  if (addGeo) {
+                    acc += geo;
+                  }
+                  (*outDRes)[(f * kSpaceDim + i) * kNumDofs + (g * kSpaceDim + j)] +=
+                      quadWeight * acc;
+                };
+
+        if constexpr (kIsDiagonal) {
+          V const fDotDbasis0 = FdotDbasis[f][0];
+          V const fDotDbasis1 = FdotDbasis[f][1];
+          V const fDotDbasis2 = FdotDbasis[f][2];
+          assembleEntry(0, 0, fDotDbasis0, fDotDbasis0, includeGeometricStiffness);
+          assembleEntry(0, 1, fDotDbasis0, fDotDbasis0, false);
+          assembleEntry(0, 2, fDotDbasis0, fDotDbasis0, false);
+          assembleEntry(1, 1, fDotDbasis1, fDotDbasis1, includeGeometricStiffness);
+          assembleEntry(1, 2, fDotDbasis1, fDotDbasis1, false);
+          assembleEntry(2, 2, fDotDbasis2, fDotDbasis2, includeGeometricStiffness);
+        } else {
           for (int i = 0; i < 3; ++i) {
             V const fiNf = FdotDbasis[f][i];
             V const fiNg = FdotDbasis[g][i];
             for (int j = 0; j < 3; ++j) {
-              V acc = kappaLambda * fiNf * FdotDbasis[g][j] +
-                  kappaMu * (FdotF[i][j] * dbasisDot + fiNg * FdotDbasis[f][j]);
-              if (includeGeometricStiffness && i == j) {
-                acc += geo;
-              }
-              (*outDRes)[(f * kSpaceDim + i) * kNumDofs + (g * kSpaceDim + j)] += quadWeight * acc;
+              assembleEntry(i, j, fiNf, fiNg, includeGeometricStiffness && i == j);
             }
           }
+        }
+      };
+
+      for (int f = 0; f < kNumNodes; ++f) {
+        assembleIsotropicBlock.template operator()</*kIsDiagonal*/ true>(f, f);
+        for (int g = f + 1; g < kNumNodes; ++g) {
+          assembleIsotropicBlock.template operator()</*kIsDiagonal*/ false>(f, g);
         }
       }
     }
   }
 
-  // Mirror the lower-triangular node blocks.
-  //
-  // Note: This assigns the lower triangle from the upper triangle (rather than accumulating),
-  // assuming that all prior content of outDRes was symmetric.
+  // Mirror dresidual: copy the upper triangle to the lower triangle (bitwise symmetric output).
+  // Note: outDRes must be symmetric on entry because this assigns rather than accumulates.
   if (evalDRes) {
+    for (int f = 0; f < kNumNodes; ++f) {
+      for (int i = 0; i < kSpaceDim; ++i) {
+        for (int j = i + 1; j < kSpaceDim; ++j) {
+          (*outDRes)[(f * kSpaceDim + j) * kNumDofs + (f * kSpaceDim + i)] =
+              (*outDRes)[(f * kSpaceDim + i) * kNumDofs + (f * kSpaceDim + j)];
+        }
+      }
+    }
+
     for (int f = 0; f < kNumNodes; ++f) {
       for (int g = f + 1; g < kNumNodes; ++g) {
         for (int i = 0; i < kSpaceDim; ++i) {
