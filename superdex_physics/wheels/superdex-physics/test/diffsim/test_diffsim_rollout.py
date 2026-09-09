@@ -1365,3 +1365,71 @@ class LossFactoryReplayTest(unittest.TestCase):
                 reference = result.loss
             else:
                 self.assertEqual(result.loss, reference, (window, adaptive))
+
+
+@double_only
+class ArticulatedInitialPoseTest(unittest.TestCase):
+    """The driver's initial-pose gradient of a torque-driven articulated actor against
+    central finite differences (joint velocities held). The revolute pendulum agrees to
+    about 2e-5. A prismatic joint after a revolute one is off by about a tenth
+    (measured 2026-09-09, K = 1 already 2e-2): an open issue of the initial-pose input
+    adjoint, set_articulated_pose_from_joints_backward, kept here as an expected
+    failure so that a fix is noticed."""
+
+    FD_EPS = 1e-6
+    TOL = 1e-4
+    NUM_STEPS = 6
+
+    def _relative_error(self, scene, chain) -> float:
+        configure_for_differentiability(scene)
+        num_dofs = chain.get_num_dofs()
+        pose0 = np.zeros(num_dofs)
+        chain.get_articulated_pose(pose0)
+        velocity0 = np.zeros(num_dofs)
+        chain.get_articulated_joint_velocities(velocity0)
+        torque = 0.3 * np.arange(1, num_dofs + 1, dtype=np.float64)
+        dofs = np.arange(num_dofs, dtype=np.int32)
+        terminal = ArticulatedPoseErrorLoss(chain, ref=pose0 + 0.1)
+
+        def apply_inputs(step: int) -> None:
+            chain.set_external_forces_on_dofs(dofs, torque)
+
+        state_init = scene.capture_state()
+        rollout = DifferentiableRollout(scene, dt=DT, num_steps=self.NUM_STEPS)
+        result = rollout.run(apply_inputs=apply_inputs, terminal_losses=[terminal])
+        analytic = result.gradients[chain.get_name()].initial_pose
+        self.assertTrue(result.fd_valid)
+
+        def objective(pose: np.ndarray) -> float:
+            scene.restore_state(state_init, False)
+            chain.set_articulated_pose_from_joints(pose)
+            chain.set_articulated_joint_velocities(velocity0)
+            for _ in range(self.NUM_STEPS):
+                apply_inputs(0)
+                scene.step(DT)
+            return terminal.value()
+
+        fd = np.zeros(num_dofs)
+        for i in range(num_dofs):
+            values = []
+            for sign in (+1.0, -1.0):
+                pose = pose0.copy()
+                pose[i] += sign * self.FD_EPS
+                values.append(objective(pose))
+            fd[i] = (values[0] - values[1]) / (2.0 * self.FD_EPS)
+        scene.release_all_states()
+        self.assertGreater(np.linalg.norm(fd), 0.0, "test is vacuous")
+        return float(np.linalg.norm(analytic - fd) / np.linalg.norm(fd))
+
+    def test_pendulum_initial_pose_vs_fd(self) -> None:
+        scene, chain = scenes.pendulum(with_controller=False)
+        self.addCleanup(physics.destroy_scene, scene)
+        rel = self._relative_error(scene, chain)
+        self.assertLessEqual(rel, self.TOL, f"initial-pose gradient mismatch: {rel:.2e}")
+
+    @unittest.expectedFailure
+    def test_revolute_prismatic_initial_pose_vs_fd(self) -> None:
+        scene, chain = scenes.chain_revolute_prismatic()
+        self.addCleanup(physics.destroy_scene, scene)
+        rel = self._relative_error(scene, chain)
+        self.assertLessEqual(rel, self.TOL, f"initial-pose gradient mismatch: {rel:.2e}")

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Convert a URDF hand description into a SuperDex bot package.
+"""Convert a URDF robot description into a SuperDex bot package.
 
 The kinematics, inertias and joint limits come from SuperDex's own URDF importer
 (``superdex.robotics.load_bot_prefab_from_urdf_file``); the meshes referenced by the
@@ -27,15 +27,25 @@ which sets the engine's voxel size.
 Contact between the root link and the links not attached to it is disabled, as in the
 shipped hand assets. Mesh scales of the URDF are baked into the written meshes.
 
+A link without a collision mesh gets no shape, and the engine gives a shapeless link no
+mass: the inertial of such a link is folded into its parent when the joint between them is
+fixed (parallel-axis update in the parent's frame), and the link stays a massless frame;
+a shapeless link on a moving joint is reported and left massless. Joint dynamics carried
+by the URDF (viscous damping and Coulomb friction, joint inertia, the importer's limit
+stiffness and damping) are written to the package. A root attached to the world by a
+fixed joint, or a root that is a bare frame (a ``world`` link without inertial or mesh),
+makes the world joint Hard (fixed base); ``--base fixed`` or ``--base floating`` overrides.
+Mimic joints are not imported by SuperDex: their dofs are independent in the package.
+
     python tools/urdf_to_superdex_bot.py <urdf> <out_dir> --name <bot_name> [--mesh-dir DIR]
-        [--default-pose JOINT=VALUE ...]
+        [--default-pose JOINT=VALUE ...] [--base auto|fixed|floating]
 
 Run it with the superdex environment of this repository (it needs superdex.physics,
 superdex.robotics, numpy and trimesh).
 
 The package is verified after writing: it is loaded back, a bot is created from it and
-from the URDF prefab, and every link transform of the two is compared at the default
-pose.
+from the URDF prefab, and every link transform of the two is compared at a pose that
+moves every joint inside its limits.
 """
 
 from __future__ import annotations
@@ -170,6 +180,109 @@ def write_glb(source: pathlib.Path, target: pathlib.Path, color, scale) -> np.nd
     return bounds
 
 
+def quat_to_matrix(q) -> np.ndarray:
+    """Rotation matrix of a unit quaternion (x, y, z, w)."""
+    x, y, z, w = np.asarray(q, dtype=np.float64).reshape(4)
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    )
+
+
+def transform_matrix(transform) -> tuple[np.ndarray, np.ndarray]:
+    """(R, t) of a TransformRT."""
+    return quat_to_matrix(transform.rotation.tolist()), np.asarray(transform.translation, dtype=np.float64)
+
+
+def inertia_matrix(moment_of_inertia) -> np.ndarray:
+    xx, xy, xz, yy, yz, zz = np.asarray(moment_of_inertia, dtype=np.float64).reshape(6)
+    return np.array([[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]])
+
+
+def inertia_vector(matrix) -> list[float]:
+    m = np.asarray(matrix, dtype=np.float64)
+    return [float(m[0, 0]), float(m[0, 1]), float(m[0, 2]), float(m[1, 1]), float(m[1, 2]), float(m[2, 2])]
+
+
+def shifted_inertia(inertia, mass, offset) -> np.ndarray:
+    """Inertia about a point ``offset`` away from the center of mass (parallel axis)."""
+    d = np.asarray(offset, dtype=np.float64)
+    return inertia + mass * (float(d @ d) * np.eye(3) - np.outer(d, d))
+
+
+def fold_shapeless_links(prefab, meshes) -> None:
+    """Folds the inertial of every link without a collision mesh into its parent across a
+    fixed joint; the engine gives a shapeless link no mass, so this keeps the robot's mass
+    properties. Children are handled before their parents (links index their parents by a
+    smaller index), so a chain of frames folds all the way to the first link with a shape."""
+    for i in reversed(range(len(prefab.links))):
+        link = prefab.links[i]
+        if link.mass is None or float(link.mass) <= 0.0:
+            continue
+        refs = meshes.get(link.name, {"visual": None, "collision": None, "color": None})
+        if refs["collision"] is not None:
+            continue
+        joint = prefab.joints[i]
+        if link.parent_link < 0 or joint.type != physics.ArticulatedJointType.HARD:
+            print(
+                f"  {link.name}: no collision mesh and a moving joint ({joint_type_name(joint.type)}); "
+                f"the engine will treat it as massless ({float(link.mass):.4g} kg lost)"
+            )
+            continue
+        parent = prefab.links[link.parent_link]
+        # child link frame in the parent link frame: parent_link_from_joint * parent_joint_from_link
+        r_joint, t_joint = transform_matrix(joint.parent_link_from_joint)
+        r_link, t_link = transform_matrix(link.parent_joint_from_link)
+        rotation = r_joint @ r_link
+        translation = t_joint + r_joint @ t_link
+        mass_c = float(link.mass)
+        com_c = translation + rotation @ np.asarray(link.center_of_mass, dtype=np.float64)
+        inertia_c = rotation @ inertia_matrix(link.moment_of_inertia) @ rotation.T
+        if parent.mass is None or float(parent.mass) <= 0.0:
+            mass_p, com_p, inertia_p = 0.0, np.zeros(3), np.zeros((3, 3))
+        else:
+            mass_p = float(parent.mass)
+            com_p = np.asarray(parent.center_of_mass, dtype=np.float64)
+            inertia_p = inertia_matrix(parent.moment_of_inertia)
+        mass = mass_p + mass_c
+        com = (mass_p * com_p + mass_c * com_c) / mass
+        inertia = shifted_inertia(inertia_p, mass_p, com_p - com)
+        inertia = inertia + shifted_inertia(inertia_c, mass_c, com_c - com)
+        parent.mass = mass
+        parent.center_of_mass = com.tolist()
+        parent.moment_of_inertia = inertia_vector(inertia)
+        prefab.links[link.parent_link] = parent
+        link.mass = None
+        prefab.links[i] = link
+        print(f"  {link.name}: no collision mesh, {mass_c:.4g} kg folded into {parent.name} (fixed joint)")
+
+
+def urdf_facts(urdf: pathlib.Path, prefab, meshes) -> dict:
+    """Whether the base is fixed, and the mimic joints. The base is fixed when the root
+    link hangs on a fixed joint, or when the root link is a bare ``world`` frame (no
+    inertial, no mesh), the ROS convention for a robot welded to the world. A bare root
+    under another name (``base_link``, ``base_footprint``) stays floating."""
+    root = ET.parse(urdf).getroot()
+    root_link = prefab.links[0]
+    fixed_joint_to_root = any(
+        joint.get("type") == "fixed" and joint.find("child").get("link") == root_link.name
+        for joint in root.findall("joint")
+        if joint.find("child") is not None
+    )
+    refs = meshes.get(root_link.name, {"visual": None, "collision": None, "color": None})
+    bare_root = (
+        root_link.name == "world"
+        and root_link.mass is None
+        and refs["visual"] is None
+        and refs["collision"] is None
+    )
+    mimics = [joint.get("name") for joint in root.findall("joint") if joint.find("mimic") is not None]
+    return {"fixed_base": fixed_joint_to_root or bare_root, "mimics": mimics}
+
+
 def joint_type_name(joint_type) -> str:
     return {
         physics.ArticulatedJointType.FREE: "Free",
@@ -179,9 +292,21 @@ def joint_type_name(joint_type) -> str:
     }[joint_type]
 
 
-def convert(urdf: pathlib.Path, out_dir: pathlib.Path, name: str, mesh_dir: pathlib.Path | None, default_pose: dict[str, float]):
+def convert(
+    urdf: pathlib.Path,
+    out_dir: pathlib.Path,
+    name: str,
+    mesh_dir: pathlib.Path | None,
+    default_pose: dict[str, float],
+    base: str = "auto",
+):
     prefab = robotics.load_bot_prefab_from_urdf_file(str(urdf))
     meshes = parse_urdf_meshes(urdf)
+    facts = urdf_facts(urdf, prefab, meshes)
+    fixed_base = facts["fixed_base"] if base == "auto" else base == "fixed"
+    if facts["mimics"]:
+        print(f"mimic joints are not imported, their dofs are independent in the package: {facts['mimics']}")
+    fold_shapeless_links(prefab, meshes)
     out_dir.mkdir(parents=True, exist_ok=True)
     links = []
     for i in range(len(prefab.links)):
@@ -219,6 +344,8 @@ def convert(urdf: pathlib.Path, out_dir: pathlib.Path, name: str, mesh_dir: path
     for i in range(len(prefab.joints)):
         joint = prefab.joints[i]
         entry = {"name": joint.name, "type": joint_type_name(joint.type)}
+        if i == 0 and fixed_base and joint.type == physics.ArticulatedJointType.FREE:
+            entry["type"] = "Hard"  # the URDF attaches the root to the world by a fixed joint
         transform = joint.parent_link_from_joint
         frame = {}
         if not np.allclose(np.asarray(transform.rotation), [0, 0, 0, 1], atol=1e-12):
@@ -233,6 +360,15 @@ def convert(urdf: pathlib.Path, out_dir: pathlib.Path, name: str, mesh_dir: path
             entry["maxLimit"] = vec(joint.max_limit)
             if joint.effort_limit > 0:
                 entry["effortLimit"] = float(joint.effort_limit)
+            friction = joint.friction
+            if friction.viscous > 0 or friction.coulomb > 0:
+                entry["friction"] = {"coulomb": float(friction.coulomb), "viscous": float(friction.viscous)}
+            if friction.stiction_extra > 0 or friction.stribeck_vel > 0:
+                print(f"  {joint.name}: Stribeck friction terms are not written to the package")
+            if joint.inertia is not None:
+                entry["inertia"] = float(joint.inertia)
+            entry["limitStiffness"] = float(joint.limit_stiffness)
+            entry["limitDamping"] = float(joint.limit_damping)
             revolute.append(joint.name)
         joints.append(entry)
     unknown = set(default_pose) - set(revolute)
@@ -248,6 +384,7 @@ def convert(urdf: pathlib.Path, out_dir: pathlib.Path, name: str, mesh_dir: path
     bot = {"contactOverrides": overrides, "defaultPose": pose, "joints": joints, "links": links, "name": name}
     bot_path = out_dir / f"{name}.superdex_bot"
     bot_path.write_text(json.dumps(bot, indent=2, sort_keys=True) + "\n")
+    print(f"base: {'fixed (Hard world joint)' if fixed_base else 'floating (Free world joint)'}")
     print(f"wrote {bot_path}: {len(links)} links, {len(joints)} joints ({len(revolute)} revolute)")
     return prefab, bot_path
 
@@ -264,8 +401,32 @@ def link_transforms(scene, bot) -> dict[str, np.ndarray]:
     return out
 
 
+def perturbed_pose(prefab, pose: np.ndarray) -> np.ndarray:
+    """The pose with every revolute or prismatic dof moved to an interior point of its
+    limits (or by a small offset when the joint has no limits)."""
+    q = np.array(pose, dtype=np.float64)
+    offset = 6 if prefab.joints[0].type == physics.ArticulatedJointType.FREE else 0
+    k = 0
+    single_dof = (physics.ArticulatedJointType.REVOLUTE, physics.ArticulatedJointType.PRISMATIC)
+    movable = [prefab.joints[i] for i in range(len(prefab.joints)) if prefab.joints[i].type in single_dof]
+    for joint in movable:
+        axis = np.asarray(joint.axis, dtype=np.float64)
+        lo = float(np.asarray(joint.min_limit, dtype=np.float64) @ axis)
+        hi = float(np.asarray(joint.max_limit, dtype=np.float64) @ axis)
+        fraction = 0.3 + 0.4 * k / max(len(movable) - 1, 1)
+        q[offset + k] = lo + fraction * (hi - lo) if hi > lo else 0.1 + 0.05 * k
+        k += 1
+    return q
+
+
 def verify(urdf_prefab, bot_path: pathlib.Path) -> None:
     reloaded = robotics.load_bot_prefab_from_file(str(bot_path))
+    if reloaded.joints[0].type != urdf_prefab.joints[0].type:
+        # The package may fix the base the URDF import left floating; compare the
+        # kinematics with the same world joint on both sides.
+        joint = urdf_prefab.joints[0]
+        joint.type = reloaded.joints[0].type
+        urdf_prefab.joints[0] = joint
     for i in range(len(reloaded.links)):
         link = reloaded.links[i]
         link.collider_type = physics.ColliderType.NONE
@@ -286,8 +447,9 @@ def verify(urdf_prefab, bot_path: pathlib.Path) -> None:
         actor = bot.get_articulated_actor()
         q = np.zeros(actor.get_num_dofs())
         actor.get_articulated_pose(q)
-        # Move every joint a little so that axes and offsets are compared, not only the rest pose.
-        q[6:] = np.linspace(0.1, 0.4, len(q) - 6)
+        # Move every joint inside its limits so that axes and offsets are compared, not only
+        # the rest pose; the root's dofs (a Free world joint) stay where they are.
+        q[:] = perturbed_pose(prefab, q)
         actor.set_articulated_pose_from_joints(q)
         scene.step(1e-3)
         poses[label] = (actor.get_num_dofs(), link_transforms(scene, bot))
@@ -310,6 +472,12 @@ def main() -> None:
     parser.add_argument("--name", required=True)
     parser.add_argument("--mesh-dir", type=pathlib.Path, default=None)
     parser.add_argument("--default-pose", nargs="*", default=[], help="JOINT=VALUE pairs [rad]")
+    parser.add_argument(
+        "--base",
+        choices=["auto", "fixed", "floating"],
+        default="auto",
+        help="fixed base (Hard world joint) or floating (Free); auto reads the URDF (default)",
+    )
     args = parser.parse_args()
     default_pose = {}
     for item in args.default_pose:
@@ -317,7 +485,9 @@ def main() -> None:
         default_pose[key] = float(value)
     physics.initialize(num_worker_threads=0)
     try:
-        prefab, bot_path = convert(args.urdf.resolve(), args.out_dir.resolve(), args.name, args.mesh_dir, default_pose)
+        prefab, bot_path = convert(
+            args.urdf.resolve(), args.out_dir.resolve(), args.name, args.mesh_dir, default_pose, args.base
+        )
         verify(prefab, bot_path)
     finally:
         physics.shutdown()

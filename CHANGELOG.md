@@ -2,6 +2,29 @@
 
 All notable changes to this repository will be documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- `tools/urdf_to_superdex_bot.py`: a link without a collision mesh gets no shape, and the engine
+  gives a shapeless link no mass; the tool now folds the inertial of such a link into its parent
+  across a fixed joint (parallel-axis update in the parent's frame) and reports a shapeless link
+  on a moving joint, which stays massless. A URDF whose root hangs on a fixed joint, or whose
+  root is a bare `world` frame, now yields a fixed base (a Hard world joint) instead of a floating
+  one; `--base fixed|floating` overrides the detection. The joint dynamics the importer reads
+  from the URDF (viscous damping and Coulomb friction, joint inertia, limit stiffness and
+  damping) are written to the package. The package verification moves every joint inside its
+  limits instead of assuming a floating root, so fixed-base robots verify too. Mimic joints,
+  which the importer does not honor, are reported.
+
+### Added
+
+- `test/diffsim/test_diffsim_rollout.py::ArticulatedInitialPoseTest`: the driver's initial-pose
+  gradient of a torque-driven articulated actor against finite differences. The revolute
+  pendulum agrees to about 2e-5; the new `scenes.chain_revolute_prismatic` (a prismatic joint
+  after a revolute one) is off by about a tenth, an open issue of
+  `set_articulated_pose_from_joints_backward` kept as an expected failure.
+
 ## [1.0.0+diffsim.1] - 2026-09-08
 
 The differentiable-simulation fork of SuperDex 1.0.0. `+diffsim.N` counts this fork's releases on

@@ -869,3 +869,41 @@ def rod_on_plane(friction: str = "coulomb", height: float = 0.03):
     velocities[0::4] = 0.3
     rod.set_node_velocities_local(velocities)
     return scene, rod
+
+
+def chain_revolute_prismatic():
+    """A fixed-base chain of a revolute joint followed by a prismatic joint (the sliding
+    link moves along the rotating link's axis), as in a gripper on an arm. Returns
+    (scene, chain)."""
+    scene = physics.create_scene("diffsim_revolute_prismatic")
+    scene.set_gravity(GRAVITY)
+    joints = [
+        physics.ArticulatedJointParams(
+            name="j0", type=physics.ArticulatedJointType.REVOLUTE, axis=[1, 0, 0]
+        ),
+        physics.ArticulatedJointParams(
+            name="j1",
+            type=physics.ArticulatedJointType.PRISMATIC,
+            axis=[0, 0, 1],
+            parent_link_from_joint=physics.TransformRT([0.0, 0.0, -0.25]),
+        ),
+    ]
+    links = [
+        physics.ArticulatedLinkParams(
+            name="l0", parent_link=-1, shape=cube_shape(), density=1000.0
+        ),
+        physics.ArticulatedLinkParams(
+            name="l1", parent_link=0, shape=cube_shape(), density=1000.0
+        ),
+    ]
+    chain = scene.create_articulated_actor(
+        physics.ArticulatedActorParams(
+            name="chain",
+            joints=joints,
+            links=links,
+            world_from_root=physics.TransformRT([0.0, 0.0, 1.0]),
+        )
+    )
+    chain.set_articulated_pose_from_joints(np.array([0.3, 0.02]))
+    chain.set_articulated_joint_velocities(np.array([0.5, 0.1]))
+    return scene, chain
