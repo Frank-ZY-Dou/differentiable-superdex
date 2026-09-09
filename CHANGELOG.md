@@ -32,6 +32,12 @@ All notable changes to this repository will be documented here.
 
 ### Added
 
+- `diffsim_torch.PolicyRollout`: a policy may return `(controls, aux)` and `aux_losses(step, aux)`
+  adds a per-step loss on the side output; its gradient is folded into the per-step
+  vector-Jacobian product, so it reaches the parameters and the observation feedback path.
+  `PolicyRolloutResult.aux_loss` reports the auxiliary share of the loss.
+  `test/diffsim/test_diffsim_torch.py::PolicyRolloutTest::test_aux_loss_policy_vs_fd` checks
+  both heads' parameter gradients against finite differences of the whole objective.
 - `test/diffsim/test_diffsim_rollout.py::ArticulatedInitialPoseTest`: the driver's initial-pose
   gradient of a torque-driven articulated actor against finite differences, on the revolute
   pendulum with and without its pose controller and on the new

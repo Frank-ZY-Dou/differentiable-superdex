@@ -827,6 +827,8 @@ class PolicyRolloutResult:
     max_adjoint_residual: float
     steps_swept: int
     split_steps: list
+    # The auxiliary losses' share of ``loss`` (0 without ``aux_losses``).
+    aux_loss: float = 0.0
 
 
 class _PolicyRolloutLoss(torch.autograd.Function):
@@ -870,6 +872,13 @@ class PolicyRollout:
     :class:`TorchRollout`, the forward and backward sweeps both run when the object is
     called, and every call restores the initial scene state captured at construction.
 
+    A policy may return ``(controls, aux)`` instead of the controls alone: ``aux`` is any
+    torch value computed from the same input (a side head of the network), and
+    ``aux_losses(step, aux)`` returns a float64 scalar tensor whose value joins the loss.
+    Its gradient reaches the policy parameters and, through the observation the policy
+    used, the states of the rollout, in the same pass as the controls' gradient; a loss on
+    a side output therefore sees the feedback path too.
+
     The policy gradient is dL/dtheta = sum_k (du_k/dtheta)^T lambda_k, where lambda_k is
     the engine's gradient with respect to the targets applied at step k; the feedback
     enters through lambda_{x_{k-1}} += (do/dx_{k-1})^T (du_k/do)^T lambda_k, injected as
@@ -890,12 +899,13 @@ class PolicyRollout:
         time_feature: bool = False,
         terminal_losses: Sequence = (),
         step_losses: Callable[[int], Sequence] | None = None,
+        aux_losses: Callable[[int, object], torch.Tensor] | None = None,
         max_substep_levels: int = 0,
         substep_residual_tolerance: float | None = None,
     ):
         _require_double_precision()
-        if not terminal_losses and step_losses is None:
-            raise ValueError("provide terminal_losses and/or step_losses")
+        if not terminal_losses and step_losses is None and aux_losses is None:
+            raise ValueError("provide terminal_losses, step_losses and/or aux_losses")
         if history < 1:
             raise ValueError("history must be at least 1")
         if not control_actors and not force_actors:
@@ -911,6 +921,7 @@ class PolicyRollout:
         self.time_feature = bool(time_feature)
         self._terminal_losses = list(terminal_losses)
         self._step_losses = step_losses
+        self._aux_losses = aux_losses
         self._driver = DifferentiableRollout(
             scene,
             dt=dt,
@@ -1052,7 +1063,8 @@ class PolicyRollout:
         self.probe_initial_observations()
         # Forward: policy in the loop; keep each step's torch graph for the reverse sweep.
         obs_history = [self._observe()] * self.history  # newest first
-        graphs = []  # (obs_tensor, control_tensor) per step
+        graphs = []  # (obs_tensor, control_tensor, aux_loss_tensor or None) per step
+        aux_total = 0.0
         records: list[_StepRecord] = []
         # step_losses(step) is called once per step, on the step's final state; the sweep
         # differentiates those instances (see DifferentiableRollout.run).
@@ -1066,12 +1078,25 @@ class PolicyRollout:
                 with torch.enable_grad():
                     obs_t = torch.tensor(obs, dtype=torch.float64, requires_grad=True)
                     u_t = self.policy(obs_t)
-                if u_t.shape != (self.control_size,) or u_t.dtype != torch.float64:
+                    aux_t = None
+                    if isinstance(u_t, tuple):
+                        u_t, aux_t = u_t
+                    if self._aux_losses is not None:
+                        if aux_t is None:
+                            raise ValueError("aux_losses is given, so the policy must return (controls, aux)")
+                        aux_loss_t = self._aux_losses(step, aux_t)
+                        if not torch.is_tensor(aux_loss_t) or aux_loss_t.dtype != torch.float64 or aux_loss_t.dim() != 0:
+                            raise ValueError("aux_losses(step, aux) must return a float64 scalar tensor")
+                    else:
+                        aux_loss_t = None
+                if not torch.is_tensor(u_t) or u_t.shape != (self.control_size,) or u_t.dtype != torch.float64:
                     raise ValueError(
                         f"the policy must return a float64 tensor of shape ({self.control_size},), "
-                        f"got {tuple(u_t.shape)} {u_t.dtype}"
+                        f"got {u_t if not torch.is_tensor(u_t) else (tuple(u_t.shape), u_t.dtype)}"
                     )
-                graphs.append((obs_t, u_t))
+                if aux_loss_t is not None:
+                    aux_total += float(aux_loss_t.detach())
+                graphs.append((obs_t, u_t, aux_loss_t))
                 self._apply_controls(u_t.detach().numpy())
                 if driver.max_substep_levels == 0:
                     pre = scene.capture_state()
@@ -1103,7 +1128,7 @@ class PolicyRollout:
             driver._release(records)
             raise
         try:
-            loss_value = sum(loss.value() for loss in self._terminal_losses) + running_total
+            loss_value = sum(loss.value() for loss in self._terminal_losses) + running_total + aux_total
 
             # Reverse sweep. pending[k] is the gradient to inject at the state after step k
             # (the observation the policy used for later steps); the initial state (k = -1) is
@@ -1139,13 +1164,12 @@ class PolicyRollout:
                 self._accumulate_force_grad(lambda_u)
                 if first_of_step:
                     self._read_target_grad(lambda_u)
-                    obs_t, u_t = graphs[record.step]
-                    grads = torch.autograd.grad(
-                        u_t,
-                        [obs_t, *params],
-                        grad_outputs=torch.tensor(lambda_u, dtype=torch.float64),
-                        allow_unused=True,
-                    )
+                    obs_t, u_t, aux_loss_t = graphs[record.step]
+                    with torch.enable_grad():  # the sweep runs inside autograd.Function.forward
+                        objective = (u_t * torch.tensor(lambda_u, dtype=torch.float64)).sum()
+                        if aux_loss_t is not None:
+                            objective = objective + aux_loss_t
+                    grads = torch.autograd.grad(objective, [obs_t, *params], allow_unused=True)
                     for accum, g in zip(param_grads, grads[1:]):
                         if g is not None:
                             accum += g.detach().numpy()
@@ -1169,6 +1193,7 @@ class PolicyRollout:
                 max_adjoint_residual=max_residual,
                 steps_swept=steps_swept,
                 split_steps=[entry for entry in split_steps if entry[1] > 1],
+                aux_loss=aux_total,
             )
             return loss_value, [torch.tensor(g, dtype=torch.float64) for g in param_grads]
         finally:

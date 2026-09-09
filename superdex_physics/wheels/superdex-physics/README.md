@@ -185,6 +185,13 @@ it before the scene's first step) and reads the force of the last step. The obse
 initial state comes from a probe step that is restored afterwards, and is a constant of the
 rollout.
 
+A policy may also return `(controls, aux)`, where `aux` is any torch value computed from the
+same input (a side head of the network); `PolicyRollout(..., aux_losses=fn)` then adds
+`fn(step, aux)`, a float64 scalar tensor, to the loss at every step. Its gradient reaches the
+policy parameters and, through the observation the policy used, the states of the rollout, in
+the same adjoint pass as the controls' gradient, so a loss on a side output (a predicted
+quantity the rollout does not actuate) sees the feedback path too.
+
 ### Examples and demos
 
 All examples live in `superdex_physics/examples` and need `SUPERDEX_PRECISION=double`.

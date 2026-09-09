@@ -913,6 +913,83 @@ class PolicyRolloutTest(unittest.TestCase):
                 self.assertLessEqual(rel, self.TOL, f"controller={with_controller} {name}: rel {rel}")
             scene.release_all_states()
 
+    def test_aux_loss_policy_vs_fd(self) -> None:
+        """A policy with a side head: torques and an auxiliary output from the joint pose,
+        a per-step loss on the side output joining the pose loss. The parameter gradients
+        (both heads, feedback included) against finite differences of the whole objective."""
+        diffsim_torch = _make_bridge_module()
+        scene, chain = scenes.pendulum(with_controller=False)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        n = chain.get_num_dofs()
+        pose0 = np.zeros(n)
+        chain.get_articulated_pose(pose0)
+        terminal = ArticulatedPoseErrorLoss(chain, ref=pose0 + 0.1)
+        num_steps = 5
+        aux_targets = [0.1 * step * np.ones(2) for step in range(num_steps)]
+
+        class TwoHeads(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.torque = torch.nn.Linear(n, n).double()
+                self.side = torch.nn.Linear(n, 2).double()
+
+            def forward(self, x):
+                return self.torque(x), self.side(x)
+
+        policy = TwoHeads()
+        with torch.no_grad():
+            policy.torque.weight.copy_(torch.tensor(0.3 * np.cos(np.arange(n * n, dtype=np.float64)).reshape(n, n)))
+            policy.torque.bias.copy_(torch.tensor(0.05 * np.arange(1, n + 1, dtype=np.float64)))
+            policy.side.weight.copy_(torch.tensor(0.2 * np.sin(np.arange(2 * n, dtype=np.float64)).reshape(2, n)))
+            policy.side.bias.copy_(torch.tensor([0.01, -0.02], dtype=torch.float64))
+
+        def aux_losses(step, aux):
+            target = torch.tensor(aux_targets[step], dtype=torch.float64)
+            return 0.5 * ((aux - target) ** 2).sum()
+
+        force_dofs = np.arange(n, dtype=np.int32)
+        rollout = diffsim_torch.PolicyRollout(
+            scene, dt=DT, num_steps=num_steps, policy=policy,
+            observations=[diffsim_torch.ArticulatedPoseObservation(chain)],
+            force_actors=[chain], terminal_losses=[terminal], aux_losses=aux_losses,
+        )
+        self.addCleanup(rollout.close)
+        loss = rollout()
+        loss.backward()
+        self.assertGreater(rollout.last_result.aux_loss, 0.0)
+        analytic = {name: p.grad.detach().numpy().copy() for name, p in policy.named_parameters()}
+        state_init = scene.capture_state()
+        arrays = {name: p.detach().numpy().copy() for name, p in policy.named_parameters()}
+
+        def objective() -> float:
+            scene.restore_state(state_init, False)
+            obs = np.zeros(n)
+            total = 0.0
+            for step in range(num_steps):
+                chain.get_articulated_pose(obs)
+                u = arrays["torque.weight"] @ obs + arrays["torque.bias"]
+                side = arrays["side.weight"] @ obs + arrays["side.bias"]
+                total += 0.5 * float(np.sum((side - aux_targets[step]) ** 2))
+                chain.set_external_forces_on_dofs(force_dofs, np.ascontiguousarray(u))
+                scene.step(DT)
+            return terminal.value() + total
+
+        self.assertAlmostEqual(objective(), float(loss.detach()), delta=1e-12)
+        for name, array in arrays.items():
+            fd = np.zeros_like(array)
+            for index in np.ndindex(array.shape):
+                values = []
+                for sign in (+1.0, -1.0):
+                    saved = array[index]
+                    array[index] = saved + sign * self.FD_EPS
+                    values.append(objective())
+                    array[index] = saved
+                fd[index] = (values[0] - values[1]) / (2.0 * self.FD_EPS)
+            rel = np.linalg.norm(analytic[name] - fd) / np.linalg.norm(fd)
+            self.assertLessEqual(rel, self.TOL, f"{name}: rel {rel}")
+        scene.release_all_states()
+
     def test_contact_force_observation_policy_vs_fd(self) -> None:
         """A policy fed the pushed cube's total contact force (a tactile signal), the chain
         pose and the time drives the chain pushing the cube; the loss is the cube's final
