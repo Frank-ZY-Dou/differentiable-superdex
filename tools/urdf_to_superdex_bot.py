@@ -35,8 +35,7 @@ by the URDF (viscous damping and Coulomb friction, joint inertia, the importer's
 stiffness and damping) are written to the package. A root that is a bare ``world`` frame
 (no inertial, no mesh, the ROS convention for a robot welded to the world) makes the world
 joint Hard (fixed base); any other root stays floating unless ``--base fixed`` says
-otherwise, and ``--base floating`` keeps a Free root. The importer drops the rotation of an
-inertial origin, which the tool reports.
+otherwise, and ``--base floating`` keeps a Free root.
 Mimic joints are not imported by SuperDex: their dofs are independent in the package.
 
     python tools/urdf_to_superdex_bot.py <urdf> <out_dir> --name <bot_name> [--mesh-dir DIR]
@@ -263,8 +262,8 @@ def fold_shapeless_links(prefab, meshes) -> None:
 
 
 def urdf_facts(urdf: pathlib.Path, prefab, meshes) -> dict:
-    """Whether the base is fixed, the mimic joints, and the links whose inertial frame is
-    rotated. The importer's root is the one link that is no joint's child; the base is fixed
+    """Whether the base is fixed, and the mimic joints. The importer's root is the one link
+    that is no joint's child; the base is fixed
     when that root is a bare ``world`` frame (no inertial, no mesh), the ROS convention for a
     robot welded to the world. A bare root under another name (``base_link``,
     ``base_footprint``) stays floating, as does a root that carries a body."""
@@ -278,12 +277,7 @@ def urdf_facts(urdf: pathlib.Path, prefab, meshes) -> dict:
         and refs["collision"] is None
     )
     mimics = [joint.get("name") for joint in root.findall("joint") if joint.find("mimic") is not None]
-    rotated_inertials = []
-    for link in root.findall("link"):
-        origin = link.find("inertial/origin")
-        if origin is not None and any(abs(float(v)) > 0.0 for v in (origin.get("rpy") or "0 0 0").split()):
-            rotated_inertials.append(link.get("name"))
-    return {"fixed_base": bare_root, "mimics": mimics, "rotated_inertials": rotated_inertials}
+    return {"fixed_base": bare_root, "mimics": mimics}
 
 
 def joint_type_name(joint_type) -> str:
@@ -309,11 +303,6 @@ def convert(
     fixed_base = facts["fixed_base"] if base == "auto" else base == "fixed"
     if facts["mimics"]:
         print(f"mimic joints are not imported, their dofs are independent in the package: {facts['mimics']}")
-    if facts["rotated_inertials"]:
-        print(
-            "the importer keeps the inertia tensor in the inertial frame and drops the rotation of "
-            f"<inertial><origin rpy>, so these links' tensors are misoriented: {facts['rotated_inertials']}"
-        )
     fold_shapeless_links(prefab, meshes)
     out_dir.mkdir(parents=True, exist_ok=True)
     links = []

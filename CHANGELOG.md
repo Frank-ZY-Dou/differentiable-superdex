@@ -6,6 +6,41 @@ All notable changes to this repository will be documented here.
 
 ### Fixed
 
+- The rotation gradients of Free and Spherical joints. The chart transport of an output gradient
+  (`diffsim.get_articulated_pose_backward`, the seed of every rollout loss on a joint pose)
+  applied the rotation-vector Jacobian where a gradient needs its transpose, so a round trip
+  through the two chart conversions returned the gradient rotated by the transpose of the joint
+  rotation instead of itself, and every gradient reaching such a joint's rotation was off by the
+  joint rotation: tens of percent at 0.3 rad, more than the gradient at 1.5 rad, and a smaller
+  error growing with the rotation a step produces even from the identity (the transport is
+  evaluated at the final pose). The velocity adjoints
+  (`set_articulated_joint_velocities_backward`, `set_articulated_target_velocity_backward`)
+  also applied the pose chart transport to what is a Lie-algebra quantity (the joint's angular
+  velocity in its outer frame, which the Jacobian maps to the link twists and the step integrates
+  as a left rotation increment). The forward was consistent throughout; revolute and prismatic
+  joints, which have no rotation chart, were exact. The engine's own C++ conversion test had
+  not caught the transposition because its merit was the pose's squared norm, whose gradient is
+  parallel to the rotation vector, an eigenvector of both chart Jacobians; it now adds a random
+  linear term. Three smaller defects of the same joints surfaced underneath and are fixed with
+  it: the articulated velocity adjoint chained the links' and joints' rotation increments as
+  dt (the rigid one chains through the increment a set angular velocity stands for,
+  DR = exp(phi), phi = asin(dt |omega|) omega/|omega|; that chain is now shared, applied per
+  link before the Jacobian transposes it and per Free/Spherical joint, and the initial-pose
+  adjoint's Jacobian term uses the same chained adjoint), leaving an error of order dt |omega|
+  orthogonal to omega (5e-4 at dt = 0.01, |omega| = 0.3); the controller paths chained the
+  previous target's dependence on a velocity (target_old = exp(-dt v) target) and on the new
+  target as the identity, missing the increment's left Jacobian and the rotation R(-dt omega)
+  on the rotations (1e-3 and 5e-3); and the adjoint operator carried the moving-chart term of an
+  external torque, J^T = H + 1/2 [tau]x, for standalone rigid actors only, not for the torque
+  on a Free or Spherical joint, which enters through the same merit on the joint transform
+  (4e-5 at dt = 0.01, 0.3 N m). Initial pose, initial velocity, external forces and torques on
+  every dof, controller targets and target velocities of a Free root in free fall and of a
+  Spherical joint on a rotated parent (with a rotated rest frame, a pose controller, joint
+  inertia and friction) now agree with central finite differences to 1e-6 relative, at
+  rotations of 1.2 rad and near the identity.
+- The URDF importer expresses a link's inertia tensor in the link frame: the tensor URDF gives
+  in the inertial frame is rotated by the `rpy` of `<inertial><origin>`, which the importer used
+  to parse and drop. `tools/urdf_to_superdex_bot.py` no longer reports such links.
 - The initial-pose input adjoint of articulated actors
   (`diffsim.set_articulated_pose_from_joints_backward`) missed the dependence of the links'
   previous deltas on the pose: the link velocities are J(q) v, so a loss also depends on the
@@ -17,7 +52,7 @@ All notable changes to this repository will be documented here.
   (other scenes keep the engine's behavior). On a revolute-prismatic chain the gradient was
   off by a tenth, on a revolute pendulum by 1e-4; it agrees with finite differences to 1e-6
   now on revolute and prismatic chains (the rotation charts of Free and Spherical joints are
-  a separate open issue, see below). Initial velocities of zero were unaffected. The stored
+  fixed above). Initial velocities of zero were unaffected. The stored
   double-precision reference gradients were regenerated.
 - `tools/urdf_to_superdex_bot.py`: a link without a collision mesh gets no shape, and the engine
   gives a shapeless link no mass; the tool now folds the inertial of such a link into its parent
@@ -32,6 +67,19 @@ All notable changes to this repository will be documented here.
 
 ### Added
 
+- `test/diffsim/test_diffsim_rollout.py::ArticulatedRotationChartTest`: the driver's initial-pose,
+  initial-velocity, external-force and controller-target gradients against finite differences
+  for a Free root in free fall (`scenes.free_chain`, at 1.2 rad and near the identity) and for a
+  Spherical joint on a rotated parent with a rotated rest frame
+  (`scenes.chain_revolute_spherical`, with and without a pose controller, and with joint inertia
+  and viscous friction); `test_diffsim_gradients.py::TargetVelocityBackwardTest` gains the
+  Spherical joint.
+- The rollout driver reads external-force gradients on every joint dof of an articulated actor
+  (`ActorGradients.external_forces`, `force_dofs`), the torques of Free and Spherical joints
+  included; it used to read the single-dof joints only. `TorchRollout` and `PolicyRollout`
+  force actors follow.
+- `superdex_robotics/test_python/test_superdex_robotics.py::UrdfInertialImportTest`: a rotated
+  inertial origin lands in the link frame as R I R^T; an unrotated one is unchanged.
 - `diffsim_torch.PolicyRollout`: a policy may return `(controls, aux)` and `aux_losses(step, aux)`
   adds a per-step loss on the side output; its gradient is folded into the per-step
   vector-Jacobian product, so it reaches the parameters and the observation feedback path.
@@ -44,16 +92,6 @@ All notable changes to this repository will be documented here.
   `scenes.chain_revolute_prismatic` (a prismatic joint after a revolute one), with the initial
   state set as pose then velocities, velocities then pose, and the pose alone on a state that
   has stepped.
-
-### Known issues
-
-- The initial-pose and initial-velocity gradients of a Free root or a Spherical joint away from
-  the identity rotation disagree with finite differences by tens of percent, before and after
-  this release's fix; the rotation-vector transports and the joint-level rotation adjoints are
-  under review. Revolute and prismatic joints are exact to 1e-6.
-- The URDF importer drops the rotation of `<inertial><origin rpy>`, so such a link's inertia
-  tensor is expressed in the inertial frame instead of the link frame;
-  `tools/urdf_to_superdex_bot.py` reports the links concerned.
 
 ## [1.0.0+diffsim.1] - 2026-09-08
 

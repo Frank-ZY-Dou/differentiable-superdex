@@ -43,7 +43,7 @@ Differentiable inputs (each group is opt-in at construction):
   shape ``(num_steps, total_control_dofs)``;
 - ``forces`` - per-step external forces, shape
   ``(num_steps, total_force_dofs)`` (all six world-frame DoFs of a standalone
-  rigid actor; the single-DoF joints of an articulated one);
+  rigid actor; every joint dof of an articulated one);
 - ``gravity`` - the scene gravity vector, shape ``(3,)``;
 - ``contact_params`` - per-actor contact material parameters, shape
   ``(num_contact_actors, 4)`` in the engine's gradient order
@@ -406,13 +406,13 @@ class TorchRollout:
         for actor in force_actors:
             entry = _entry(actor, "force")
             # The force DoFs the driver recorded for the actor decide: six for a
-            # standalone rigid body, the single-DoF joints of an articulated one, none
+            # standalone rigid body, every joint dof of an articulated one, none
             # for soft and rod actors (before 2026-09-08 a rod fell through to the
             # rigid case and was given six force DoFs it does not have).
             if not entry.force_dofs:
                 raise ValueError(
                     f"force actor {entry.name!r} takes no external forces (soft and rod "
-                    "actors carry none; an articulated actor needs single-DoF joints)"
+                    "actors carry none; an articulated actor needs a joint with dofs)"
                 )
             dofs = np.asarray(entry.force_dofs, dtype=np.int32)
             self._force_entries.append(_ForceEntry(entry.actor, dofs))
@@ -859,7 +859,7 @@ class PolicyRollout:
     ``(history * total_observation_size,)`` - the newest observation first - to a float64
     tensor of shape ``(total_control_size,)``: the concatenated pose-controller targets of
     ``control_actors`` followed by the external forces on the force DoFs of ``force_actors``
-    (all six world-frame DoFs of a standalone rigid actor, the single-DoF joints of an
+    (all six world-frame DoFs of a standalone rigid actor, every joint dof of an
     articulated one; torque control of an articulated actor without a pose controller is the
     ``force_actors``-only case); every parameter of ``policy.parameters()`` that requires a
     gradient receives ``.grad`` from ``loss.backward()``. Observations are the ``value()`` /

@@ -294,6 +294,29 @@ void TransportOutputOfLieJacobian(
   }
 }
 
+void TransportGradientRotationVectorToLie(
+    Span<ArticulatedJointType const> jointTypes,
+    Span<ArticulatedDofInfo const> dofInfo,
+    ColumnVectorView<real const> u,
+    ColumnVectorView<real> inOutGrad) {
+  MOCHI_ASSERT_VERBOSE(u.Rows() == GetReducedDofsSize(dofInfo), "Invalid u size.");
+  MOCHI_ASSERT_VERBOSE(inOutGrad.Rows() == GetReducedDofsSize(dofInfo), "Invalid gradient size.");
+  for (int joint = 0; joint < isize(jointTypes); ++joint) {
+    // Only the rotation gradients of free and spherical joints have a chart to transport
+    if (jointTypes[joint] != ArticulatedJointType::Free &&
+        jointTypes[joint] != ArticulatedJointType::Spherical) {
+      continue; // Nothing to do
+    }
+
+    // dL/dtheta = (du/dtheta)^T dL/du: the row-vector product of the gradient with du/dtheta
+    int const dofOffset = dofInfo[joint].GetRotOffset();
+    Vec4r const rotVector = Load<RigidSize::kDRot, Vec4r>(u.data() + dofOffset);
+    VMatrix3x3r const transport = DRotVectorDRotIncrement(rotVector);
+    Vec4r const grad = Load<RigidSize::kDRot, Vec4r>(inOutGrad.data() + dofOffset);
+    Store<RigidSize::kDRot>(inOutGrad.data() + dofOffset, DotVecMat3x3(grad, transport));
+  }
+}
+
 void ChainArticulatedGradientDDeltaDOld(
     Span<ArticulatedJointType const> jointTypes,
     Span<ArticulatedDofInfo const> dofInfo,

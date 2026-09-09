@@ -293,16 +293,17 @@ void SetArticulatedJointVelocities(
 
 // The dependence of a loss on the joint pose through the link velocities derived from it: the
 // links' previous deltas are J(q) v dt, so a pose set before the joint velocities moves them
-// through the Jacobian. Adds dt * (d(J(q) v)/dq)^T linkDeltaGrad to outGrad, with the Jacobian
+// through the Jacobian. Adds (d(J(q) v)/dq)^T linkTwistGrad to outGrad, with the Jacobian
 // differentiated by central differences in the dofs (rotation vectors for 3D rotations).
-// linkDeltaGrad is the adjoint of the links' deltas, one row per Jacobian row.
+// linkTwistGrad is the adjoint of the links' derived steps chained to the link twists J v (dt on
+// the translations, the rotation-increment chain of the velocity adjoints on the rotations), one
+// row per Jacobian row.
 void AddLinkDeltaPoseGradient(
     entt::registry const& reg,
     entt::entity e,
     Span<real const> dofs,
     Span<real const> vel,
-    ColumnVectorView<real const> linkDeltaGrad,
-    real dt,
+    ColumnVectorView<real const> linkTwistGrad,
     Span<real> outGrad);
 
 // Add a pose controller (unless one already exists)

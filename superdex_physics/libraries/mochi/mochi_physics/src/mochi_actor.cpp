@@ -2876,6 +2876,10 @@ static void ConvertArticulatedGradientLieToRotationVectorImpl(
   diffsim::ConvertArticulatedGradientLieToRotationVector(actor, pose, outGrad, ErrorAssert{});
 }
 
+// Defined with SetArticulatedPoseFromJointsBackward below.
+static void ChainSameStepPreviousTargetAdjoint(
+    entt::registry const& reg, entt::entity e, Actor const* actor, Span<real> inOutGrad);
+
 void diffsim::SetArticulatedTargetPoseBackward(
     Actor const* actor,
     Span<real> outGradTargetPose,
@@ -2900,14 +2904,123 @@ void diffsim::SetArticulatedTargetPoseBackward(
   AsView(outGradTargetPose) = AsConstView(targetPoseGrad.current);
 
   // If targetOld was set at the same step and depends on targetNew, add its gradient contribution.
-  // This happens when: targetOld = targetNew - dt * velocity (so d(targetOld)/d(targetNew) = 1).
-  // The total gradient is dL/d(targetNew) + dL/d(targetOld).
+  // This happens when targetOld = targetNew (-) dt * velocity: d(targetOld)/d(targetNew) is the
+  // identity on translations and single dofs and the rotation R(-dt omega) on the rotations of
+  // Free and Spherical joints (ChainSameStepPreviousTargetAdjoint). The total gradient is
+  // dL/d(targetNew) + dL/d(targetOld) chained.
   if (owner.oldPoseStep == owner.newPoseStep && owner.oldPoseOwner == TargetOwner::TargetPose) {
-    AsView(outGradTargetPose) += AsConstView(targetPoseGrad.previous);
+    MOCHI_FILO_STACK_ALLOCATOR(allocator, 256 * sizeof(real));
+    DynamicArray<real> previous(&allocator);
+    previous.resize_noinit(actor->GetNumDofs());
+    AsView(MakeSpan(previous)) = AsConstView(targetPoseGrad.previous);
+    ChainSameStepPreviousTargetAdjoint(reg, e, actor, MakeSpan(previous));
+    for (int i = 0; i < actor->GetNumDofs(); ++i) {
+      outGradTargetPose[i] += previous[i];
+    }
   }
 
   // Convert from Lie gradient to rotation vector gradient.
   ConvertArticulatedGradientLieToRotationVectorImpl(actor, /*useTarget*/ true, outGradTargetPose);
+}
+
+// Defined with SetVelocityBackward below; shared by the rigid and articulated velocity adjoints.
+static Vec4r AngularVelocityGradientFromIncrementAdjoint(
+    Vec4r const& omega, Vec4r const& lambdaDelta, real dt, Error& error);
+
+// The adjoint of the links' derived steps chained to the link twists J v: the derived step of a
+// link is (v_com dt, DR = exp(phi(omega))) with (v_com, omega) its twist, so the chain is dt on the
+// translation rows and the rotation-increment chain of SetVelocityBackward on the rotation rows.
+// Reads the joint velocities the setter set (the scene holds the restored initial state) into
+// outVel and writes the chained adjoint into outLambdaLinks.
+static void ChainLinkTwistAdjoint(
+    entt::registry const& reg,
+    entt::entity e,
+    Actor const* actor,
+    real dt,
+    DynamicArray<real>& outVel,
+    ColumnVector<real>& outLambdaLinks,
+    Error& error) {
+  auto const& derivedStepGrad = reg.get<CDiffDerivedStepGrad const>(e);
+  auto const& jacobian = reg.get<CArticulatedJacobian const>(e);
+  int const numDofs = actor->GetNumDofs();
+  int const linkDofs = jacobian.value.Rows();
+  outVel.resize_noinit(numDofs);
+  actor->GetArticulatedJointVelocities(outVel, ErrorAssert{});
+  ColumnVector<real> velFull(linkDofs);
+  velFull = jacobian.value * AsConstView(MakeConstSpan(outVel));
+  outLambdaLinks.Resize(linkDofs);
+  outLambdaLinks = derivedStepGrad.value.BottomRows(linkDofs);
+  for (int offset = 0; offset < linkDofs; offset += RigidSize::kDAll) {
+    for (int i = 0; i < RigidSize::kDTrans; ++i) {
+      outLambdaLinks[offset + i] *= dt;
+    }
+    Vec4r const omega = Load<RigidSize::kDRot, Vec4r>(&velFull[offset + RigidSize::kDTrans]);
+    Vec4r const lambdaDelta =
+        Load<RigidSize::kDRot, Vec4r>(&outLambdaLinks[offset + RigidSize::kDTrans]);
+    Vec4r const grad = AngularVelocityGradientFromIncrementAdjoint(omega, lambdaDelta, dt, error);
+    MOCHI_ERROR_RETURN(error);
+    Store<RigidSize::kDRot>(&outLambdaLinks[offset + RigidSize::kDTrans], grad);
+  }
+}
+
+// A controller velocity v (the joint velocities, or a target velocity) sets the previous target
+// as the left Lie increment -dt v of the current target (SetOldControllerTargets): the rotation
+// of a Free or Spherical joint moves by exp(phi), phi = -dt omega, and a change of omega moves
+// the previous target by the left increment J_l(phi) (-dt domega). Applies J_l(phi)^T to the
+// rotation blocks of the previous-target adjoint in place; the -dt factor and the other dofs are
+// the caller's. (The stored previous target cannot serve: after the sweep the scene holds the
+// restored old state, whose previous target is the step before's.)
+static void ChainPreviousTargetIncrementAdjoint(
+    entt::registry const& reg,
+    entt::entity e,
+    Span<real const> velocity,
+    real dt,
+    Span<real> inOutGrad) {
+  auto const* joints = reg.get<CArticulatedBodyShape const>(e).shape->GetJointsData();
+  for (int joint = 0; joint < isize(joints->jointTypes); ++joint) {
+    if (joints->jointTypes[joint] != ArticulatedJointType::Free &&
+        joints->jointTypes[joint] != ArticulatedJointType::Spherical) {
+      continue;
+    }
+    int const dofOffset = joints->dofInfo[joint].GetRotOffset();
+    Vec4r const phi = (-dt) * Load<RigidSize::kDRot, Vec4r>(velocity.data() + dofOffset);
+    Vec4r const grad = Load<RigidSize::kDRot, Vec4r>(inOutGrad.data() + dofOffset);
+    Store<RigidSize::kDRot>(
+        inOutGrad.data() + dofOffset, DotVecMat3x3(grad, DRotIncrementDRotVector(phi)));
+  }
+}
+
+// When a velocity set the previous target in the same step as the new target,
+// target_old = exp(phi) target_new with phi = -dt v (SetOldControllerTargets), so a left increment
+// eps of the new target moves the previous one by the left increment R(phi) eps: the previous
+// target's adjoint reaches the new target through R(phi)^T on the rotation blocks of Free and
+// Spherical joints (the identity on the other dofs, and everywhere when no velocity was set).
+// Applies that in place.
+static void ChainSameStepPreviousTargetAdjoint(
+    entt::registry const& reg, entt::entity e, Actor const* actor, Span<real> inOutGrad) {
+  auto const& owner = reg.get<CTargetOwners const>(e);
+  auto const dt = static_cast<real>(reg.ctx<CStatePair const>().stepDt);
+  MOCHI_FILO_STACK_ALLOCATOR(allocator, 256 * sizeof(real));
+  DynamicArray<real> velocity(&allocator);
+  velocity.resize_noinit(actor->GetNumDofs());
+  if (owner.velOwner == TargetOwner::JointVelocities) {
+    actor->GetArticulatedJointVelocities(velocity, ErrorAssert{});
+  } else if (owner.velOwner == TargetOwner::TargetVelocity) {
+    AsView(MakeSpan(velocity)) = AsConstView(reg.get<CControllerTargetVelocity const>(e).value);
+  } else {
+    return; // the previous target is the new target itself
+  }
+  auto const* joints = reg.get<CArticulatedBodyShape const>(e).shape->GetJointsData();
+  for (int joint = 0; joint < isize(joints->jointTypes); ++joint) {
+    if (joints->jointTypes[joint] != ArticulatedJointType::Free &&
+        joints->jointTypes[joint] != ArticulatedJointType::Spherical) {
+      continue;
+    }
+    int const dofOffset = joints->dofInfo[joint].GetRotOffset();
+    Vec4r const phi = (-dt) * Load<RigidSize::kDRot, Vec4r>(velocity.data() + dofOffset);
+    Vec4r const grad = Load<RigidSize::kDRot, Vec4r>(inOutGrad.data() + dofOffset);
+    Store<RigidSize::kDRot>(inOutGrad.data() + dofOffset, DotVecMat3x3(grad, Rodrigues(phi)));
+  }
 }
 
 void diffsim::SetArticulatedPoseFromJointsBackward(
@@ -2952,13 +3065,14 @@ void diffsim::SetArticulatedPoseFromJointsBackward(
     MOCHI_FILO_STACK_ALLOCATOR(allocator, 2 * 256 * sizeof(real));
     DynamicArray<real> dofs(&allocator);
     dofs.resize_noinit(numDofs);
-    DynamicArray<real> vel(&allocator);
-    vel.resize_noinit(numDofs);
     actor->GetArticulatedPose(dofs, ErrorAssert{});
-    actor->GetArticulatedJointVelocities(vel, ErrorAssert{});
     auto const dt = static_cast<real>(reg.ctx<CStatePair const>().stepDt);
+    DynamicArray<real> vel(&allocator);
+    ColumnVector<real> lambdaLinks;
+    ChainLinkTwistAdjoint(reg, e, actor, dt, vel, lambdaLinks, error);
+    MOCHI_ERROR_RETURN(error);
     articulated::compound::AddLinkDeltaPoseGradient(
-        reg, e, dofs, vel, derivedStepGrad.value.BottomRows(linkDofs), dt, outGradPose);
+        reg, e, dofs, vel, AsConstView(lambdaLinks), outGradPose);
   }
 }
 
@@ -2989,11 +3103,15 @@ void diffsim::SetArticulatedTargetVelocityBackward(
   // scene holds the restored old state, whose delta time is that of the step before it).
   auto const dt = static_cast<real>(reg.ctx<CStatePair const>().stepDt);
   AsView(outGradTargetVelocity) = AsConstView(targetPoseGrad.previous);
+  // The target velocity enters as the left Lie increment -dt * velocity of the target pose
+  // (SetOldControllerTargets), a Lie-algebra quantity without a rotation-vector chart; the
+  // rotations of Free and Spherical joints chain through the increment's left Jacobian. The
+  // velocity is the one SetArticulatedTargetVelocity stored for the step (the scene holds the
+  // restored old state, where it is still pending).
+  auto const& targetVelocity = reg.get<CControllerTargetVelocity const>(e).value;
+  ChainPreviousTargetIncrementAdjoint(
+      reg, e, MakeConstSpan(targetVelocity), dt, outGradTargetVelocity);
   AsView(outGradTargetVelocity) *= -dt;
-
-  // Convert from Lie gradient to rotation vector gradient.
-  ConvertArticulatedGradientLieToRotationVectorImpl(
-      actor, /*useTarget*/ true, outGradTargetVelocity);
 }
 
 void diffsim::SetExternalForcesOnDofsBackward(
@@ -3041,10 +3159,15 @@ void diffsim::SetArticulatedJointVelocitiesBackward(
 
   // SetArticulatedJointVelocities sets joint velocities v. Two gradient contributions:
   //
-  // 1. Velocity path: v determines the derived step Δx = v · dt, so
-  //    dL/dv = dt · ProjectDerivedStateGradient(dL/dΔx).
-  //    For articulated actors, the projection is:
-  //    outGrad = derivedStepGrad[:numDofs] + J^T * derivedStepGrad[numDofs:]
+  // 1. Velocity path: v determines the derived step of the previous stage, in link space (the
+  //    twists J v: translation delta v_com dt, rotation increment DR = exp(phi(omega)) of every
+  //    link, as for a standalone rigid actor) and in joint space (dt v on translations and single
+  //    dofs, the same rotation increment of a Free or Spherical joint's angular velocity; the joint
+  //    velocities of a differentiable scene get the increment semantics in
+  //    articulated::compound::UpdateVSym). So
+  //    dL/dv = J^T [dt lambda_x ; G(omega_link, lambda_delta)] + [dt lambda_q ; G(omega_joint, ...)]
+  //    with G the rotation-increment chain of SetVelocityBackward. Chaining dt alone on the
+  //    rotations (the former formula) missed a term of order dt |omega| orthogonal to omega.
   //
   // 2. Controller path (if pose controller exists): v sets target_old = target_current - dt * v,
   //    so dL/dv += -dt · dL/d(target_old).
@@ -3053,22 +3176,68 @@ void diffsim::SetArticulatedJointVelocitiesBackward(
   auto const dt = static_cast<real>(reg.ctx<CStatePair const>().stepDt);
   auto const& derivedStepGrad = reg.get<CDiffDerivedStepGrad const>(e);
   auto const& jacobian = reg.get<CArticulatedJacobian const>(e);
+  auto const* joints = reg.get<CArticulatedBodyShape const>(e).shape->GetJointsData();
 
-  // Contribution 1: velocity path via ProjectDerivedStateGradient.
-  int const linkDofs = jacobian.value.Rows();
+  // Contribution 1, link path: the chain of each link's derived step, then the Jacobian.
+  MOCHI_FILO_STACK_ALLOCATOR(allocator, 256 * sizeof(real));
+  DynamicArray<real> vel(&allocator);
+  ColumnVector<real> lambdaLinks;
+  ChainLinkTwistAdjoint(reg, e, actor, dt, vel, lambdaLinks, error);
+  MOCHI_ERROR_RETURN(error);
   auto outGrad = AsView(outGradVelocities);
-  outGrad = dt * derivedStepGrad.value.TopRows(numDofs);
-  outGrad += dt * (jacobian.value.Transpose() * derivedStepGrad.value.BottomRows(linkDofs));
+  outGrad = jacobian.value.Transpose() * AsConstView(lambdaLinks);
 
-  // Contribution 2: controller path (if pose controller exists and this function owns
-  // PreviousInput).
-  if (reg.all_of<CControllerConstraints>(e) &&
-      reg.get<CTargetOwners const>(e).velOwner == TargetOwner::JointVelocities) {
-    outGrad += (-dt) * AsConstView(reg.get<CDiffTargetPoseGrad const>(e).previous);
+  // Contribution 1, joint path: the chain of the reduced derived step.
+  for (int joint = 0; joint < isize(joints->jointTypes); ++joint) {
+    auto const& info = joints->dofInfo[joint];
+    switch (joints->jointTypes[joint]) {
+      case ArticulatedJointType::Free: {
+        int const transOffset = info.GetTransOffset();
+        for (int i = 0; i < RigidSize::kDTrans; ++i) {
+          outGrad[transOffset + i] += dt * derivedStepGrad.value[transOffset + i];
+        }
+      }
+        [[fallthrough]];
+      case ArticulatedJointType::Spherical: {
+        int const rotOffset = info.GetRotOffset();
+        Vec4r const omega = Load<RigidSize::kDRot, Vec4r>(&vel[rotOffset]);
+        Vec4r const lambdaDelta =
+            Load<RigidSize::kDRot, Vec4r>(&derivedStepGrad.value[rotOffset]);
+        Vec4r const grad =
+            AngularVelocityGradientFromIncrementAdjoint(omega, lambdaDelta, dt, error);
+        MOCHI_ERROR_RETURN(error);
+        for (int i = 0; i < RigidSize::kDRot; ++i) {
+          outGrad[rotOffset + i] += Get(grad, i);
+        }
+      } break;
+      case ArticulatedJointType::Prismatic:
+      case ArticulatedJointType::Revolute: {
+        outGrad[info.offset] += dt * derivedStepGrad.value[info.offset];
+      } break;
+      default:
+        break; // Hard joints carry no dofs
+    }
   }
 
-  // Convert from Lie gradient to rotation vector gradient.
-  ConvertArticulatedGradientLieToRotationVectorImpl(actor, /*useTarget*/ false, outGradVelocities);
+  // Contribution 2: controller path (if pose controller exists and this function owns
+  // PreviousInput): target_old = exp(-dt v) target, chained through the increment's left
+  // Jacobian on the rotations of Free and Spherical joints.
+  if (reg.all_of<CControllerConstraints>(e) &&
+      reg.get<CTargetOwners const>(e).velOwner == TargetOwner::JointVelocities) {
+    DynamicArray<real> previous(&allocator);
+    previous.resize_noinit(numDofs);
+    AsView(MakeSpan(previous)) = AsConstView(reg.get<CDiffTargetPoseGrad const>(e).previous);
+    ChainPreviousTargetIncrementAdjoint(reg, e, MakeConstSpan(vel), dt, MakeSpan(previous));
+    for (int i = 0; i < numDofs; ++i) {
+      outGrad[i] += (-dt) * previous[i];
+    }
+  }
+
+  // Joint velocities are Lie-algebra quantities: the velocity of a Free or Spherical joint is its
+  // angular velocity in the joint's outer frame, which the Jacobian maps to the link twists and
+  // the step integrates as a left rotation increment. Unlike a pose they have no rotation-vector
+  // chart, so the gradient is complete here; the pose transport that used to follow rotated it
+  // by the joint rotation and scaled it by the chart Jacobian.
 }
 
 void diffsim::SetContactParamsBackward(
@@ -3157,6 +3326,45 @@ void diffsim::SetSoftMaterialParamsBackward(
   }
 }
 
+// The gradient with respect to an externally set angular velocity omega from the adjoint
+// lambdaDelta of the left Lie increment of the rotation step DR it stands for: DR = exp(phi) with
+// phi = asin(dt |omega|) omega / |omega| (RigidBodyVel::UpdateVSymIfDirty, omega being the
+// finite-difference velocity of DR), so
+//   dL/domega = (dphi/domega)^T J_l(phi)^T lambdaDelta,
+// with J_l the left Jacobian of SO(3) (exp(phi + dphi) = exp(J_l(phi) dphi) exp(phi), i.e.
+// DRotIncrementDRotVector) and dphi/domega = (theta / |omega|) (I - u u^T) + (dt / cos theta) u u^T,
+// u = omega / |omega|, theta = asin(dt |omega|). For |omega| -> 0 both factors tend to the identity
+// and dL/domega -> dt lambdaDelta. Shared by the standalone rigid and the articulated velocity
+// adjoints (a link's or a Free/Spherical joint's rotation increment follows the same map).
+static Vec4r AngularVelocityGradientFromIncrementAdjoint(
+    Vec4r const& omega,
+    Vec4r const& lambdaDelta,
+    real dt,
+    Error& error) {
+  real const omegaNorm = Norm<3>(omega);
+  real const sinTheta = dt * omegaNorm;
+  MOCHI_ERROR_IF_NOT(
+      sinTheta < 1_r,
+      error,
+      "The angular velocity is too large for the time step (|omega| * dt must be below 1): the "
+      "rotation increment it stands for is undefined.");
+  MOCHI_ERROR_RETURN(error, {});
+  real constexpr kOmegaNormThreshold = 100_r * kDefaultNearEqualEpsilon<real>;
+  if (omegaNorm < kOmegaNormThreshold) {
+    return dt * lambdaDelta;
+  }
+  Vec4r const u = omega / omegaNorm;
+  real const theta = std::asin(sinTheta);
+  real const cosTheta = std::sqrt(1_r - sinTheta * sinTheta);
+  Vec4r const phi = theta * u;
+  // J_l(phi)^T lambdaDelta
+  VMatrix3x3r const jacLeft = DRotIncrementDRotVector(phi);
+  Vec4r const jacT = DotVecMat3x3(lambdaDelta, jacLeft);
+  // (dphi/domega)^T (J_l(phi)^T lambdaDelta), with dphi/domega symmetric
+  real const uDotJacT = Dot<3>(u, jacT);
+  return (theta / omegaNorm) * (jacT - uDotJacT * u) + (dt / cosTheta) * uDotJacT * u;
+}
+
 void diffsim::SetVelocityBackward(
     Actor const* actor,
     Span<real> outGradLinearVel,
@@ -3195,32 +3403,10 @@ void diffsim::SetVelocityBackward(
   // Angular velocity gradient: next RigidSize::kDRot components. The scene holds the restored
   // initial state, so the current velocity is the one SetVelocity set.
   Vec4r const omega = reg.get<CRigidVel<TimeStep::Current> const>(e).value.GetOmegaAndVSym().first;
-  real const omegaNorm = Norm<3>(omega);
-  real const sinTheta = dt * omegaNorm;
-  MOCHI_ERROR_IF_NOT(
-      sinTheta < 1_r,
-      error,
-      "The angular velocity is too large for the time step (|omega| * dt must be below 1): the "
-      "rotation increment it stands for is undefined.");
-  MOCHI_ERROR_RETURN(error);
   Vec4r const lambdaDelta =
       Load<RigidSize::kDRot, Vec4r>(derivedStepGrad.value.data() + RigidSize::kDTrans); // λ_δ
-  Vec4r gradOmega MOCHI_NO_INIT;
-  real constexpr kOmegaNormThreshold = 100_r * kDefaultNearEqualEpsilon<real>;
-  if (omegaNorm < kOmegaNormThreshold) {
-    gradOmega = dt * lambdaDelta;
-  } else {
-    Vec4r const u = omega / omegaNorm;
-    real const theta = std::asin(sinTheta);
-    real const cosTheta = std::sqrt(1_r - sinTheta * sinTheta);
-    Vec4r const phi = theta * u;
-    // J_l(φ)ᵀ λ_δ
-    VMatrix3x3r const jacLeft = DRotIncrementDRotVector(phi);
-    Vec4r const jacT = DotVecMat3x3(lambdaDelta, jacLeft);
-    // (dφ/dω)ᵀ · (J_l(φ)ᵀ λ_δ), with dφ/dω symmetric
-    real const uDotJacT = Dot<3>(u, jacT);
-    gradOmega = (theta / omegaNorm) * (jacT - uDotJacT * u) + (dt / cosTheta) * uDotJacT * u;
-  }
+  Vec4r const gradOmega = AngularVelocityGradientFromIncrementAdjoint(omega, lambdaDelta, dt, error);
+  MOCHI_ERROR_RETURN(error);
   for (int i = 0; i < RigidSize::kDRot; ++i) {
     outGradAngularVel[i] = Get(gradOmega, i);
   }
@@ -3449,13 +3635,15 @@ void diffsim::ConvertArticulatedGradientRotationVectorToLie(
   MOCHI_ERROR_IF(isize(outGrad) != numDofs, error, "Invalid gradient size");
   MOCHI_ERROR_RETURN(error);
 
-  // Unlike other functions of articulated vectors, in this one there's no need to convert the pose,
-  // because the following function expects 3D rotations in rotation-vector representation.
-  articulated::TransportOutputOfLieJacobian(
-      joints->jointTypes,
-      joints->dofInfo,
-      AsConstView(pose),
-      RowMatrixView<real>(outGrad.data(), isize(outGrad), 1));
+  // The pose already holds its 3D rotations as rotation vectors. A gradient transforms with the
+  // transpose of the chart Jacobian, dL/dtheta = (du/dtheta)^T dL/du; TransportOutputOfLieJacobian
+  // maps a Jacobian's rows (du/dx = du/dtheta dtheta/dx), which is the other product. With that
+  // product the round trip through ConvertArticulatedGradientLieToRotationVector was the
+  // transpose of the joint rotation instead of the identity (J_l^T J_l^-1 = R^T for a rotation
+  // vector), so every gradient reaching a Free or Spherical joint's rotation was off by the joint
+  // rotation.
+  articulated::TransportGradientRotationVectorToLie(
+      joints->jointTypes, joints->dofInfo, AsConstView(pose), AsView(outGrad));
 }
 
 ActorInterfacePtr CreateActorInterface(entt::registry& reg, entt::entity e, Scene* scene) {

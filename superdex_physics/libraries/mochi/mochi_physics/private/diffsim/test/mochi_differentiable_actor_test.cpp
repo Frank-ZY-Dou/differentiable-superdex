@@ -206,6 +206,12 @@ class ConvertArticulatedGradientTest : public test::MochiSceneTestBase {
     std::vector<real> pose(numDofs);
     SetRandom(rng, -0.5_r, 0.5_r, MakeSpan(pose));
 
+    // The merit is |pose|^2 + w . pose with a random w: with |pose|^2 alone the gradient is
+    // parallel to each joint's rotation vector, an eigenvector of the rotation and of both chart
+    // Jacobians, and a transport that used the transposed Jacobian passed unnoticed.
+    std::vector<real> weights(numDofs);
+    SetRandom(rng, -1_r, 1_r, MakeSpan(weights));
+
     real constexpr kEps = 1e-3_r;
     real constexpr kOneOverTwoEps = 0.5_r / kEps;
 
@@ -226,8 +232,12 @@ class ConvertArticulatedGradientTest : public test::MochiSceneTestBase {
           poseNew = pose;
           poseNew[i] += eps;
         }
-        // Merit function: L2 norm of pose
-        return AsConstView(poseNew).NormSqr();
+        // Merit function: L2 norm of pose plus the linear term
+        real merit = AsConstView(poseNew).NormSqr();
+        for (int k = 0; k < numDofs; ++k) {
+          merit += weights[k] * poseNew[k];
+        }
+        return merit;
       };
 
       gradRegularFD(i) = (evalMerit(kEps, false) - evalMerit(-kEps, false)) * kOneOverTwoEps;

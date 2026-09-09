@@ -353,8 +353,7 @@ void articulated::compound::AddLinkDeltaPoseGradient(
     entt::entity e,
     Span<real const> dofs,
     Span<real const> vel,
-    ColumnVectorView<real const> linkDeltaGrad,
-    real dt,
+    ColumnVectorView<real const> linkTwistGrad,
     Span<real> outGrad) {
   auto const* joints = reg.get<CArticulatedBodyShape const>(e).shape->GetJointsData();
   auto const& poseInfo = reg.get<CArticulatedJointPoseInfo const>(e);
@@ -364,7 +363,7 @@ void articulated::compound::AddLinkDeltaPoseGradient(
   auto const& props = reg.get<CArticulatedProps const>(e);
   int const numDofs = props.reducedDofsDim;
   int const poseSize = props.reducedPoseDim;
-  int const linkDofs = linkDeltaGrad.Rows();
+  int const linkDofs = linkTwistGrad.Rows();
   MOCHI_ASSERT(isize(dofs) == numDofs, "Invalid dofs size");
   MOCHI_ASSERT(isize(vel) == numDofs, "Invalid velocity size");
   MOCHI_ASSERT(isize(outGrad) == numDofs, "Invalid gradient size");
@@ -376,7 +375,7 @@ void articulated::compound::AddLinkDeltaPoseGradient(
   for (auto v : vel) {
     moving = moving || v != 0_r;
   }
-  if (!moving || dt == 0_r) {
+  if (!moving) {
     return;
   }
 
@@ -433,9 +432,9 @@ void articulated::compound::AddLinkDeltaPoseGradient(
     }
     real contribution = 0_r;
     for (int r = 0; r < linkDofs; ++r) {
-      contribution += (linkVelPlus[r] - linkVelMinus[r]) / (2_r * eps) * linkDeltaGrad[r];
+      contribution += (linkVelPlus[r] - linkVelMinus[r]) / (2_r * eps) * linkTwistGrad[r];
     }
-    outGrad[k] += dt * contribution;
+    outGrad[k] += contribution;
   }
 }
 

@@ -554,6 +554,57 @@ class TargetVelocityBackwardTest(unittest.TestCase):
             f"target-velocity gradient mismatch: analytic={grad_velocity}, fd={fd}",
         )
 
+    def test_target_velocity_gradient_spherical_joint(self) -> None:
+        """The same on a Spherical joint on a rotated parent: the target velocity's rotation
+        enters as the left Lie increment -dt omega of the target, whose adjoint chains through
+        the increment's left Jacobian (a rotation-vector transport used to stand there)."""
+        scene, chain = scenes.chain_revolute_spherical(with_controller=True)
+        self.addCleanup(physics.destroy_scene, scene)
+        from .harness import configure_for_differentiability
+
+        configure_for_differentiability(scene)
+        num_dofs = chain.get_num_dofs()
+        axis = np.array([-0.4, 0.5, 0.7]) / np.linalg.norm([-0.4, 0.5, 0.7])
+        pose0 = np.concatenate([[0.5], 0.8 * axis])
+        chain.set_articulated_pose_from_joints(pose0.copy())
+        chain.set_articulated_joint_velocities(np.zeros(num_dofs))
+        ref = pose0 + np.array([0.1, -0.05, 0.08, 0.04])
+        state_init = scene.capture_state()
+        target_velocity = np.array([0.3, 0.4, -0.2, 0.25])
+
+        pre, post = self._rollout(scene, chain, pose0, target_velocity)
+        _, diff = self._loss_and_pose(chain, ref)
+        diffsim.reset_back_propagation(scene)
+        diffsim.prepare_back_propagate(scene, post[-1], pre[-1])
+        diffsim.get_articulated_pose_backward(chain, diff)
+        for i in range(self.NUM_STEPS, 0, -1):
+            if i != self.NUM_STEPS:
+                diffsim.prepare_back_propagate(scene, post[i - 1], pre[i - 1])
+            diffsim.back_propagate(scene)
+        grad_velocity = np.zeros(num_dofs)
+        diffsim.set_articulated_target_velocity_backward(chain, grad_velocity)
+
+        fd = np.zeros(num_dofs)
+        for j in range(num_dofs):
+            values = []
+            for sign in (+1.0, -1.0):
+                scene.restore_state(state_init, False)
+                perturbed = target_velocity.copy()
+                perturbed[j] += sign * self.FD_EPS
+                self._rollout(scene, chain, pose0, perturbed)
+                values.append(self._loss_and_pose(chain, ref)[0])
+            fd[j] = (values[0] - values[1]) / (2.0 * self.FD_EPS)
+        scene.release_all_states()
+
+        denom = max(np.linalg.norm(grad_velocity), np.linalg.norm(fd))
+        self.assertGreater(denom, 0.0)
+        rel = np.linalg.norm(grad_velocity - fd) / denom
+        self.assertLessEqual(
+            rel,
+            TOL_SMOOTH,
+            f"target-velocity gradient mismatch: analytic={grad_velocity}, fd={fd}",
+        )
+
 
 class AdjointOperatorDiagnosticsTest(unittest.TestCase):
     """The adjoint solve (PCG, MINRES fallback) assumes a symmetric step

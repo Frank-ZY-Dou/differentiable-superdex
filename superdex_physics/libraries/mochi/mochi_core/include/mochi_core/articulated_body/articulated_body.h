@@ -264,6 +264,16 @@ void TransportOutputOfLieJacobian(
     ColumnVectorView<real const> u,
     RowMatrixView<real> outJacobian);
 
+// Given the gradient dL/du of a scalar with respect to an articulated pose u whose 3D rotations
+// are full rotation vectors, this function computes the gradient dL/dq with respect to the Lie
+// parameterization of the same pose: dL/dq = (du/dq)^T dL/du, the transpose of the transport that
+// TransportOutputOfLieJacobian applies to a Jacobian's rows.
+void TransportGradientRotationVectorToLie(
+    Span<ArticulatedJointType const> jointTypes,
+    Span<ArticulatedDofInfo const> dofInfo,
+    ColumnVectorView<real const> u,
+    ColumnVectorView<real> inOutGrad);
+
 // Given two articulated poses qNew and qOld, with relative pose qDelta, this operation
 // implements the chain rule df/dqOld = df/dqDelta * dqDelta/dqOld.
 void ChainArticulatedGradientDDeltaDOld(

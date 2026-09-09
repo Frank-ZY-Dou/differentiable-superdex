@@ -907,3 +907,102 @@ def chain_revolute_prismatic():
     chain.set_articulated_pose_from_joints(np.array([0.3, 0.02]))
     chain.set_articulated_joint_velocities(np.array([0.5, 0.1]))
     return scene, chain
+
+
+def _quaternion_from_rotation_vector(rotation_vector):
+    r = np.asarray(rotation_vector, dtype=np.float64)
+    angle = float(np.linalg.norm(r))
+    axis = r / angle if angle > 0.0 else np.array([1.0, 0.0, 0.0])
+    xyz = np.sin(angle / 2.0) * axis
+    return physics.Quaternion([float(xyz[0]), float(xyz[1]), float(xyz[2]), float(np.cos(angle / 2.0))])
+
+
+def free_chain():
+    """A free-floating root link with one revolute child in free fall, no ground: the Free
+    root's rotation chart is exercised without contact. Returns (scene, chain)."""
+    scene = physics.create_scene("diffsim_free_chain_air")
+    scene.set_gravity(GRAVITY)
+    joints = [
+        physics.ArticulatedJointParams(
+            name="root", type=physics.ArticulatedJointType.FREE
+        ),
+        physics.ArticulatedJointParams(
+            name="hinge",
+            type=physics.ArticulatedJointType.REVOLUTE,
+            axis=[0, 1, 0],
+            parent_link_from_joint=physics.TransformRT([0.25, 0.0, 0.0]),
+        ),
+    ]
+    links = [
+        physics.ArticulatedLinkParams(
+            name="base", parent_link=-1, shape=cube_shape(), density=1000.0
+        ),
+        physics.ArticulatedLinkParams(
+            name="arm", parent_link=0, shape=cube_shape(), density=1000.0
+        ),
+    ]
+    chain = scene.create_articulated_actor(
+        physics.ArticulatedActorParams(
+            name="free_chain",
+            joints=joints,
+            links=links,
+            world_from_root=physics.TransformRT([0.0, 0.0, 1.0]),
+        )
+    )
+    return scene, chain
+
+
+def chain_revolute_spherical(
+    with_controller: bool = False, rest_rotation=(0.3, -0.2, 0.5), joint_dynamics: bool = False
+):
+    """A fixed-base chain of a revolute joint followed by a spherical joint whose rest frame is
+    rotated by ``rest_rotation`` (a rotation vector) relative to the parent link, so that the
+    joint's outer frame, its own rotation and the link's world rotation all differ.
+    ``joint_dynamics`` gives both joints a joint inertia and viscous friction, the joint-space
+    terms of the step. Returns (scene, chain)."""
+    scene = physics.create_scene(
+        "diffsim_revolute_spherical_controller" if with_controller else "diffsim_revolute_spherical"
+    )
+    scene.set_gravity(GRAVITY)
+    joints = [
+        physics.ArticulatedJointParams(
+            name="j0", type=physics.ArticulatedJointType.REVOLUTE, axis=[1, 0, 0]
+        ),
+        physics.ArticulatedJointParams(
+            name="j1",
+            type=physics.ArticulatedJointType.SPHERICAL,
+            parent_link_from_joint=physics.TransformRT(
+                _quaternion_from_rotation_vector(rest_rotation), [0.0, 0.0, -0.25]
+            ),
+        ),
+    ]
+    if joint_dynamics:
+        for joint in joints:
+            joint.inertia = 0.05
+            friction = physics.ArticulatedJointFrictionParams()
+            friction.viscous = 0.2
+            joint.friction = friction
+    links = [
+        physics.ArticulatedLinkParams(
+            name="l0", parent_link=-1, shape=cube_shape(), density=1000.0
+        ),
+        physics.ArticulatedLinkParams(
+            name="l1", parent_link=0, shape=cube_shape(), density=1000.0
+        ),
+    ]
+    chain = scene.create_articulated_actor(
+        physics.ArticulatedActorParams(
+            name="chain",
+            joints=joints,
+            links=links,
+            world_from_root=physics.TransformRT([0.0, 0.0, 1.0]),
+        )
+    )
+    if with_controller:
+        tracking = physics.PoseTrackingParams(
+            stiffness=50.0, damping=5.0, saturation=-1.0
+        )
+        chain.add_articulated_pose_controller(
+            physics.PoseControllerParams(joint_tracking=[tracking])
+        )
+    return scene, chain

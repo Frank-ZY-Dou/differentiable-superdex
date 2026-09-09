@@ -31,6 +31,9 @@
   gradients match central finite differences of a manual rollout with the same
   substep schedule; the finest level failing raises ForwardSolveError; the
   arguments are validated;
+- rotation charts: the initial-pose, initial-velocity, external-force and controller-target
+  gradients of a Free root and of a Spherical joint on a rotated parent match central finite
+  differences away from the identity rotation (ArticulatedRotationChartTest);
 - single precision: RunningLossTest also runs on the float32 build (5% tolerance);
   every other class requires SUPERDEX_PRECISION=double;
 - variable step sizes: the low-level per-step adjoint chained across steps of
@@ -1474,3 +1477,134 @@ class ArticulatedInitialPoseTest(unittest.TestCase):
         self.addCleanup(physics.destroy_scene, scene)
         rel = self._relative_error(scene, chain, protocol="pose_alone")
         self.assertLessEqual(rel, self.TOL, f"initial-pose gradient mismatch: {rel:.2e}")
+
+
+@double_only
+class ArticulatedRotationChartTest(unittest.TestCase):
+    """The rotation-vector chart of Free and Spherical joints, away from the identity rotation:
+    the driver's initial-pose, initial-velocity, external-force and controller-target gradients
+    against finite differences. There the chart Jacobian is far from the identity and the joint
+    rotation from the outer frame; the output-side chart transport used to apply the Jacobian
+    instead of its transpose (a round trip returned R^T g), and the velocity adjoints applied a
+    pose transport to a Lie-algebra quantity, so the rotation blocks were off by the joint
+    rotation (tens of percent at 0.3 rad, more than the gradient itself at 1.5 rad)."""
+
+    FD_EPS = 1e-6
+    # the loss responds to one step's force through dt^2 / m, so the finite differences of
+    # the force channel take a larger step to stay clear of the solver tolerance
+    FD_EPS_FORCE = 1e-3
+    TOL = 1e-4
+    NUM_STEPS = 5
+
+    @staticmethod
+    def _torques(n: int, step: int) -> np.ndarray:
+        return 0.3 * np.cos(np.arange(n) + 0.5 * step)
+
+    def _rollout_loss(self, build, q0, v0, ref, targets, force_shift=None, target_shift=None):
+        """Loss of a plain rollout from (q0, v0) on a fresh scene, with the forces of one step
+        or the target of one step shifted by eps on one dof."""
+        scene, chain = build()
+        try:
+            configure_for_differentiability(scene)
+            n = chain.get_num_dofs()
+            dofs = np.arange(n, dtype=np.int32)
+            chain.set_articulated_pose_from_joints(q0.copy())
+            chain.set_articulated_joint_velocities(v0.copy())
+            for step in range(self.NUM_STEPS):
+                tau = self._torques(n, step)
+                if force_shift is not None and force_shift[0] == step:
+                    tau[force_shift[1]] += force_shift[2]
+                chain.set_external_forces_on_dofs(dofs, tau)
+                if targets is not None:
+                    target = targets[step].copy()
+                    if target_shift is not None and target_shift[0] == step:
+                        target[target_shift[1]] += target_shift[2]
+                    chain.set_articulated_target_pose(target)
+                scene.step(DT)
+            return ArticulatedPoseErrorLoss(chain, ref=ref).value()
+        finally:
+            physics.destroy_scene(scene)
+
+    def _check(self, build, q0, v0, with_targets: bool = False):
+        scene, chain = build()
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        n = chain.get_num_dofs()
+        dofs = np.arange(n, dtype=np.int32)
+        ref = q0 + 0.05 * np.arange(1, n + 1) / n   # a generic target, not along the pose
+        targets = (
+            [q0 + 0.02 * step * np.sin(np.arange(n) + 1.0) for step in range(self.NUM_STEPS)]
+            if with_targets else None
+        )
+        chain.set_articulated_pose_from_joints(q0.copy())
+        chain.set_articulated_joint_velocities(v0.copy())
+
+        def apply_inputs(step):
+            chain.set_external_forces_on_dofs(dofs, self._torques(n, step))
+            if targets is not None:
+                chain.set_articulated_target_pose(targets[step].copy())
+
+        result = DifferentiableRollout(scene, dt=DT, num_steps=self.NUM_STEPS).run(
+            apply_inputs=apply_inputs, terminal_losses=[ArticulatedPoseErrorLoss(chain, ref=ref)]
+        )
+        grads = result.gradients[chain.get_name()]
+        self.assertAlmostEqual(result.loss, self._rollout_loss(build, q0, v0, ref, targets), delta=1e-12)
+
+        def central(evaluate, eps=self.FD_EPS):
+            return (evaluate(eps) - evaluate(-eps)) / (2.0 * eps)
+
+        def compare(label, analytic, fd):
+            rel = np.linalg.norm(analytic - fd) / np.linalg.norm(fd)
+            self.assertLessEqual(rel, self.TOL, f"{label}: relative error {rel:.2e}\n  analytic {analytic}\n  fd {fd}")
+
+        fd = np.array([
+            central(lambda e, i=i: self._rollout_loss(build, q0 + e * np.eye(n)[i], v0, ref, targets))
+            for i in range(n)])
+        compare("initial pose", grads.initial_pose, fd)
+        fd = np.array([
+            central(lambda e, i=i: self._rollout_loss(build, q0, v0 + e * np.eye(n)[i], ref, targets))
+            for i in range(n)])
+        compare("initial velocity", grads.initial_velocity, fd)
+        for step in (0, self.NUM_STEPS - 1):
+            fd = np.array([
+                central(lambda e, i=i: self._rollout_loss(build, q0, v0, ref, targets, force_shift=(step, i, e)),
+                        self.FD_EPS_FORCE)
+                for i in range(n)])
+            compare(f"forces at step {step}", grads.external_forces[:, step], fd)
+            if targets is not None:
+                fd = np.array([
+                    central(lambda e, i=i: self._rollout_loss(build, q0, v0, ref, targets, target_shift=(step, i, e)))
+                    for i in range(n)])
+                compare(f"target pose at step {step}", grads.control_targets[:, step], fd)
+
+    def test_free_root_vs_fd(self) -> None:
+        axis = np.array([0.6, -0.5, 0.62]) / np.linalg.norm([0.6, -0.5, 0.62])
+        q0 = np.concatenate([[0.1, -0.2, 0.05], 1.2 * axis, [0.4]])
+        v0 = np.array([0.3, -0.2, 0.1, 0.5, -0.4, 0.3, -0.6])
+        self._check(scenes.free_chain, q0, v0)
+
+    def test_free_root_near_identity_vs_fd(self) -> None:
+        """The small-rotation series branch of the chart Jacobian."""
+        q0 = np.concatenate([[0.0, 0.0, 0.0], [0.01, -0.005, 0.008], [0.2]])
+        v0 = np.array([0.1, 0.2, -0.1, 0.4, -0.3, 0.2, 0.5])
+        self._check(scenes.free_chain, q0, v0)
+
+    def test_spherical_on_rotated_parent_vs_fd(self) -> None:
+        axis = np.array([0.3, 0.8, -0.5]) / np.linalg.norm([0.3, 0.8, -0.5])
+        q0 = np.concatenate([[0.7], 1.0 * axis])
+        v0 = np.array([0.4, -0.3, 0.5, 0.2])
+        self._check(scenes.chain_revolute_spherical, q0, v0)
+
+    def test_spherical_joint_dynamics_vs_fd(self) -> None:
+        """Joint inertia and viscous friction: the joint-space terms of the step, whose adjoints
+        chain through the joint's own rotation increment."""
+        axis = np.array([0.3, 0.8, -0.5]) / np.linalg.norm([0.3, 0.8, -0.5])
+        q0 = np.concatenate([[0.7], 1.0 * axis])
+        v0 = np.array([0.4, -0.3, 0.5, 0.2])
+        self._check(lambda: scenes.chain_revolute_spherical(joint_dynamics=True), q0, v0)
+
+    def test_spherical_controller_targets_vs_fd(self) -> None:
+        axis = np.array([-0.4, 0.5, 0.7]) / np.linalg.norm([-0.4, 0.5, 0.7])
+        q0 = np.concatenate([[0.5], 0.8 * axis])
+        v0 = np.array([0.2, 0.3, -0.4, 0.1])
+        self._check(lambda: scenes.chain_revolute_spherical(with_controller=True), q0, v0, with_targets=True)

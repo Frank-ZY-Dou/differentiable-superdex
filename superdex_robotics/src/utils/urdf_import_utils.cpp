@@ -49,6 +49,8 @@ namespace tx = tinyxml2;
 struct ParsedInertial {
   real mass = 0_r;
   Real3 com = {};
+  // The inertia tensor expressed in the link frame: URDF gives it in the inertial frame, whose
+  // rotation relative to the link is the rpy of <inertial><origin>, and the importer rotates it.
   Real6 inertia = {};
 };
 
@@ -143,6 +145,30 @@ Quaternion RpyToQuaternion(Real3 const& rpy) {
       Quaternion::RotationX(rpy[0]);
 }
 
+// Rotates a symmetric inertia tensor I, stored as [ixx, ixy, ixz, iyy, iyz, izz] in the frame
+// that q maps to the link frame, into the link frame: I_link = R I R^T with R = R(q).
+Real6 RotateInertia(Real6 const& inertia, Quaternion const& rotation) {
+  real const I[3][3] = {
+      {inertia[0], inertia[1], inertia[2]},
+      {inertia[1], inertia[3], inertia[4]},
+      {inertia[2], inertia[4], inertia[5]}};
+  // Columns of R^T are R^T e_j; columns of I R^T follow; columns of R (I R^T) are the result.
+  Real3 columns[3];
+  for (int j = 0; j < 3; ++j) {
+    Real3 basis = {};
+    basis[j] = 1_r;
+    Real3 const rotatedBasis = rotation.GetConjugate() * basis; // R^T e_j
+    Real3 product = {};
+    for (int a = 0; a < 3; ++a) {
+      product[a] = I[a][0] * rotatedBasis[0] + I[a][1] * rotatedBasis[1] + I[a][2] * rotatedBasis[2];
+    }
+    columns[j] = rotation * product; // R (I R^T e_j)
+  }
+  // The result is symmetric; read the upper triangle (columns[j][i] is entry (i, j)).
+  return Real6{
+      columns[0][0], columns[1][0], columns[2][0], columns[1][1], columns[2][1], columns[2][2]};
+}
+
 // Parse an <origin xyz rpy> element into rotation + translation. Missing element/attributes
 // default to identity / zeros.
 void ParseOrigin(
@@ -216,13 +242,16 @@ ParsedLink ParseLink(tx::XMLElement const* linkXml, Error& error) {
       inertial.mass = ParseReal(massXml->Attribute("value"), 0_r);
     }
     if (tx::XMLElement const* inertiaXml = inertialXml->FirstChildElement("inertia")) {
-      inertial.inertia = Real6{
+      Real6 const inertiaInInertialFrame{
           ParseReal(inertiaXml->Attribute("ixx"), 0_r),
           ParseReal(inertiaXml->Attribute("ixy"), 0_r),
           ParseReal(inertiaXml->Attribute("ixz"), 0_r),
           ParseReal(inertiaXml->Attribute("iyy"), 0_r),
           ParseReal(inertiaXml->Attribute("iyz"), 0_r),
           ParseReal(inertiaXml->Attribute("izz"), 0_r)};
+      // The tensor is given about the center of mass in the inertial frame (origin xyz, rpy);
+      // the engine wants it about the center of mass in the link frame.
+      inertial.inertia = RotateInertia(inertiaInInertialFrame, rotation);
     }
     link.inertial = inertial;
   }

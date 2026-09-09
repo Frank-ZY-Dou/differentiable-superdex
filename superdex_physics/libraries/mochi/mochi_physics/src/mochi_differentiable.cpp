@@ -357,6 +357,47 @@ static bool AddRigidTorqueChartTerm(
     out[offset + 1] += half * (tau[2] * v0 - tau[0] * v2);
     out[offset + 2] += half * (tau[0] * v1 - tau[1] * v0);
   }
+  // The torque on a Free or Spherical joint enters through the same merit as a rigid torque,
+  // evaluated on the joint transform's rotation step (AssembleExternalForces ->
+  // AddRigidBodyExternalForces), so the joint's rotation block of the reduced step Jacobian
+  // carries the same term.
+  for (entt::entity const e : descendants.compoundActors) {
+    auto const* externalForces = reg.try_get<CExternalForces const>(e);
+    if (!externalForces || externalForces->Empty()) {
+      continue;
+    }
+    auto const* joints = reg.get<CArticulatedBodyShape const>(e).shape->GetJointsData();
+    int const dofsOffset = reg.get<CDofOffset const>(e).dofsOffset;
+    for (int joint = 0; joint < isize(joints->jointTypes); ++joint) {
+      if (joints->jointTypes[joint] != ArticulatedJointType::Free &&
+          joints->jointTypes[joint] != ArticulatedJointType::Spherical) {
+        continue;
+      }
+      int const rotOffset = joints->dofInfo[joint].GetRotOffset();
+      Real3 tau = {};
+      bool hasTorque = false;
+      for (int i = 0; i < isize(externalForces->dofs); ++i) {
+        int const dof = externalForces->dofs[i];
+        if (dof >= rotOffset && dof < rotOffset + RigidSize::kDRot &&
+            externalForces->forces[i] != 0_r) {
+          tau[dof - rotOffset] = externalForces->forces[i];
+          hasTorque = true;
+        }
+      }
+      if (!hasTorque) {
+        continue;
+      }
+      any = true;
+      int const offset = dofsOffset + rotOffset;
+      real const v0 = in[offset];
+      real const v1 = in[offset + 1];
+      real const v2 = in[offset + 2];
+      real const half = 0.5_r * sign;
+      out[offset] += half * (tau[1] * v2 - tau[2] * v1);
+      out[offset + 1] += half * (tau[2] * v0 - tau[0] * v2);
+      out[offset + 2] += half * (tau[0] * v1 - tau[1] * v0);
+    }
+  }
   return any;
 }
 
@@ -387,6 +428,37 @@ static void AddRigidTorqueChartTerm(
     mat(o + 1, o + 2) += -half * tau[0];
     mat(o + 2, o) += -half * tau[1];
     mat(o + 2, o + 1) += half * tau[0];
+  }
+  // The same term on the rotation block of every Free or Spherical joint with a torque.
+  for (entt::entity const e : descendants.compoundActors) {
+    auto const* externalForces = reg.try_get<CExternalForces const>(e);
+    if (!externalForces || externalForces->Empty()) {
+      continue;
+    }
+    auto const* joints = reg.get<CArticulatedBodyShape const>(e).shape->GetJointsData();
+    int const dofsOffset = reg.get<CDofOffset const>(e).dofsOffset;
+    for (int joint = 0; joint < isize(joints->jointTypes); ++joint) {
+      if (joints->jointTypes[joint] != ArticulatedJointType::Free &&
+          joints->jointTypes[joint] != ArticulatedJointType::Spherical) {
+        continue;
+      }
+      int const rotOffset = joints->dofInfo[joint].GetRotOffset();
+      Real3 tau = {};
+      for (int i = 0; i < isize(externalForces->dofs); ++i) {
+        int const dof = externalForces->dofs[i];
+        if (dof >= rotOffset && dof < rotOffset + RigidSize::kDRot) {
+          tau[dof - rotOffset] = externalForces->forces[i];
+        }
+      }
+      int const o = dofsOffset + rotOffset;
+      real const half = 0.5_r * sign;
+      mat(o, o + 1) += -half * tau[2];
+      mat(o, o + 2) += half * tau[1];
+      mat(o + 1, o) += half * tau[2];
+      mat(o + 1, o + 2) += -half * tau[0];
+      mat(o + 2, o) += -half * tau[1];
+      mat(o + 2, o + 1) += half * tau[0];
+    }
   }
 }
 
@@ -607,7 +679,7 @@ static void KrylovSolveZ(
     for (int round = 0; round < kMaxChartRounds; ++round) {
       hessianOp(AsConstView(outZ), AsView(res));
       if (!AddRigidTorqueChartTerm(reg, descendants, 1_r, AsConstView(outZ), AsView(res))) {
-        break; // no external torque on a standalone rigid actor: J^T = H
+        break; // no external torque on a rigid actor or a Free/Spherical joint: J^T = H
       }
       res *= -1_r;
       res += rhs;

@@ -26,7 +26,7 @@ low-level. :class:`DifferentiableRollout` wraps it into one object that
 - collects gradients w.r.t. the initial pose and velocity (for soft actors:
   the initial nodal displacements and velocities), per-step pose-controller
   targets, and per-step external forces (all six DoFs of a standalone rigid
-  actor; the single-DoF joints of an articulated one; soft actors take no
+  actor; every joint dof of an articulated one; soft actors take no
   external forces),
 - optionally clips each gradient block to a maximum L2 norm, and
 - aggregates the solver diagnostics (finite-difference validity and the
@@ -125,11 +125,10 @@ def _collect_actors(scene) -> list[_ActorEntry]:
             # read at the end of the sweep (plus the scene-level parameter gradients).
             force_dofs = []
         elif articulated:
-            force_dofs = []
-            info = actor.get_articulated_shape_info()
-            for entry in info.dof_info:
-                if entry.get_size() == 1:
-                    force_dofs.append(entry.offset)
+            # Every joint dof takes an external force: the generalized force of a revolute or
+            # prismatic joint, and the force and torque (in the joint's outer frame) of a Free
+            # or Spherical joint; the backward reads the generalized-force adjoint for all.
+            force_dofs = list(range(dofs))
         else:
             # Standalone rigid actors take world-frame external forces (DoFs
             # 0-2) and torques (DoFs 3-5); the backward reads the generalized
@@ -339,8 +338,8 @@ class ActorGradients:
     ``control_targets`` is ``(num_dofs, num_steps)``
     for actors with a pose controller, otherwise ``None``;
     ``external_forces`` is ``(len(force_dofs), num_steps)`` - ``force_dofs``
-    being all six DoFs for a standalone rigid actor and the single-DoF joints
-    for an articulated one - otherwise ``None`` (always ``None`` for soft
+    being all six DoFs for a standalone rigid actor and every joint dof for an
+    articulated one - otherwise ``None`` (always ``None`` for soft
     actors, which take no external forces). Truncated sweeps leave the
     initial-state gradients as ``None`` (they would be incomplete) and only
     fill the steps the sweep visited.
