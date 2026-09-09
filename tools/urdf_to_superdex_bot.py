@@ -32,9 +32,11 @@ mass: the inertial of such a link is folded into its parent when the joint betwe
 fixed (parallel-axis update in the parent's frame), and the link stays a massless frame;
 a shapeless link on a moving joint is reported and left massless. Joint dynamics carried
 by the URDF (viscous damping and Coulomb friction, joint inertia, the importer's limit
-stiffness and damping) are written to the package. A root attached to the world by a
-fixed joint, or a root that is a bare frame (a ``world`` link without inertial or mesh),
-makes the world joint Hard (fixed base); ``--base fixed`` or ``--base floating`` overrides.
+stiffness and damping) are written to the package. A root that is a bare ``world`` frame
+(no inertial, no mesh, the ROS convention for a robot welded to the world) makes the world
+joint Hard (fixed base); any other root stays floating unless ``--base fixed`` says
+otherwise, and ``--base floating`` keeps a Free root. The importer drops the rotation of an
+inertial origin, which the tool reports.
 Mimic joints are not imported by SuperDex: their dofs are independent in the package.
 
     python tools/urdf_to_superdex_bot.py <urdf> <out_dir> --name <bot_name> [--mesh-dir DIR]
@@ -261,17 +263,13 @@ def fold_shapeless_links(prefab, meshes) -> None:
 
 
 def urdf_facts(urdf: pathlib.Path, prefab, meshes) -> dict:
-    """Whether the base is fixed, and the mimic joints. The base is fixed when the root
-    link hangs on a fixed joint, or when the root link is a bare ``world`` frame (no
-    inertial, no mesh), the ROS convention for a robot welded to the world. A bare root
-    under another name (``base_link``, ``base_footprint``) stays floating."""
+    """Whether the base is fixed, the mimic joints, and the links whose inertial frame is
+    rotated. The importer's root is the one link that is no joint's child; the base is fixed
+    when that root is a bare ``world`` frame (no inertial, no mesh), the ROS convention for a
+    robot welded to the world. A bare root under another name (``base_link``,
+    ``base_footprint``) stays floating, as does a root that carries a body."""
     root = ET.parse(urdf).getroot()
     root_link = prefab.links[0]
-    fixed_joint_to_root = any(
-        joint.get("type") == "fixed" and joint.find("child").get("link") == root_link.name
-        for joint in root.findall("joint")
-        if joint.find("child") is not None
-    )
     refs = meshes.get(root_link.name, {"visual": None, "collision": None, "color": None})
     bare_root = (
         root_link.name == "world"
@@ -280,7 +278,12 @@ def urdf_facts(urdf: pathlib.Path, prefab, meshes) -> dict:
         and refs["collision"] is None
     )
     mimics = [joint.get("name") for joint in root.findall("joint") if joint.find("mimic") is not None]
-    return {"fixed_base": fixed_joint_to_root or bare_root, "mimics": mimics}
+    rotated_inertials = []
+    for link in root.findall("link"):
+        origin = link.find("inertial/origin")
+        if origin is not None and any(abs(float(v)) > 0.0 for v in (origin.get("rpy") or "0 0 0").split()):
+            rotated_inertials.append(link.get("name"))
+    return {"fixed_base": bare_root, "mimics": mimics, "rotated_inertials": rotated_inertials}
 
 
 def joint_type_name(joint_type) -> str:
@@ -306,6 +309,11 @@ def convert(
     fixed_base = facts["fixed_base"] if base == "auto" else base == "fixed"
     if facts["mimics"]:
         print(f"mimic joints are not imported, their dofs are independent in the package: {facts['mimics']}")
+    if facts["rotated_inertials"]:
+        print(
+            "the importer keeps the inertia tensor in the inertial frame and drops the rotation of "
+            f"<inertial><origin rpy>, so these links' tensors are misoriented: {facts['rotated_inertials']}"
+        )
     fold_shapeless_links(prefab, meshes)
     out_dir.mkdir(parents=True, exist_ok=True)
     links = []
@@ -345,7 +353,7 @@ def convert(
         joint = prefab.joints[i]
         entry = {"name": joint.name, "type": joint_type_name(joint.type)}
         if i == 0 and fixed_base and joint.type == physics.ArticulatedJointType.FREE:
-            entry["type"] = "Hard"  # the URDF attaches the root to the world by a fixed joint
+            entry["type"] = "Hard"  # fixed base
         transform = joint.parent_link_from_joint
         frame = {}
         if not np.allclose(np.asarray(transform.rotation), [0, 0, 0, 1], atol=1e-12):
@@ -476,7 +484,7 @@ def main() -> None:
         "--base",
         choices=["auto", "fixed", "floating"],
         default="auto",
-        help="fixed base (Hard world joint) or floating (Free); auto reads the URDF (default)",
+        help="fixed base (Hard world joint) or floating (Free); auto: fixed for a bare world root (default)",
     )
     args = parser.parse_args()
     default_pose = {}

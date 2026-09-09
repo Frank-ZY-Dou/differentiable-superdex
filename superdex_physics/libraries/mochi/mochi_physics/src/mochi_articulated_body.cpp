@@ -163,6 +163,19 @@ static void UpdateDerivedStateFromPose(
   ecs::InvokeOnEntity(&articulated::compound::UpdateJacobianState<TimeStep::Current>, reg, e);
 }
 
+static void GetArticulatedJointVelocitiesImpl(
+    CArticulatedProps const& props,
+    Span<ArticulatedJointType const> jointTypes,
+    Span<Real3 const> jointAxes,
+    Span<ArticulatedDofInfo const> jointDofInfo,
+    CArticulatedJointVels<TimeStep::Current> const& jointVels,
+    ColumnVectorView<real> outVel);
+
+static void SetLinkVelocitiesFromJointVelocities(
+    entt::registry& reg,
+    entt::entity e,
+    ColumnVectorView<real const> vel);
+
 static void SynchronizeAfterExternalPoseChange(entt::registry& reg, entt::entity e) {
   MOCHI_ASSERT_VERBOSE(
       reg.all_of<TagArticulatedActor>(e),
@@ -170,6 +183,25 @@ static void SynchronizeAfterExternalPoseChange(entt::registry& reg, entt::entity
 
   ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
       UpdateDerivedStateFromPose</*kUpdateLinks*/ true>, reg, e);
+
+  // In a differentiable scene the links' velocities follow the joint velocities through the
+  // Jacobian of the pose just set, as after SetArticulatedJointVelocities: the state stays
+  // consistent whatever the order of the pose and velocity setters, and the adjoint of a pose
+  // (its Jacobian term) matches the forward. Other scenes keep the engine's behavior, which
+  // leaves the link velocities untouched.
+  if (reg.try_ctx<TagDifferentiableScene>()) {
+    auto const& props = reg.get<CArticulatedProps const>(e);
+    auto const* joints = reg.get<CArticulatedBodyShape const>(e).shape->GetJointsData();
+    ColumnVector<real> vel(props.reducedDofsDim);
+    GetArticulatedJointVelocitiesImpl(
+        props,
+        joints->jointTypes,
+        joints->jointAxes,
+        joints->dofInfo,
+        reg.get<CArticulatedJointVels<TimeStep::Current> const>(e),
+        vel);
+    SetLinkVelocitiesFromJointVelocities(reg, e, vel);
+  }
   ResolveAllNodeSkinningDisplacementsPipeline(reg, MakeSingletonConstSpan(e));
 
   if (auto const* composition = reg.try_get<CBlendedComposition const>(e)) {
@@ -288,9 +320,17 @@ void articulated::compound::SetArticulatedJointVelocities(
     }
   }
 
-  // Compute the full-dof velocity. The Jacobian is up to date.
+  SetLinkVelocitiesFromJointVelocities(reg, e, AsConstView(vel));
+}
+
+// The links' velocities from the joint velocities through the Jacobian, which must be up to
+// date with the pose; then the step history is invalid.
+static void SetLinkVelocitiesFromJointVelocities(
+    entt::registry& reg,
+    entt::entity e,
+    ColumnVectorView<real const> vel) {
   auto const& jacobian = reg.get<CArticulatedJacobian const>(e);
-  ColumnVector<real> velFull = jacobian.value * AsConstView(vel);
+  ColumnVector<real> velFull = jacobian.value * vel;
 
   // Update the velocity of the rigid actors within the articulated body.
   ecs::InvokeForEach(
@@ -305,6 +345,97 @@ void articulated::compound::SetArticulatedJointVelocities(
   InvalidateActorStepHistory(reg, e);
   for (auto const& link : reg.get<CGroupMembers const>(e).actors) {
     InvalidateActorStepHistory(reg, link);
+  }
+}
+
+void articulated::compound::AddLinkDeltaPoseGradient(
+    entt::registry const& reg,
+    entt::entity e,
+    Span<real const> dofs,
+    Span<real const> vel,
+    ColumnVectorView<real const> linkDeltaGrad,
+    real dt,
+    Span<real> outGrad) {
+  auto const* joints = reg.get<CArticulatedBodyShape const>(e).shape->GetJointsData();
+  auto const& poseInfo = reg.get<CArticulatedJointPoseInfo const>(e);
+  auto const& parents = reg.get<CArticulatedParents const>(e);
+  auto const& restTransforms = reg.get<CArticulatedRestTransforms const>(e);
+  auto const& worldFromRoot = reg.get<CRootTransform const>(e).worldFromLocal;
+  auto const& props = reg.get<CArticulatedProps const>(e);
+  int const numDofs = props.reducedDofsDim;
+  int const poseSize = props.reducedPoseDim;
+  int const linkDofs = linkDeltaGrad.Rows();
+  MOCHI_ASSERT(isize(dofs) == numDofs, "Invalid dofs size");
+  MOCHI_ASSERT(isize(vel) == numDofs, "Invalid velocity size");
+  MOCHI_ASSERT(isize(outGrad) == numDofs, "Invalid gradient size");
+  MOCHI_ASSERT(
+      linkDofs == reg.get<CArticulatedJacobian const>(e).value.Rows(),
+      "Invalid link gradient size");
+
+  bool moving = false;
+  for (auto v : vel) {
+    moving = moving || v != 0_r;
+  }
+  if (!moving || dt == 0_r) {
+    return;
+  }
+
+  // Central differences of the Jacobian in the dofs. The dofs are angles and lengths, so one
+  // absolute step serves all of them; the pair of Jacobians per dof is small next to a step.
+  real const eps = std::is_same_v<real, double> ? real(1e-6) : real(1e-3);
+  MOCHI_FILO_STACK_ALLOCATOR(allocator, sizeof(TransformRT) * 512);
+  DynamicArray<TransformRT> jointTransforms(&allocator);
+  jointTransforms.resize_noinit(props.numLinks);
+  DynamicArray<TransformRT> linkTransforms(&allocator);
+  linkTransforms.resize_noinit(props.numLinks);
+  ColumnVector<real> dofsShifted(numDofs);
+  ColumnVector<real> pose(poseSize);
+  RowMatrix<real> jacobian(linkDofs, numDofs);
+  ColumnVector<real> linkVelPlus(linkDofs);
+  ColumnVector<real> linkVelMinus(linkDofs);
+  auto const velView = AsConstView(vel);
+  for (int k = 0; k < numDofs; ++k) {
+    for (int side = 0; side < 2; ++side) {
+      real const sign = side == 0 ? 1_r : -1_r;
+      dofsShifted = AsConstView(dofs);
+      dofsShifted[k] += sign * eps;
+      if (poseSize != numDofs) {
+        articulated::ConvertDofsToPose(
+            joints->jointTypes, joints->dofInfo, poseInfo, dofsShifted, pose);
+      } else {
+        pose = dofsShifted;
+      }
+      ComputeTransformsFromReducedPose(
+          joints->jointTypes,
+          joints->jointAxes,
+          poseInfo,
+          parents,
+          restTransforms,
+          worldFromRoot,
+          pose,
+          jointTransforms,
+          linkTransforms);
+      Jacobian(
+          joints->jointTypes,
+          parents,
+          joints->jointAxes,
+          joints->dofInfo,
+          restTransforms,
+          worldFromRoot,
+          jointTransforms,
+          linkTransforms,
+          jacobian);
+      if (side == 0) {
+        linkVelPlus = jacobian * velView;
+      } else {
+        linkVelMinus = jacobian * velView;
+      }
+    }
+    real contribution = 0_r;
+    for (int r = 0; r < linkDofs; ++r) {
+      contribution += (linkVelPlus[r] - linkVelMinus[r]) / (2_r * eps) * linkDeltaGrad[r];
+    }
+    outGrad[k] += dt * contribution;
   }
 }
 

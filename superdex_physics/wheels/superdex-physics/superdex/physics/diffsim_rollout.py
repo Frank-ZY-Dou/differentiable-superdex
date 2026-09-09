@@ -332,7 +332,11 @@ class ActorGradients:
     ones, the local-frame nodal displacement vector for soft ones);
     ``initial_velocity`` stacks linear+angular for rigid actors, joint
     velocities for articulated ones, and the local-frame nodal velocity
-    vector for soft ones. ``control_targets`` is ``(num_dofs, num_steps)``
+    vector for soft ones. For an articulated actor ``initial_pose`` holds the
+    joint velocities fixed: in a differentiable scene the pose setters derive
+    the link velocities from the joint velocities at the pose, as the velocity
+    setter does, so the gradient does not depend on the order of the two.
+    ``control_targets`` is ``(num_dofs, num_steps)``
     for actors with a pose controller, otherwise ``None``;
     ``external_forces`` is ``(len(force_dofs), num_steps)`` - ``force_dofs``
     being all six DoFs for a standalone rigid actor and the single-DoF joints

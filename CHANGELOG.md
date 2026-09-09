@@ -6,12 +6,25 @@ All notable changes to this repository will be documented here.
 
 ### Fixed
 
+- The initial-pose input adjoint of articulated actors
+  (`diffsim.set_articulated_pose_from_joints_backward`) missed the dependence of the links'
+  previous deltas on the pose: the link velocities are J(q) v, so a loss also depends on the
+  pose through the Jacobian. The term dt (d(J(q) v)/dq)^T g is now added (central differences
+  of the Jacobian in the dofs), and in a differentiable scene the pose setters
+  (`set_articulated_pose_from_joints`, `set_articulated_pose_from_links`,
+  `set_root_transform`) re-derive the link velocities from the joint velocities, as the
+  velocity setter does, so the state and the adjoint agree whatever the order of the setters
+  (other scenes keep the engine's behavior). On a revolute-prismatic chain the gradient was
+  off by a tenth, on a revolute pendulum by 1e-4; it agrees with finite differences to 1e-6
+  now on revolute and prismatic chains (the rotation charts of Free and Spherical joints are
+  a separate open issue, see below). Initial velocities of zero were unaffected. The stored
+  double-precision reference gradients were regenerated.
 - `tools/urdf_to_superdex_bot.py`: a link without a collision mesh gets no shape, and the engine
   gives a shapeless link no mass; the tool now folds the inertial of such a link into its parent
   across a fixed joint (parallel-axis update in the parent's frame) and reports a shapeless link
-  on a moving joint, which stays massless. A URDF whose root hangs on a fixed joint, or whose
-  root is a bare `world` frame, now yields a fixed base (a Hard world joint) instead of a floating
-  one; `--base fixed|floating` overrides the detection. The joint dynamics the importer reads
+  on a moving joint, which stays massless. A URDF whose root is a bare `world` frame (no
+  inertial, no mesh) now yields a fixed base (a Hard world joint) instead of a floating one;
+  `--base fixed|floating` overrides the detection. The joint dynamics the importer reads
   from the URDF (viscous damping and Coulomb friction, joint inertia, limit stiffness and
   damping) are written to the package. The package verification moves every joint inside its
   limits instead of assuming a floating root, so fixed-base robots verify too. Mimic joints,
@@ -20,10 +33,21 @@ All notable changes to this repository will be documented here.
 ### Added
 
 - `test/diffsim/test_diffsim_rollout.py::ArticulatedInitialPoseTest`: the driver's initial-pose
-  gradient of a torque-driven articulated actor against finite differences. The revolute
-  pendulum agrees to about 2e-5; the new `scenes.chain_revolute_prismatic` (a prismatic joint
-  after a revolute one) is off by about a tenth, an open issue of
-  `set_articulated_pose_from_joints_backward` kept as an expected failure.
+  gradient of a torque-driven articulated actor against finite differences, on the revolute
+  pendulum with and without its pose controller and on the new
+  `scenes.chain_revolute_prismatic` (a prismatic joint after a revolute one), with the initial
+  state set as pose then velocities, velocities then pose, and the pose alone on a state that
+  has stepped.
+
+### Known issues
+
+- The initial-pose and initial-velocity gradients of a Free root or a Spherical joint away from
+  the identity rotation disagree with finite differences by tens of percent, before and after
+  this release's fix; the rotation-vector transports and the joint-level rotation adjoints are
+  under review. Revolute and prismatic joints are exact to 1e-6.
+- The URDF importer drops the rotation of `<inertial><origin rpy>`, so such a link's inertia
+  tensor is expressed in the inertial frame instead of the link frame;
+  `tools/urdf_to_superdex_bot.py` reports the links concerned.
 
 ## [1.0.0+diffsim.1] - 2026-09-08
 

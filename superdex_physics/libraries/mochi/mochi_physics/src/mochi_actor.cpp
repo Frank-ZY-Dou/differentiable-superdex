@@ -2940,6 +2940,26 @@ void diffsim::SetArticulatedPoseFromJointsBackward(
 
   // Convert from Lie gradient to rotation vector gradient.
   ConvertArticulatedGradientLieToRotationVectorImpl(actor, /*useTarget*/ false, outGradPose);
+
+  // The links' velocities are J(q) v, derived from the joint velocities at the pose (by the
+  // velocity setter, and by the pose setters of a differentiable scene), so their previous
+  // deltas J(q) v dt depend on the pose through the Jacobian; the pose owns that adjoint, the
+  // velocity input adjoint the dt J^T part. Rotation-vector gradient, hence after the transport.
+  auto const& derivedStepGrad = reg.get<CDiffDerivedStepGrad const>(e);
+  int const numDofs = actor->GetNumDofs();
+  int const linkDofs = reg.get<CArticulatedJacobian const>(e).value.Rows();
+  if (derivedStepGrad.value.Rows() == numDofs + linkDofs) {
+    MOCHI_FILO_STACK_ALLOCATOR(allocator, 2 * 256 * sizeof(real));
+    DynamicArray<real> dofs(&allocator);
+    dofs.resize_noinit(numDofs);
+    DynamicArray<real> vel(&allocator);
+    vel.resize_noinit(numDofs);
+    actor->GetArticulatedPose(dofs, ErrorAssert{});
+    actor->GetArticulatedJointVelocities(vel, ErrorAssert{});
+    auto const dt = static_cast<real>(reg.ctx<CStatePair const>().stepDt);
+    articulated::compound::AddLinkDeltaPoseGradient(
+        reg, e, dofs, vel, derivedStepGrad.value.BottomRows(linkDofs), dt, outGradPose);
+  }
 }
 
 void diffsim::SetArticulatedTargetVelocityBackward(
