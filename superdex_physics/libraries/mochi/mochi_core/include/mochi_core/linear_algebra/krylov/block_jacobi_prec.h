@@ -27,7 +27,11 @@
 
 namespace mochi::krylov {
 
-template <typename Scalar, int kPrecBlockSize>
+/// @brief Block Jacobi preconditioner.
+/// @tparam Scalar Scalar type.
+/// @tparam kPrecBlockSize Preconditioner block size.
+/// @tparam kIsSymmetric Whether diagonal blocks are symmetric.
+template <typename Scalar, int kPrecBlockSize, bool kIsSymmetric = false>
 struct BlockJacobiPrec final : Preconditioner<Scalar> {
   static_assert(!std::is_const_v<Scalar>, "Implementation assumes Scalar is non-const.");
   static_assert(kPrecBlockSize > 0, "Preconditioner block size must be positive");
@@ -81,15 +85,15 @@ struct BlockJacobiPrec final : Preconditioner<Scalar> {
 //--- Implementation of functions
 //
 
-template <typename Scalar, int kPrecBlockSize>
+template <typename Scalar, int kPrecBlockSize, bool kIsSymmetric>
 template <typename MatrixType>
-BlockJacobiPrec<Scalar, kPrecBlockSize>::BlockJacobiPrec(MatrixType const& A) {
+BlockJacobiPrec<Scalar, kPrecBlockSize, kIsSymmetric>::BlockJacobiPrec(MatrixType const& A) {
   Update(A);
 }
 
-template <typename Scalar, int kPrecBlockSize>
+template <typename Scalar, int kPrecBlockSize, bool kIsSymmetric>
 template <typename MatrixType>
-void BlockJacobiPrec<Scalar, kPrecBlockSize>::Update(MatrixType const& A) {
+void BlockJacobiPrec<Scalar, kPrecBlockSize, kIsSymmetric>::Update(MatrixType const& A) {
   MOCHI_ASSERT_VERBOSE(A.Rows() == A.Cols(), "Only square matrices are supported");
   MOCHI_ASSERT_VERBOSE(
       A.Rows() % kPrecBlockSize == 0,
@@ -108,20 +112,21 @@ void BlockJacobiPrec<Scalar, kPrecBlockSize>::Update(MatrixType const& A) {
     ArrayInverts(MakeSpan(_inverseDiagBlocks));
   } else {
     ExtractBlockDiagonal(A, MakeSpan(_inverseDiagBlocks));
-    BatchedInverse(MakeSpan(_inverseDiagBlocks));
+    BatchedInverse<kIsSymmetric>(MakeSpan(_inverseDiagBlocks));
   }
 }
 
-template <typename Scalar, int kPrecBlockSize>
+template <typename Scalar, int kPrecBlockSize, bool kIsSymmetric>
 template <typename Input, typename Output>
-void BlockJacobiPrec<Scalar, kPrecBlockSize>::operator()(Input const& x, Output&& Px) const {
+void BlockJacobiPrec<Scalar, kPrecBlockSize, kIsSymmetric>::operator()(Input const& x, Output&& Px)
+    const {
   int const opN = kPrecBlockSize * isize(_inverseDiagBlocks);
   Preconditioner<Scalar>::ValidateInputOutput(opN, x, Px);
   ApplyBlockDiagonal<Scalar>(MakeConstSpan(_inverseDiagBlocks), x, Px);
 }
 
-template <typename Scalar, int kPrecBlockSize>
-void BlockJacobiPrec<Scalar, kPrecBlockSize>::ConcurrentSolve(
+template <typename Scalar, int kPrecBlockSize, bool kIsSymmetric>
+void BlockJacobiPrec<Scalar, kPrecBlockSize, kIsSymmetric>::ConcurrentSolve(
     ColumnVectorView<Scalar const> x,
     ColumnVectorView<Scalar> Px,
     ParallelWorkerInfo const& data) const {

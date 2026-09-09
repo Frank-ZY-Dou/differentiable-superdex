@@ -235,6 +235,197 @@ inline void Inverse3x3(
   // "invA *= Scalar(1) / detA".
 }
 
+template <typename T>
+MOCHI_FORCE_INLINE bool RejectSymInversePivot(T pivot, T diagonal) {
+  return Abs(pivot) <= std::numeric_limits<T>::epsilon() * Abs(diagonal);
+}
+
+template <
+    typename Scalar,
+    int kRowsAtCT,
+    int kColsAtCT,
+    krylov::Direction kMajorDirection,
+    krylov::Ownership kOwnership,
+    int kLeadDim>
+inline void SymInverse3x3(
+    Matrix<Scalar, kRowsAtCT, kColsAtCT, kMajorDirection, kOwnership, kLeadDim> const& A,
+    Matrix<std::remove_const_t<Scalar>, kRowsAtCT, kColsAtCT, kMajorDirection>& invA) {
+  MOCHI_ASSERT_VERBOSE((A.Rows() == 3) && (A.Cols() == 3), "Incorrect matrix size.");
+  MOCHI_ASSERT_VERBOSE((invA.Rows() == 3) && (invA.Cols() == 3), "Incorrect matrix size.");
+
+  using T = std::remove_const_t<Scalar>;
+  T const a00 = A(0, 0);
+  T const a11 = A(1, 1);
+  T const a22 = A(2, 2);
+  constexpr bool kUseLowerTriangle = kMajorDirection == krylov::Direction::ColMajor;
+  T const a10 = kUseLowerTriangle ? A(1, 0) : A(0, 1);
+  T const a20 = kUseLowerTriangle ? A(2, 0) : A(0, 2);
+  T const a21 = kUseLowerTriangle ? A(2, 1) : A(1, 2);
+
+  auto const setSingular = [&](int pivotIndex, T pivot, T diagonal) {
+    MOCHI_LOG_ERROR(
+        "Matrix is singular or needs pivoting at diagonal %d (pivot: %e, input diagonal: %e).",
+        pivotIndex,
+        static_cast<double>(pivot),
+        static_cast<double>(diagonal));
+    invA.SetZero();
+  };
+
+  T const d0 = a00;
+  if (d0 == T{0})
+    MOCHI_UNLIKELY {
+      setSingular(0, d0, a00);
+      return;
+    }
+  T const d0Inv = T{1} / d0;
+  T const l10 = a10 * d0Inv;
+  T const l20 = a20 * d0Inv;
+
+  T const d1 = a11 - l10 * a10;
+  if (RejectSymInversePivot(d1, a11))
+    MOCHI_UNLIKELY {
+      setSingular(1, d1, a11);
+      return;
+    }
+  T const d1Inv = T{1} / d1;
+  T const q21 = a21 - l20 * a10;
+  T const l21 = q21 * d1Inv;
+
+  T const d2 = a22 - l20 * a20 - l21 * q21;
+  if (RejectSymInversePivot(d2, a22))
+    MOCHI_UNLIKELY {
+      setSingular(2, d2, a22);
+      return;
+    }
+  T const d2Inv = T{1} / d2;
+
+  // A^-1 = L^-T D^-1 L^-1. Compute one triangle and mirror it exactly.
+  T const lm10 = -l10;
+  T const lm21 = -l21;
+  T const lm20 = l10 * l21 - l20;
+  T const inv22 = d2Inv;
+  T const inv12 = lm21 * inv22;
+  T const inv02 = lm20 * inv22;
+  T const inv11 = d1Inv + lm21 * inv12;
+  T const inv01 = lm10 * d1Inv + lm21 * inv02;
+  T const inv00 = d0Inv + lm10 * lm10 * d1Inv + lm20 * inv02;
+
+  // clang-format off
+  invA(0, 0) = inv00;  invA(0, 1) = inv01;  invA(0, 2) = inv02;
+  invA(1, 0) = inv01;  invA(1, 1) = inv11;  invA(1, 2) = inv12;
+  invA(2, 0) = inv02;  invA(2, 1) = inv12;  invA(2, 2) = inv22;
+  // clang-format on
+}
+
+template <
+    typename Scalar,
+    int kRowsAtCT,
+    int kColsAtCT,
+    krylov::Direction kMajorDirection,
+    krylov::Ownership kOwnership,
+    int kLeadDim>
+inline void SymInverse4x4(
+    Matrix<Scalar, kRowsAtCT, kColsAtCT, kMajorDirection, kOwnership, kLeadDim> const& A,
+    Matrix<std::remove_const_t<Scalar>, kRowsAtCT, kColsAtCT, kMajorDirection>& invA) {
+  MOCHI_ASSERT_VERBOSE((A.Rows() == 4) && (A.Cols() == 4), "Incorrect matrix size.");
+  MOCHI_ASSERT_VERBOSE((invA.Rows() == 4) && (invA.Cols() == 4), "Incorrect matrix size.");
+
+  using T = std::remove_const_t<Scalar>;
+  T const a00 = A(0, 0);
+  T const a11 = A(1, 1);
+  T const a22 = A(2, 2);
+  T const a33 = A(3, 3);
+  constexpr bool kUseLowerTriangle = kMajorDirection == krylov::Direction::ColMajor;
+  T const a10 = kUseLowerTriangle ? A(1, 0) : A(0, 1);
+  T const a20 = kUseLowerTriangle ? A(2, 0) : A(0, 2);
+  T const a30 = kUseLowerTriangle ? A(3, 0) : A(0, 3);
+  T const a21 = kUseLowerTriangle ? A(2, 1) : A(1, 2);
+  T const a31 = kUseLowerTriangle ? A(3, 1) : A(1, 3);
+  T const a32 = kUseLowerTriangle ? A(3, 2) : A(2, 3);
+
+  auto const setSingular = [&](int pivotIndex, T pivot, T diagonal) {
+    MOCHI_LOG_ERROR(
+        "Matrix is singular or needs pivoting at diagonal %d (pivot: %e, input diagonal: %e).",
+        pivotIndex,
+        static_cast<double>(pivot),
+        static_cast<double>(diagonal));
+    invA.SetZero();
+  };
+
+  T const d0 = a00;
+  if (d0 == T{0})
+    MOCHI_UNLIKELY {
+      setSingular(0, d0, a00);
+      return;
+    }
+  T const d0Inv = T{1} / d0;
+  T const l10 = a10 * d0Inv;
+  T const l20 = a20 * d0Inv;
+  T const l30 = a30 * d0Inv;
+
+  T const d1 = a11 - l10 * a10;
+  if (RejectSymInversePivot(d1, a11))
+    MOCHI_UNLIKELY {
+      setSingular(1, d1, a11);
+      return;
+    }
+  T const d1Inv = T{1} / d1;
+  T const q21 = a21 - l20 * a10;
+  T const q31 = a31 - l30 * a10;
+  T const l21 = q21 * d1Inv;
+  T const l31 = q31 * d1Inv;
+
+  T const d2 = a22 - l20 * a20 - l21 * q21;
+  if (RejectSymInversePivot(d2, a22))
+    MOCHI_UNLIKELY {
+      setSingular(2, d2, a22);
+      return;
+    }
+  T const d2Inv = T{1} / d2;
+  T const q32 = a32 - l30 * a20 - l31 * q21;
+  T const l32 = q32 * d2Inv;
+
+  T const d3 = a33 - l30 * a30 - l31 * q31 - l32 * q32;
+  if (RejectSymInversePivot(d3, a33))
+    MOCHI_UNLIKELY {
+      setSingular(3, d3, a33);
+      return;
+    }
+  T const d3Inv = T{1} / d3;
+
+  // A^-1 = L^-T D^-1 L^-1. Compute one triangle and mirror it exactly.
+  T const lm10 = -l10;
+  T const lm21 = -l21;
+  T const lm32 = -l32;
+  T const lm20 = l10 * l21 - l20;
+  T const lm31 = l21 * l32 - l31;
+  T const lm30 = -l30 - l31 * lm10 - l32 * lm20;
+  T const t10 = lm10 * d1Inv;
+  T const t20 = lm20 * d2Inv;
+  T const t21 = lm21 * d2Inv;
+  T const t30 = lm30 * d3Inv;
+  T const t31 = lm31 * d3Inv;
+  T const t32 = lm32 * d3Inv;
+
+  T const inv33 = d3Inv;
+  T const inv23 = t32;
+  T const inv13 = t31;
+  T const inv03 = t30;
+  T const inv22 = d2Inv + lm32 * t32;
+  T const inv12 = t21 + lm32 * t31;
+  T const inv02 = t20 + lm32 * t30;
+  T const inv11 = d1Inv + lm21 * t21 + lm31 * t31;
+  T const inv01 = t10 + lm20 * t21 + lm30 * t31;
+  T const inv00 = d0Inv + lm10 * t10 + lm20 * t20 + lm30 * t30;
+
+  // clang-format off
+  invA(0, 0) = inv00;  invA(0, 1) = inv01;  invA(0, 2) = inv02;  invA(0, 3) = inv03;
+  invA(1, 0) = inv01;  invA(1, 1) = inv11;  invA(1, 2) = inv12;  invA(1, 3) = inv13;
+  invA(2, 0) = inv02;  invA(2, 1) = inv12;  invA(2, 2) = inv22;  invA(2, 3) = inv23;
+  invA(3, 0) = inv03;  invA(3, 1) = inv13;  invA(3, 2) = inv23;  invA(3, 3) = inv33;
+  // clang-format on
+}
+
 template <
     typename Scalar,
     int kRowsAtCT,
@@ -280,27 +471,25 @@ inline void Inverse4x4(
   // - Setting the inverse in (0, 0) -> (0, 1) -> ... order is marginally faster for row-major
   //   matrices. The code below can be gated by major direction if additional performance is needed.
   // - No noticeable improvement when using the initializer list constructor.
-  // clang-format off
-        invA(0, 0) = (A(1, 1) * c5 - A(1, 2) * c4 + A(1, 3) * c3) * invDetA;
-        invA(1, 0) = (-A(1, 0) * c5 + A(1, 2) * c2 - A(1, 3) * c1) * invDetA;
-        invA(2, 0) = (A(1, 0) * c4 - A(1, 1) * c2 + A(1, 3) * c0) * invDetA;
-        invA(3, 0) = (-A(1, 0) * c3 + A(1, 1) * c1 - A(1, 2) * c0) * invDetA;
+  invA(0, 0) = (A(1, 1) * c5 - A(1, 2) * c4 + A(1, 3) * c3) * invDetA;
+  invA(1, 0) = (-A(1, 0) * c5 + A(1, 2) * c2 - A(1, 3) * c1) * invDetA;
+  invA(2, 0) = (A(1, 0) * c4 - A(1, 1) * c2 + A(1, 3) * c0) * invDetA;
+  invA(3, 0) = (-A(1, 0) * c3 + A(1, 1) * c1 - A(1, 2) * c0) * invDetA;
 
-        invA(0, 1) = (-A(0, 1) * c5 + A(0, 2) * c4 - A(0, 3) * c3) * invDetA;
-        invA(1, 1) = (A(0, 0) * c5 - A(0, 2) * c2 + A(0, 3) * c1) * invDetA;
-        invA(2, 1) = (-A(0, 0) * c4 + A(0, 1) * c2 - A(0, 3) * c0) * invDetA;
-        invA(3, 1) = (A(0, 0) * c3 - A(0, 1) * c1 + A(0, 2) * c0) * invDetA;
+  invA(0, 1) = (-A(0, 1) * c5 + A(0, 2) * c4 - A(0, 3) * c3) * invDetA;
+  invA(1, 1) = (A(0, 0) * c5 - A(0, 2) * c2 + A(0, 3) * c1) * invDetA;
+  invA(2, 1) = (-A(0, 0) * c4 + A(0, 1) * c2 - A(0, 3) * c0) * invDetA;
+  invA(3, 1) = (A(0, 0) * c3 - A(0, 1) * c1 + A(0, 2) * c0) * invDetA;
 
-        invA(0, 2) = (A(3, 1) * s5 - A(3, 2) * s4 + A(3, 3) * s3) * invDetA;
-        invA(1, 2) = (-A(3, 0) * s5 + A(3, 2) * s2 - A(3, 3) * s1) * invDetA;
-        invA(2, 2) = (A(3, 0) * s4 - A(3, 1) * s2 + A(3, 3) * s0) * invDetA;
-        invA(3, 2) = (-A(3, 0) * s3 + A(3, 1) * s1 - A(3, 2) * s0) * invDetA;
+  invA(0, 2) = (A(3, 1) * s5 - A(3, 2) * s4 + A(3, 3) * s3) * invDetA;
+  invA(1, 2) = (-A(3, 0) * s5 + A(3, 2) * s2 - A(3, 3) * s1) * invDetA;
+  invA(2, 2) = (A(3, 0) * s4 - A(3, 1) * s2 + A(3, 3) * s0) * invDetA;
+  invA(3, 2) = (-A(3, 0) * s3 + A(3, 1) * s1 - A(3, 2) * s0) * invDetA;
 
-        invA(0, 3) = (-A(2, 1) * s5 + A(2, 2) * s4 - A(2, 3) * s3) * invDetA;
-        invA(1, 3) = (A(2, 0) * s5 - A(2, 2) * s2 + A(2, 3) * s1) * invDetA;
-        invA(2, 3) = (-A(2, 0) * s4 + A(2, 1) * s2 - A(2, 3) * s0) * invDetA;
-        invA(3, 3) = (A(2, 0) * s3 - A(2, 1) * s1 + A(2, 2) * s0) * invDetA;
-  // clang-format on
+  invA(0, 3) = (-A(2, 1) * s5 + A(2, 2) * s4 - A(2, 3) * s3) * invDetA;
+  invA(1, 3) = (A(2, 0) * s5 - A(2, 2) * s2 + A(2, 3) * s1) * invDetA;
+  invA(2, 3) = (-A(2, 0) * s4 + A(2, 1) * s2 - A(2, 3) * s0) * invDetA;
+  invA(3, 3) = (A(2, 0) * s3 - A(2, 1) * s1 + A(2, 2) * s0) * invDetA;
 }
 
 } // namespace mochi::details
@@ -548,7 +737,7 @@ auto Determinant(
   if (A.Rows() != A.Cols()) {
     return Scalar(0);
   }
-  //--- If size < 5, use the exact formula.
+  //--- Use specialized size-specific implementations for sizes up to 4.
   if (A.Rows() < 5) {
     using InputType = Matrix<Scalar, kRowsAtCT, kColsAtCT, kMajorDirection, kOwnership, kLeadDim>;
     switch (A.Rows()) {
@@ -660,11 +849,8 @@ auto StableInverse(
 /// @param[in] A Input matrix.
 /// @return The inverse of the input matrix.
 ///
-/// @remark For sizes up to 4, the inverse is computed via exact formula. For larger sizes, the
-/// inverse is computed via block LU factorization without pivoting.
-/// @remark For symmetric matrices, prefer 'SymInverse' over 'Inverse' to improve performance.
-/// @remark For matrices that are ill-conditioned or require pivoting, prefer 'StableInverse' over
-/// 'Inverse' to improve stability.
+/// @note Prefer @ref SymInverse for symmetric matrices.
+/// @note Prefer @ref StableInverse for matrices that are ill-conditioned or require pivoting.
 template <
     typename Scalar,
     int kRowsAtCT,
@@ -675,7 +861,7 @@ template <
 auto Inverse(Matrix<Scalar, kRowsAtCT, kColsAtCT, kMajorDirection, kOwnership, kLeadDim> const& A) {
   Matrix<std::remove_const_t<Scalar>, kRowsAtCT, kColsAtCT, kMajorDirection> invA(
       A.Rows(), A.Cols());
-  //--- If size < 5, use the exact formula.
+  //--- Use specialized size-specific implementations for sizes up to 4.
   if (A.Rows() < 5) {
     switch (A.Rows()) {
       case 1: {
@@ -705,13 +891,11 @@ auto Inverse(Matrix<Scalar, kRowsAtCT, kColsAtCT, kMajorDirection, kOwnership, k
 /// @param[in] A Input symmetric matrix.
 /// @return The inverse of the input matrix.
 ///
-/// @remark If the matrix is numerically singular or needs pivoting, an error message is logged and
+/// @note If the matrix is numerically singular or needs pivoting, an error message is logged and
 /// the zero matrix is returned.
-/// @remark For sizes up to 4, the inverse is computed via exact formula. For larger sizes, the
-/// inverse is computed via block LDLt factorization without pivoting.
-/// @remark For symmetric matrices, prefer 'SymInverse' over 'Inverse' to improve performance.
-/// @remark For matrices that are ill-conditioned or require pivoting, prefer 'StableInverse' over
-/// 'SymInverse' to improve stability.
+/// @note Prefer @ref StableInverse for matrices that are ill-conditioned or require pivoting.
+///
+/// @pre The input matrix must be symmetric.
 template <
     typename Scalar,
     int kRowsAtCT,
@@ -723,7 +907,7 @@ auto SymInverse(
     Matrix<Scalar, kRowsAtCT, kColsAtCT, kMajorDirection, kOwnership, kLeadDim> const& A) {
   using NonConstScalar = std::remove_const_t<Scalar>;
   Matrix<NonConstScalar, kRowsAtCT, kColsAtCT, kMajorDirection> invA(A.Rows(), A.Cols());
-  //--- If size < 5, use the exact formula.
+  //--- Use specialized size-specific implementations for sizes up to 4.
   if (A.Rows() < 5) {
     switch (A.Rows()) {
       case 1: {
@@ -735,11 +919,11 @@ auto SymInverse(
         return invA;
       }
       case 3: {
-        details::Inverse3x3(A, invA);
+        details::SymInverse3x3(A, invA);
         return invA;
       }
       case 4: {
-        details::Inverse4x4(A, invA);
+        details::SymInverse4x4(A, invA);
         return invA;
       }
     }
@@ -1343,9 +1527,11 @@ void ApplyBlockDiagonal(Span<Scalar const> diagValues, Input const& x, Output&& 
 }
 
 /// @brief Invert a set of matrices stored in a span.
+/// @tparam kIsSymmetric Whether the input matrices are symmetric.
 /// @param[in,out] dSpan Span of matrices to be inverted in place.
 /// @remark The matrices are inverted in place.
 template <
+    bool kIsSymmetric = false,
     typename InputScalar,
     int kBlockSize,
     Direction kMajorDir,
@@ -1366,7 +1552,13 @@ void BatchedInverse(
       numBlocks,
       [&](Idx blkRowBegin, Idx blkRowEnd) {
         for (auto iBlkRow = blkRowBegin; iBlkRow < blkRowEnd; ++iBlkRow) {
-          dSpan[iBlkRow] = Inverse(dSpan[iBlkRow]);
+          // TODO: Avoid materializing and copying the temporary returned by Inverse or SymInverse
+          // when updating a block in place.
+          if constexpr (kIsSymmetric) {
+            dSpan[iBlkRow] = SymInverse(dSpan[iBlkRow]);
+          } else {
+            dSpan[iBlkRow] = Inverse(dSpan[iBlkRow]);
+          }
         }
       });
 }

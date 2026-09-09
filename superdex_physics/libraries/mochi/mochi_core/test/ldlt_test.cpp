@@ -21,6 +21,12 @@
 
 #include "ldlt_lu_test.h"
 
+#include <mochi_core/test/log_suppression.h>
+
+#include <algorithm>
+#include <array>
+#include <numeric>
+
 using namespace mochi;
 using namespace mochi::test;
 
@@ -141,6 +147,63 @@ static void TestEquilibrationConsistency(MatrixView<real const> A) {
   TestDecompositionConsistency(ldlt, ldltRef, n, absTol);
 }
 
+template <int kSize, krylov::Direction kDirection, typename ComputeInverse>
+static void TestSymInverseScaleAndPermutation(
+    real conditionNumberBound,
+    ComputeInverse const& computeInverse) {
+  real const tolerance = 8_r * conditionNumberBound * std::numeric_limits<real>::epsilon();
+  std::array<int, kSize> permutation{};
+  std::iota(permutation.begin(), permutation.end(), 0);
+  std::array<real, 3> const scales{
+      0.01_r * Sqrt(Sqrt(std::numeric_limits<real>::min())),
+      1_r,
+      10_r * Sqrt(Sqrt(std::numeric_limits<real>::max())),
+  };
+
+  do {
+    for (real const scale : scales) {
+      Matrix<real, kSize, kSize, kDirection> A{};
+      for (int row = 0; row < kSize; ++row) {
+        for (int col = 0; col < kSize; ++col) {
+          A(row, col) = scale / real(permutation[row] + permutation[col] + 1);
+        }
+      }
+      Matrix<real, kSize, kSize, kDirection> invA;
+      computeInverse(A, invA);
+      auto residual = Matrix<real>(A * invA);
+      for (int i = 0; i < kSize; ++i) {
+        residual(i, i) -= 1_r;
+        for (int j = i + 1; j < kSize; ++j) {
+          EXPECT_EQ(invA(i, j), invA(j, i));
+        }
+      }
+      EXPECT_LT(residual.Norm(), tolerance);
+    }
+  } while (std::next_permutation(permutation.begin(), permutation.end()));
+}
+
+template <int kSize, krylov::Direction kDirection, typename ComputeInverse>
+static void TestSymInversePivotHandling(ComputeInverse const& computeInverse) {
+  static_assert(kSize >= 2);
+  auto suppressErrors = test::SuppressLogError();
+
+  Matrix<real, kSize, kSize, kDirection> A{};
+  Matrix<real, kSize, kSize, kDirection> invA{};
+
+  for (int pivot = 0; pivot < kSize; ++pivot) {
+    A.SetIdentity();
+    A(pivot, pivot) = 0_r;
+    invA.SetIdentity();
+    computeInverse(A, invA);
+    EXPECT_EQ(invA.Norm(), 0_r);
+  }
+
+  A.SetIdentity();
+  A(0, 0) = -1_r;
+  computeInverse(A, invA);
+  EXPECT_EQ(Matrix<real>(invA - A).Norm(), 0_r);
+}
+
 TEST(LDLt, TriangularSolves) {
   TestTriangularSolves<6>(128);
   TestTriangularSolves<6>(133);
@@ -172,6 +235,36 @@ TEST(LDLt, Determinant) {
 TEST(LDLt, SymInverse) {
   TestInverse<kColMajor, InverseMode::SymInverse>();
   TestInverse<kRowMajor, InverseMode::SymInverse>();
+}
+
+TEST(LDLt, SymInverse3x3ScaleAndPermutation) {
+  auto const computeInverse = [](auto const& A, auto& invA) { details::SymInverse3x3(A, invA); };
+  // Conservative Frobenius-condition-number bound for the Hilbert matrices.
+  // Uniform scaling and symmetric permutations preserve the condition number.
+  constexpr real kConditionNumberBound = 600_r;
+  TestSymInverseScaleAndPermutation<3, kColMajor>(kConditionNumberBound, computeInverse);
+  TestSymInverseScaleAndPermutation<3, kRowMajor>(kConditionNumberBound, computeInverse);
+}
+
+TEST(LDLt, SymInverse3x3PivotHandling) {
+  auto const computeInverse = [](auto const& A, auto& invA) { details::SymInverse3x3(A, invA); };
+  TestSymInversePivotHandling<3, kColMajor>(computeInverse);
+  TestSymInversePivotHandling<3, kRowMajor>(computeInverse);
+}
+
+TEST(LDLt, SymInverse4x4ScaleAndPermutation) {
+  auto const computeInverse = [](auto const& A, auto& invA) { details::SymInverse4x4(A, invA); };
+  // Conservative Frobenius-condition-number bound for the Hilbert matrices.
+  // Uniform scaling and symmetric permutations preserve the condition number.
+  constexpr real kConditionNumberBound = 16000_r;
+  TestSymInverseScaleAndPermutation<4, kColMajor>(kConditionNumberBound, computeInverse);
+  TestSymInverseScaleAndPermutation<4, kRowMajor>(kConditionNumberBound, computeInverse);
+}
+
+TEST(LDLt, SymInverse4x4PivotHandling) {
+  auto const computeInverse = [](auto const& A, auto& invA) { details::SymInverse4x4(A, invA); };
+  TestSymInversePivotHandling<4, kColMajor>(computeInverse);
+  TestSymInversePivotHandling<4, kRowMajor>(computeInverse);
 }
 
 TEST(LDLt, EquilibrationConsistency) {

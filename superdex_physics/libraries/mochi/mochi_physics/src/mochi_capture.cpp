@@ -149,6 +149,52 @@ static bool ComponentHasAttribute(
   return false;
 }
 
+namespace {
+
+constexpr size_t kFilteredEntityStackCount = 1024;
+
+struct CaptureEntityList {
+  Span<entt::entity const> entities;
+  bool requiresPerEntityAccess = false;
+};
+
+} // namespace
+
+// Return entities in component storage order, optionally filtered by
+// attribute::CaptureState::onlyCaptureWith. The returned span may alias filteredEntities.
+static CaptureEntityList GetCaptureEntities(
+    entt::registry const& reg,
+    Span<entt::entity const> allEntities,
+    attribute::CaptureState const& attrib,
+    DynamicArray<entt::entity>& filteredEntities) {
+  if (!attrib.onlyCaptureWith) {
+    return {allEntities, false};
+  }
+
+  auto const* filterComponentType = ecs::TryGetComponentTypeInfo(reg, attrib.onlyCaptureWith);
+  MOCHI_ASSERT_VERBOSE(filterComponentType != nullptr, "Must have been registered");
+  auto const filterEntities = filterComponentType->GetEntities(reg);
+  if (filterEntities.empty()) {
+    return {Span<entt::entity const>{}, true};
+  }
+
+  bool requiresPerEntityAccess = false;
+  for (size_t i = 0; i < allEntities.size(); ++i) {
+    entt::entity const entity = allEntities[i];
+    if (filterComponentType->ContainsEntity(reg, entity)) {
+      if (requiresPerEntityAccess) {
+        filteredEntities.push_back(entity);
+      }
+    } else if (!requiresPerEntityAccess) {
+      requiresPerEntityAccess = true;
+      filteredEntities.reserve(Min(allEntities.size(), filterEntities.size()));
+      filteredEntities.append(allEntities.begin(), allEntities.begin() + i);
+    }
+  }
+  return requiresPerEntityAccess ? CaptureEntityList{MakeConstSpan(filteredEntities), true}
+                                 : CaptureEntityList{allEntities, false};
+}
+
 // Deserialize a global context component.
 // Must match logic in SerializeCtxComponentData.
 static void DeserializeCtxComponentData(
@@ -199,16 +245,11 @@ static void SerializeEntityComponentData(
     DynamicArrayStreamWriter& outStream,
     Error& error) {
   MOCHI_ERROR_RETURN(error);
-  Span<entt::entity const> entities = componentType.GetEntities(reg);
-  size_t const count = entities.size();
-  if (count == 0) {
-    // This component type is not currently used by any entity
+  auto const allEntities = componentType.GetEntities(reg);
+  if (allEntities.empty()) {
+    // This component type is not currently used by any entity.
     return;
   }
-
-  MOCHI_ASSERT_VERBOSE(
-      count <= ComponentHeader::kMaxCount,
-      "Too many entities to serialize. This shouldn't be possible unless entt::entity was redefined as a 64-bit type.");
 
   // Look up type information
   auto const* typeInfo = componentType.TryGetReflectionInfo();
@@ -220,20 +261,19 @@ static void SerializeEntityComponentData(
   // only be serialized for soft actors.
   auto const* attrib = typeInfo->GetAttribute<attribute::CaptureState>();
   MOCHI_ASSERT_VERBOSE(attrib != nullptr);
-  if (attrib->onlyCaptureWith) {
-    auto const* otherComponentType = ecs::TryGetComponentTypeInfo(reg, attrib->onlyCaptureWith);
-    MOCHI_ASSERT_VERBOSE(otherComponentType, "Must have been registered");
-    if (otherComponentType->GetEntities(reg).empty()) {
-      // Therefore, there are no entities that have both componentType and otherComponentType.
-      // We're done here.
-      return;
-    } else {
-      // TODO: According to the attribute, we should only serialize this component for certain
-      // entities. That will require some extra logic that hasn't been written yet. The new logic
-      // might be faster (less data to write) or slower (more complex).
-      // WARNING: Be sure to update CaptureStateToJson if this logic changes.
-    }
+  MOCHI_FILO_STACK_ALLOCATOR(entityAllocator, kFilteredEntityStackCount * sizeof(entt::entity));
+  DynamicArray<entt::entity> filteredEntities(&entityAllocator);
+  auto const captureEntities = GetCaptureEntities(reg, allEntities, *attrib, filteredEntities);
+  auto const entities = captureEntities.entities;
+  if (entities.empty()) {
+    // This component is filtered out by all existing entities.
+    return;
   }
+
+  size_t const count = entities.size();
+  MOCHI_ASSERT_VERBOSE(
+      count <= ComponentHeader::kMaxCount,
+      "Too many entities to serialize. This shouldn't be possible unless entt::entity was redefined as a 64-bit type.");
 
   // Write a placeholder for the component type header
   size_t const headerPos = outStream.GetPosition();
@@ -242,34 +282,49 @@ static void SerializeEntityComponentData(
 
   // Instead of serializing the array of entities, we only serialize a hash.
   // This will be used to verify that the entities match when deserializing.
-  uint64_t entityHash =
-      SReflect::CalcHash64(entities.data(), entities.size() * sizeof(decltype(entities[0])));
+  uint64_t const entityHash = SReflect::CalcHash64(entities.data(), count * sizeof(entt::entity));
 
   // Write per-entity component data
   size_t const dataStartPos = outStream.GetPosition();
-  void const* const* pages = componentType.TryGetPageTable(reg);
-  MOCHI_ASSERT_VERBOSE(
-      pages != nullptr,
-      "This data should exist for all component types that are not \"tag\" components.");
-  if (typeInfo->IsMemCopySafe()) {
-    // Fast Path: Copy raw bytes one page at a time.
-    size_t iPage = 0;
-    for (size_t i = 0; i < count; i += size_t(ENTT_PACKED_PAGE), ++iPage) {
-      size_t copySize = Min(size_t(ENTT_PACKED_PAGE), count - i) * typeInfo->_sizeInBytes;
-      outStream.Write(pages[iPage], copySize, error);
+  if (captureEntities.requiresPerEntityAccess) {
+    // Filtered components are not necessarily contiguous in the component storage.
+    bool const isMemCopySafe = typeInfo->IsMemCopySafe();
+    for (entt::entity const entity : entities) {
+      void const* src = componentType.TryGet(reg, entity);
+      MOCHI_ASSERT_VERBOSE(src != nullptr);
+      if (isMemCopySafe) {
+        outStream.Write(src, typeInfo->_sizeInBytes, error);
+      } else {
+        bool const success = typeInfo->SerializeToBytesInner(src, outStream);
+        MOCHI_ERROR_IF(!success, error, "Failed to serialize component data");
+      }
+      MOCHI_ERROR_RETURN(error);
     }
   } else {
-    // Slower Path: Let each component serialize itself.
-    size_t iPage = 0;
-    for (size_t i = 0; i < count; i += ENTT_PACKED_PAGE, ++iPage) {
-      auto const* pageBegin = static_cast<uint8_t const*>(pages[iPage]);
-      MOCHI_ASSERT_VERBOSE(pageBegin != nullptr);
-      auto const pageSize = Min(size_t(ENTT_PACKED_PAGE), count - i) * typeInfo->_sizeInBytes;
-      auto const* pageEnd = pageBegin + pageSize;
-      for (auto const* src = pageBegin; src < pageEnd; src += typeInfo->_sizeInBytes) {
-        bool success = typeInfo->SerializeToBytesInner(src, outStream);
-        MOCHI_ERROR_IF(!success, error, "Failed to serialize component data");
-        MOCHI_ERROR_RETURN(error);
+    void const* const* pages = componentType.TryGetPageTable(reg);
+    MOCHI_ASSERT_VERBOSE(
+        pages != nullptr,
+        "This data should exist for all component types that are not \"tag\" components.");
+    if (typeInfo->IsMemCopySafe()) {
+      // Fast Path: Copy raw bytes one page at a time.
+      size_t iPage = 0;
+      for (size_t i = 0; i < count; i += size_t(ENTT_PACKED_PAGE), ++iPage) {
+        size_t copySize = Min(size_t(ENTT_PACKED_PAGE), count - i) * typeInfo->_sizeInBytes;
+        outStream.Write(pages[iPage], copySize, error);
+      }
+    } else {
+      // Slower Path: Let each component serialize itself.
+      size_t iPage = 0;
+      for (size_t i = 0; i < count; i += ENTT_PACKED_PAGE, ++iPage) {
+        auto const* pageBegin = static_cast<uint8_t const*>(pages[iPage]);
+        MOCHI_ASSERT_VERBOSE(pageBegin != nullptr);
+        auto const pageSize = Min(size_t(ENTT_PACKED_PAGE), count - i) * typeInfo->_sizeInBytes;
+        auto const* pageEnd = pageBegin + pageSize;
+        for (auto const* src = pageBegin; src < pageEnd; src += typeInfo->_sizeInBytes) {
+          bool success = typeInfo->SerializeToBytesInner(src, outStream);
+          MOCHI_ERROR_IF(!success, error, "Failed to serialize component data");
+          MOCHI_ERROR_RETURN(error);
+        }
       }
     }
   }
@@ -299,6 +354,8 @@ static void DeserializeEntityComponentData(
   // Read the component header
   ComponentHeader header;
   StreamRead(header, stream, error);
+  MOCHI_ERROR_RETURN(error);
+  MOCHI_ASSERT_VERBOSE(header.count > 0, "Empty headers should never be written");
 
   // Look up the component type information
   auto const* componentType = LookUpComponentTypeInfo(reg, header, error);
@@ -313,14 +370,23 @@ static void DeserializeEntityComponentData(
   }
 
   // Verify the entity count
-  auto const& entities = componentType->GetEntities(reg);
+  auto const* attrib = typeInfo->GetAttribute<attribute::CaptureState>();
+  MOCHI_ERROR_IF(
+      attrib == nullptr, error, "Component type is not valid in an entity capture block");
+  MOCHI_ERROR_RETURN(error);
+  MOCHI_FILO_STACK_ALLOCATOR(entityAllocator, kFilteredEntityStackCount * sizeof(entt::entity));
+  DynamicArray<entt::entity> filteredEntities(&entityAllocator);
+  auto const allEntities = componentType->GetEntities(reg);
+  auto const captureEntities = GetCaptureEntities(reg, allEntities, *attrib, filteredEntities);
+  auto const entities = captureEntities.entities;
   MOCHI_ERROR_IF(
       header.count != entities.size(),
       error,
       "Unable to restore state because the number of entities has changed.");
   MOCHI_ERROR_RETURN(error);
 
-  auto entityHash = SReflect::CalcHash64(entities.data(), entities.size() * sizeof(entities[0]));
+  uint64_t const entityHash =
+      SReflect::CalcHash64(entities.data(), entities.size() * sizeof(entt::entity));
   MOCHI_ERROR_IF(
       header.entityHash != entityHash,
       error,
@@ -328,38 +394,61 @@ static void DeserializeEntityComponentData(
   MOCHI_ERROR_RETURN(error);
 
   // Deserialize per-entity data
-  void* const* pages = componentType->TryGetPageTable(reg);
-  MOCHI_ASSERT_VERBOSE(
-      pages != nullptr,
-      "This data should exist for all component types that are not \"tag\" components.");
-  if (typeInfo->IsMemCopySafe()) {
-    // Fast Path: Copy raw bytes one page at a time.
+  if (captureEntities.requiresPerEntityAccess) {
+    bool const isMemCopySafe = typeInfo->IsMemCopySafe();
     MOCHI_ERROR_IF(
-        header.dataSize != header.count * typeInfo->_sizeInBytes, error, "Data size mismatch");
-    size_t iPage = 0;
-    for (size_t i = 0; i < header.count; i += ENTT_PACKED_PAGE, ++iPage) {
-      size_t copySize =
-          Min(size_t(ENTT_PACKED_PAGE), size_t(header.count) - i) * typeInfo->_sizeInBytes;
-      stream.Read(pages[iPage], copySize, error);
-    }
-  } else {
-    // Slower Path: Let each component serialize itself.
-    size_t dataStartPos = stream.GetPosition();
-    size_t iPage = 0;
-    for (size_t i = 0; i < header.count; i += ENTT_PACKED_PAGE, ++iPage) {
-      auto* pageBegin = static_cast<uint8_t*>(pages[iPage]);
-      MOCHI_ASSERT_VERBOSE(pageBegin != nullptr);
-      auto const pageSize =
-          Min(size_t(ENTT_PACKED_PAGE), size_t(header.count) - i) * typeInfo->_sizeInBytes;
-      auto const* pageEnd = pageBegin + pageSize;
-      for (auto* dst = pageBegin; dst < pageEnd; dst += typeInfo->_sizeInBytes) {
-        bool success = typeInfo->DeserializeFromBytes(stream, dst);
+        isMemCopySafe && header.dataSize != header.count * typeInfo->_sizeInBytes,
+        error,
+        "Data size mismatch");
+    MOCHI_ERROR_RETURN(error);
+    size_t const dataStartPos = stream.GetPosition();
+    for (entt::entity const entity : entities) {
+      void* dst = componentType->TryGet(reg, entity);
+      MOCHI_ASSERT_VERBOSE(dst != nullptr);
+      if (isMemCopySafe) {
+        stream.Read(dst, typeInfo->_sizeInBytes, error);
+      } else {
+        bool const success = typeInfo->DeserializeFromBytes(stream, dst);
         MOCHI_ERROR_IF(!success, error, "Failed to deserialize component data");
-        MOCHI_ERROR_RETURN(error);
       }
+      MOCHI_ERROR_RETURN(error);
     }
-    auto dataBytesRead = stream.GetPosition() - dataStartPos;
+    size_t const dataBytesRead = stream.GetPosition() - dataStartPos;
     MOCHI_ERROR_IF(dataBytesRead != header.dataSize, error, "Data size mismatch");
+  } else {
+    void* const* pages = componentType->TryGetPageTable(reg);
+    MOCHI_ASSERT_VERBOSE(
+        pages != nullptr,
+        "This data should exist for all component types that are not \"tag\" components.");
+    if (typeInfo->IsMemCopySafe()) {
+      // Fast Path: Copy raw bytes one page at a time.
+      MOCHI_ERROR_IF(
+          header.dataSize != header.count * typeInfo->_sizeInBytes, error, "Data size mismatch");
+      size_t iPage = 0;
+      for (size_t i = 0; i < header.count; i += ENTT_PACKED_PAGE, ++iPage) {
+        size_t copySize =
+            Min(size_t(ENTT_PACKED_PAGE), size_t(header.count) - i) * typeInfo->_sizeInBytes;
+        stream.Read(pages[iPage], copySize, error);
+      }
+    } else {
+      // Slower Path: Let each component serialize itself.
+      size_t dataStartPos = stream.GetPosition();
+      size_t iPage = 0;
+      for (size_t i = 0; i < header.count; i += ENTT_PACKED_PAGE, ++iPage) {
+        auto* pageBegin = static_cast<uint8_t*>(pages[iPage]);
+        MOCHI_ASSERT_VERBOSE(pageBegin != nullptr);
+        auto const pageSize =
+            Min(size_t(ENTT_PACKED_PAGE), size_t(header.count) - i) * typeInfo->_sizeInBytes;
+        auto const* pageEnd = pageBegin + pageSize;
+        for (auto* dst = pageBegin; dst < pageEnd; dst += typeInfo->_sizeInBytes) {
+          bool success = typeInfo->DeserializeFromBytes(stream, dst);
+          MOCHI_ERROR_IF(!success, error, "Failed to deserialize component data");
+          MOCHI_ERROR_RETURN(error);
+        }
+      }
+      auto dataBytesRead = stream.GetPosition() - dataStartPos;
+      MOCHI_ERROR_IF(dataBytesRead != header.dataSize, error, "Data size mismatch");
+    }
   }
 }
 
@@ -526,15 +615,13 @@ mochi::capture::CaptureStateToJson(entt::registry& reg, bool prettyMultiLine, Er
         MOCHI_ASSERT_VERBOSE(typeInfo != nullptr);
         auto const* attrib = typeInfo->GetAttribute<attribute::CaptureState>();
         MOCHI_ASSERT_VERBOSE(attrib != nullptr);
-        if (attrib->onlyCaptureWith) {
-          auto const* otherComponentType =
-              ecs::TryGetComponentTypeInfo(reg, attrib->onlyCaptureWith);
-          MOCHI_ASSERT_VERBOSE(otherComponentType, "Must have been registered");
-          if (otherComponentType->GetEntities(reg).empty()) {
-            return;
-          }
-        }
-        for (entt::entity e : componentType.GetEntities(reg)) {
+        MOCHI_FILO_STACK_ALLOCATOR(
+            entityAllocator, kFilteredEntityStackCount * sizeof(entt::entity));
+        DynamicArray<entt::entity> filteredEntities(&entityAllocator);
+        auto const allEntities = componentType.GetEntities(reg);
+        auto const captureEntities =
+            GetCaptureEntities(reg, allEntities, *attrib, filteredEntities);
+        for (entt::entity e : captureEntities.entities) {
           picojson::value* value = nullptr;
           if (reg.all_of<CActorInfo const>(e)) {
             value = &actorComponents[e][typeInfo->_name];
