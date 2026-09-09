@@ -120,6 +120,8 @@ MOCHI_API void GetContactForceFromActorWorldBackward(
     Span<real const> gradOutput,
     Error& error);
 
+MOCHI_API void GetContactPointsBackward(Actor* actor, Span<real const> gradOutput, Error& error);
+
 MOCHI_API void GetArticulatedPoseBackward(Actor* actor, Span<real const> gradOutput, Error& error);
 
 MOCHI_API void

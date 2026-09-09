@@ -2836,6 +2836,155 @@ void diffsim::GetContactForceFromActorWorldBackward(
   GetContactForceWorldBackwardImpl(actor, /*exclusiveCollider*/ other, gradOutput, error);
 }
 
+// The per-contact backward of GetContactPointsWorld. gradOutput holds one 3-vector per reported
+// contact point, in the order of GetContactPointsWorld (size 3 * count): the gradient with
+// respect to ContactPoint::force as reported, the quadrature-weighted world force on actorA (the
+// force on this actor's sample in the colliding role, the force on the other actor's sample when
+// this actor is the collider). Every point is matched to the contact containers by its pair and
+// sample index, so the query must describe the state being differentiated (the containers
+// PrepareBackPropagation rebuilt), and the adjoint w_s J_B lambda_k of its contact is accumulated
+// the way GetContactForceWorldBackward accumulates the total force's - seeding every point with
+// one gradient g reproduces that backward (with -g for the points of the collider role, whose
+// reported force acts on the other actor). The positions and normals of the points carry no
+// adjoint here: a sample position is the root transform applied to a fixed local point
+// (GetRootTransformBackward covers it).
+void diffsim::GetContactPointsBackward(Actor* actor, Span<real const> gradOutput, Error& error) {
+  MOCHI_ERROR_RETURN_IF_BACKWARD_NOT_SUPPORTED();
+  MOCHI_ERROR_IF(
+      actor->GetType() != ActorType::Rigid || !reg.all_of<CRigidBodyInertia>(actorImpl->e),
+      error,
+      "Only rigid actors (including links) are supported.");
+  MOCHI_ERROR_RETURN(error);
+  auto* query = reg.try_get<CQueryContactPoints>(e);
+  MOCHI_ERROR_IF(
+      !query || !query->isInitialized,
+      error,
+      "No contact-points query: register CONTACT_POINTS and step the scene first.");
+  MOCHI_ERROR_RETURN(error);
+  int const numPoints = isize(query->contactPoints);
+  MOCHI_ERROR_IF_NOT(
+      isize(gradOutput) == RigidSize::kDTrans * numPoints,
+      error,
+      "gradOutput size must be 3 times the number of contact points of the query.");
+  MOCHI_ERROR_IF_NOT(IsFinite(gradOutput), error, "gradOutput must be finite.");
+  MOCHI_ERROR_RETURN(error);
+
+  // The same collider coverage as GetContactForceWorldBackward (AccumulateContactForceAdjoints
+  // covers rigid actors, links and SDF-mapped soft actors; shells, rods and point clouds are
+  // refused rather than dropped).
+  auto const isSupportedCollider = [&](entt::entity collider) {
+    return reg.any_of<TagStaticActor, TagRigidActor>(collider) ||
+        (reg.all_of<TagSoftActor>(collider) && !reg.any_of<TagNestedSoftActor, TagRomActor>(collider) &&
+         reg.try_get<CSdfMapping<TimeStep::Current> const>(collider) != nullptr);
+  };
+  auto const isSupportedColliding = [&](entt::entity colliding) {
+    return reg.all_of<TagRigidActor>(colliding) ||
+        (reg.any_of<TagSoftActor, TagShellActor, TagRodActor>(colliding) &&
+         !reg.any_of<TagNestedSoftActor, TagRomActor, TagRodSurfaceContact>(colliding));
+  };
+  auto* collisionsAsync = reg.try_get<CActiveCollisions<ContactType::Async, TimeStep::Current>>(e);
+  auto* collisionsSync = reg.try_get<CActiveCollisions<ContactType::Sync, TimeStep::Current>>(e);
+  auto* colliderJacs = reg.try_get<CCollJacs<CollRole::Collider>>(e);
+
+  // The query lists the contacts of a pair in container order, so the search for a point's
+  // contact resumes where the previous point of that pair was found (and wraps around once).
+  std::unordered_map<ContactDetectionResult const*, int> cursors;
+  auto const findContact = [&](ContactDetectionResult const& result, int sampleIndex) {
+    int const numContacts = isize(result.sampleIndices);
+    int& cursor = cursors[&result];
+    for (int step = 0; step < numContacts; ++step) {
+      int const i = (cursor + step) % numContacts;
+      if (result.sampleIndices[i] == sampleIndex) {
+        cursor = i + 1;
+        return i;
+      }
+    }
+    return -1;
+  };
+
+  for (int k = 0; k < numPoints; ++k) {
+    ContactPoint const& point = query->contactPoints[k];
+    entt::entity const entityA = GetEntity(reg, point.actorA, error);
+    entt::entity const entityB = GetEntity(reg, point.actorB, error);
+    MOCHI_ERROR_RETURN(error);
+    ContactDetectionResult* result = nullptr;
+    entt::entity colliding = entt::null;
+    if (entityA == e) {
+      // This actor's samples against the collider entityB (async first, then sync: the query's
+      // order).
+      colliding = e;
+      if (collisionsAsync) {
+        for (auto& collision : *collisionsAsync) {
+          if (collision.colliderEntity == entityB) {
+            result = &collision.collisionResult;
+            break;
+          }
+        }
+      }
+      if (!result && collisionsSync) {
+        for (auto& collision : *collisionsSync) {
+          if (collision.colliderEntity == entityB) {
+            result = &collision.collisionResult;
+            break;
+          }
+        }
+      }
+      MOCHI_ERROR_IF(
+          result && !isSupportedCollider(entityB),
+          error,
+          "Contact-force adjoints against this collider are not supported (point-cloud, shell, "
+          "rod, nested or ROM colliders): disable that contact or set its collider type to NONE.");
+    } else if (entityB == e) {
+      // The samples of entityA against this actor's collider.
+      colliding = entityA;
+      if (colliderJacs && !reg.any_of<CRequiresFarSdfEvaluation>(entityA)) {
+        for (auto& jac : *colliderJacs) {
+          if (jac.otherEntity == entityA) {
+            result = jac.query;
+            break;
+          }
+        }
+      }
+      MOCHI_ERROR_IF(
+          result && !isSupportedColliding(entityA),
+          error,
+          "Contact-force adjoints of the samples of a nested or ROM actor, or of a rod with "
+          "surface contact, against this actor are not supported: disable that contact.");
+    } else {
+      MOCHI_ERROR_SET(error, "A contact point of the query does not involve this actor.");
+    }
+    MOCHI_ERROR_RETURN(error);
+    MOCHI_ERROR_IF(
+        !result,
+        error,
+        "The contact pair of a queried point is not in the current contact containers: the "
+        "query must be read on the state being differentiated.");
+    MOCHI_ERROR_RETURN(error);
+    MOCHI_ERROR_IF(
+        isize(result->forceAdjoint) != isize(result->sampleIndices),
+        error,
+        "The per-contact force adjoints are not prepared: call prepare_back_propagate first.");
+    MOCHI_ERROR_RETURN(error);
+    int const i = findContact(*result, point.sampleIndex);
+    MOCHI_ERROR_IF(
+        i < 0,
+        error,
+        "The sample of a queried contact point is not in the current contact containers: the "
+        "query must be read on the state being differentiated.");
+    MOCHI_ERROR_RETURN(error);
+    MOCHI_ASSERT(
+        result->jacColliderFromWorld.size() == 1 ||
+            isize(result->jacColliderFromWorld) == isize(result->sampleIndices),
+        "Unexpected number of collider-space Jacobians.");
+    int const iJac = result->jacColliderFromWorld.size() == 1 ? 0 : i;
+    auto const& collidingSamples = reg.get<CContactSamples<TimeStep::Current> const>(colliding);
+    Vec4r const grad =
+        Load<RigidSize::kDTrans, Vec4r>(gradOutput.data() + RigidSize::kDTrans * k);
+    Vec4r const gradCollider = DotMatVec3x3(result->jacColliderFromWorld[iJac], grad);
+    result->forceAdjoint[i] += ToReal3(collidingSamples.weights[point.sampleIndex] * gradCollider);
+  }
+}
+
 void diffsim::GetArticulatedPoseBackward(Actor* actor, Span<real const> gradOutput, Error& error) {
   MOCHI_ERROR_RETURN_IF_BACKWARD_NOT_SUPPORTED();
   MOCHI_ERROR_IF_NOT(

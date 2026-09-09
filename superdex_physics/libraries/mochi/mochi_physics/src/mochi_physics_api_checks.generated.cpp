@@ -686,6 +686,9 @@ static_assert(std::is_same_v<decltype(&mochi::diffsim::GetContactForceWorldBackw
 // free function mochi::diffsim::GetContactForceFromActorWorldBackward
 static_assert(std::is_same_v<decltype(&mochi::diffsim::GetContactForceFromActorWorldBackward), void (*)(mochi::Actor*, mochi::Actor const*, mochi::Span<mochi::real const>, mochi::Error&)>, "\n  ERROR: Function mochi::diffsim::GetContactForceFromActorWorldBackward is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 
+// free function mochi::diffsim::GetContactPointsBackward
+static_assert(std::is_same_v<decltype(&mochi::diffsim::GetContactPointsBackward), void (*)(mochi::Actor*, mochi::Span<mochi::real const>, mochi::Error&)>, "\n  ERROR: Function mochi::diffsim::GetContactPointsBackward is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+
 // free function mochi::diffsim::GetArticulatedPoseBackward
 static_assert(std::is_same_v<decltype(&mochi::diffsim::GetArticulatedPoseBackward), void (*)(mochi::Actor*, mochi::Span<mochi::real const>, mochi::Error&)>, "\n  ERROR: Function mochi::diffsim::GetArticulatedPoseBackward is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 

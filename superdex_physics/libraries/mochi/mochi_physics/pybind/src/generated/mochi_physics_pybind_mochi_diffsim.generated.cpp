@@ -422,6 +422,18 @@ void mochi::DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[m
       , "Backward pass for\n:meth:`~superdex.physics.Actor.get_contact_force_from_actor_world`.\n\nAccumulates the gradient w.r.t. the world-frame contact force from another actor\ninto prepared per-contact force adjoints. Only rigid actors are supported. Must\nbe called after :func:`~superdex.physics.diffsim.prepare_back_propagate` and\nbefore :func:`~superdex.physics.diffsim.back_propagate`.\n\nArgs:\n    actor (Actor): The rigid actor receiving the contact force.\n    other (Actor): The actor exerting the contact force.\n    grad_output (ArrayLikeReal): Gradient w.r.t. the contact force [N] in world\n        frame. Must be of size 3.\n\nRaises:\n    :class:`~superdex.physics.Error`: If an error occurs."
     );
 
+    m_diffsim.def("get_contact_points_backward", [](mochi::Actor* actor, mochi::Span<mochi::real const> grad_output) {
+      mochi::Error error;
+      mochi::diffsim::GetContactPointsBackward(actor, grad_output, error);
+      if (!error.IsOK()) {
+        throw MochiErrorException(error);
+      }
+    }
+      , py::arg("actor")
+      , py::arg("grad_output")
+      , "Backward pass for :meth:`~superdex.physics.Actor.get_contact_points_world`.\n\nAccumulates one gradient per reported contact point into the prepared per-contact\nforce adjoints, matching each point to its contact by actor pair and sample index.\nThe gradient of a point is with respect to its ``force`` as reported: the\nquadrature-weighted world force on ``actor_a`` (the force on this actor's sample\nwhen it is ``actor_a``, the force on the other actor's sample when this actor is\n``actor_b``). Seeding every point with the same gradient reproduces\n:func:`~superdex.physics.diffsim.get_contact_force_world_backward` (with the\nopposite sign for the points where this actor is ``actor_b``). The positions and\nnormals of the points carry no adjoint here: the position of a sample is the\nactor's root transform applied to a fixed local point, which\n:func:`~superdex.physics.diffsim.get_root_transform_backward` covers. Only rigid\nactors (including links) are supported. Must be called after\n:func:`~superdex.physics.diffsim.prepare_back_propagate` and before\n:func:`~superdex.physics.diffsim.back_propagate`, with the query read on the state\nbeing differentiated.\n\nArgs:\n    actor (Actor): The rigid actor.\n    grad_output (ArrayLikeReal): Gradients w.r.t. the reported contact forces [N] in\n        world frame, one 3-vector per point in the order of\n        :meth:`~superdex.physics.Actor.get_contact_points_world`. Must be of size 3\n        times the number of points.\n\nRaises:\n    :class:`~superdex.physics.Error`: If an error occurs."
+    );
+
     m_diffsim.def("get_articulated_pose_backward", [](mochi::Actor* actor, mochi::Span<mochi::real const> grad_output) {
       mochi::Error error;
       mochi::diffsim::GetArticulatedPoseBackward(actor, grad_output, error);

@@ -65,6 +65,9 @@ layers build on each other:
   parameters.
 - Losses on positions, orientations, joint poses, soft-body displacements and contact forces.
   The contact-force adjoint is exact against static and moving colliders, soft bodies included.
+  A loss may also weight the individual contact points of an actor
+  (`diffsim.get_contact_points_backward`: one gradient per point of `get_contact_points_world`,
+  the per-contact seed of a tactile array's readout).
 
 `make_scene_differentiable` switches the solver to the settings the adjoint needs: explicit
 contact normals, exact gradients of the contact merit, an Armijo line search, friction

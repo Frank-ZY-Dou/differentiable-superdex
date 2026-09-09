@@ -745,6 +745,39 @@ def get_contact_force_from_actor_world_backward(
         :class:`~superdex.physics.Error`: If an error occurs.
     """
 
+def get_contact_points_backward(
+    actor: mochi_physics.Actor,
+    grad_output: mochi_physics.ArrayLikeReal,
+) -> None:
+    """Backward pass for :meth:`~superdex.physics.Actor.get_contact_points_world`.
+    
+    Accumulates one gradient per reported contact point into the prepared per-contact
+    force adjoints, matching each point to its contact by actor pair and sample index.
+    The gradient of a point is with respect to its ``force`` as reported: the
+    quadrature-weighted world force on ``actor_a`` (the force on this actor's sample
+    when it is ``actor_a``, the force on the other actor's sample when this actor is
+    ``actor_b``). Seeding every point with the same gradient reproduces
+    :func:`~superdex.physics.diffsim.get_contact_force_world_backward` (with the
+    opposite sign for the points where this actor is ``actor_b``). The positions and
+    normals of the points carry no adjoint here: the position of a sample is the
+    actor's root transform applied to a fixed local point, which
+    :func:`~superdex.physics.diffsim.get_root_transform_backward` covers. Only rigid
+    actors (including links) are supported. Must be called after
+    :func:`~superdex.physics.diffsim.prepare_back_propagate` and before
+    :func:`~superdex.physics.diffsim.back_propagate`, with the query read on the state
+    being differentiated.
+    
+    Args:
+        actor (Actor): The rigid actor.
+        grad_output (ArrayLikeReal): Gradients w.r.t. the reported contact forces [N] in
+            world frame, one 3-vector per point in the order of
+            :meth:`~superdex.physics.Actor.get_contact_points_world`. Must be of size 3
+            times the number of points.
+    
+    Raises:
+        :class:`~superdex.physics.Error`: If an error occurs.
+    """
+
 def get_articulated_pose_backward(
     actor: mochi_physics.Actor,
     grad_output: mochi_physics.ArrayLikeReal,

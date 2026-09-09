@@ -88,6 +88,21 @@ All notable changes to this repository will be documented here.
 
 ### Added
 
+- `diffsim.get_contact_points_backward(actor, grad_output)`: the per-contact backward of
+  `get_contact_points_world`, one 3-vector per reported point (in the query's order) with respect
+  to the point's reported force - the quadrature-weighted world force on `actor_a`, so the points
+  where the actor is `actor_b` carry the force on the other body's sample. Each point is matched
+  to the contact containers by its actor pair and sample index, and its adjoint w_s J_B lambda is
+  accumulated as the total-force backward accumulates one gradient for all points; seeding every
+  point with the same gradient reproduces `get_contact_force_world_backward` (2026-09-09,
+  `EngineContactPointsAdjointTest`: 8e-10 relative between the two seedings on the chain pushing
+  the cube, and a loss weighting every point by a fixed function of its sample index and role
+  agrees with central finite differences of the rollout to 1e-5 along the gradient). This is the
+  engine side of a tactile array: a loss on the per-taxel readout of a fingertip (a fixed
+  distribution of each contact over the taxels it faces) reaches the controls through the
+  per-contact forces and, through `get_root_transform_backward`, the link rotation that turns
+  them into the sensor frame. The positions of the points carry no adjoint (a sample is a fixed
+  point of its rigid part).
 - The differentiation contract of the rollouts, reported and enforced instead of assumed. The
   adjoint is the derivative of the step equations at a solution, so the driver and both torch
   bridges now (1) accept `forward_residual_tolerance`, which makes a step whose Newton solve ended

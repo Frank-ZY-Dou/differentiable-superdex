@@ -1955,6 +1955,173 @@ class EngineContactForceAdjointTest(unittest.TestCase):
         self.assertLessEqual(rel_chain, 1e-5, rel_chain)
 
 
+class EngineContactPointsAdjointTest(unittest.TestCase):
+    """The engine's per-contact backward, ``get_contact_points_backward`` (2026-09-09): one
+    gradient per point of ``get_contact_points_world``, with respect to the point's reported
+    force (the weighted world force on ``actor_a``), matched to the contact containers by pair
+    and sample index. On the chain pushing the cube (scenes.chain_pushing_cube, Coulomb
+    friction) the cube's query holds both roles: its own samples against the link's SDF and
+    the ground, and the link's samples against its SDF (``actor_a`` the link). Checked two
+    ways: a total-force loss written through the points (the sum of the reported forces with
+    the collider-role points negated) gives the gradient of ``get_contact_force_world_backward``
+    to round-off, and a loss that weights every point by a fixed function of its sample index
+    and role - a genuinely per-point tactile signal, continuous when samples enter or leave -
+    agrees with central finite differences of the rollout."""
+
+    NUM_STEPS = 30
+    F_REF = np.array([5.0, 0.0, 30.0])
+
+    @staticmethod
+    def _build():
+        scene, chain, cube = scenes.chain_pushing_cube("coulomb")
+        configure_for_differentiability(scene)
+        cube.register_query(physics.QueryType.CONTACT_POINTS)
+        cube.register_query(physics.QueryType.TOTAL_CONTACT_FORCE)
+        targets = np.zeros((EngineContactPointsAdjointTest.NUM_STEPS, chain.get_num_dofs()))
+        targets[:, 0] = -1.5 * DT * np.arange(1, EngineContactPointsAdjointTest.NUM_STEPS + 1)
+        return scene, chain, cube, targets
+
+    @staticmethod
+    def _points(cube):
+        """(signs, sample indices, forces) of the cube's contact points: sign +1 where the cube
+        is actor_a (the force acts on its sample), -1 where it is actor_b."""
+        handle = cube.get_handle()
+        points = cube.get_contact_points_world()
+        signs = np.array([1.0 if cp.actor_a == handle else -1.0 for cp in points])
+        samples = np.array([cp.sample_index for cp in points], dtype=np.int64)
+        forces = np.array([np.asarray(cp.force.tolist(), dtype=np.float64) for cp in points]).reshape(-1, 3)
+        return signs, samples, forces
+
+    def _rollout_gradient(self, loss_factory):
+        from superdex.physics.diffsim_rollout import DifferentiableRollout
+
+        scene, chain, cube, targets = self._build()
+        loss = loss_factory(cube)
+        result = DifferentiableRollout(scene, dt=DT, num_steps=self.NUM_STEPS).run(
+            apply_inputs=lambda k: chain.set_articulated_target_pose(np.ascontiguousarray(targets[k])),
+            terminal_losses=[loss],
+        )
+        grad = result.gradients["chain"].control_targets.T.copy()  # (num_steps, dofs)
+        scene.release_all_states()
+        physics.destroy_scene(scene)
+        # The roles seen by the loss on the terminal state (the sweep leaves the scene elsewhere).
+        return result.loss, grad, loss.signs
+
+    def test_total_force_through_points_matches_total_force_backward(self) -> None:
+        f_ref = self.F_REF
+        points = self._points
+
+        class TotalLoss:
+            def __init__(self, cube):
+                self.cube = cube
+                self.signs = None
+
+            def value(self) -> float:
+                self.signs, _, _ = points(self.cube)
+                d = np.asarray(self.cube.get_contact_force_world(), dtype=np.float64) - f_ref
+                return 0.5 * float(d @ d)
+
+            def accumulate_output_grad(self) -> None:
+                d = np.asarray(self.cube.get_contact_force_world(), dtype=np.float64) - f_ref
+                diffsim.get_contact_force_world_backward(self.cube, np.ascontiguousarray(d, dtype=real_dtype()))
+
+        class PointsLoss:
+            def __init__(self, cube):
+                self.cube = cube
+                self.signs = None
+
+            def total(self):
+                self.signs, _, forces = points(self.cube)
+                return (self.signs[:, None] * forces).sum(axis=0)
+
+            def value(self) -> float:
+                d = self.total() - f_ref
+                return 0.5 * float(d @ d)
+
+            def accumulate_output_grad(self) -> None:
+                signs, _, _ = points(self.cube)
+                d = self.total() - f_ref
+                grad = np.ascontiguousarray((signs[:, None] * d[None, :]).reshape(-1), dtype=real_dtype())
+                diffsim.get_contact_points_backward(self.cube, grad)
+
+        loss_total, grad_total, signs = self._rollout_gradient(TotalLoss)
+        loss_points, grad_points, _ = self._rollout_gradient(PointsLoss)
+        self.assertGreater(len(signs), 0, "test is vacuous: no contact on the cube")
+        self.assertTrue((signs > 0).any() and (signs < 0).any(), "both roles must be present")
+        self.assertAlmostEqual(loss_points, loss_total, delta=1e-9 * max(1.0, abs(loss_total)))
+        self.assertGreater(float(np.abs(grad_total).max()), 1e-6, "test is vacuous: zero gradient")
+        # The two seedings differ by the order of the per-contact sums and by what the adjoint
+        # solve (iterative, residual tolerance 1e-10 with finite-difference products) makes of
+        # that: 8e-10 measured, against 1e-10..1e-9 between two runs of the same seeding.
+        rel = np.linalg.norm(grad_points - grad_total) / np.linalg.norm(grad_total)
+        self.assertLessEqual(rel, 1e-8, rel)
+
+    def test_per_point_loss_vs_finite_differences(self) -> None:
+        points = self._points
+
+        def coefficient(signs, samples):
+            # A fixed weight per (role, sample index): the loss of a point is the same whenever
+            # that sample is in contact, so the loss is continuous when samples enter or leave.
+            phase = 0.37 * samples[:, None] + 1.3 * signs[:, None] + np.array([0.0, 1.0, 2.0])[None, :]
+            return np.cos(phase)
+
+        class PointsLoss:
+            def __init__(self, cube):
+                self.cube = cube
+                self.signs = None
+
+            def value(self) -> float:
+                signs, samples, forces = points(self.cube)
+                self.signs = signs
+                return float((coefficient(signs, samples) * forces).sum())
+
+            def accumulate_output_grad(self) -> None:
+                signs, samples, _ = points(self.cube)
+                grad = np.ascontiguousarray(coefficient(signs, samples).reshape(-1), dtype=real_dtype())
+                diffsim.get_contact_points_backward(self.cube, grad)
+
+        loss_value, grad, signs = self._rollout_gradient(PointsLoss)
+        self.assertTrue((signs > 0).any() and (signs < 0).any(), "both roles must be present")
+        self.assertGreater(float(np.abs(grad).max()), 1e-6, "test is vacuous: zero gradient")
+
+        scene, chain, cube, targets = self._build()
+        state = scene.capture_state()
+        loss = PointsLoss(cube)
+
+        def objective(u):
+            scene.restore_state(state, False)
+            for k in range(self.NUM_STEPS):
+                chain.set_articulated_target_pose(np.ascontiguousarray(u[k]))
+                scene.step(DT)
+            return loss.value()
+
+        self.assertAlmostEqual(objective(targets), loss_value, delta=1e-9 * max(1.0, abs(loss_value)))
+        eps = 1e-6
+        direction = grad / np.linalg.norm(grad)
+        fd = (objective(targets + eps * direction) - objective(targets - eps * direction)) / (2 * eps)
+        analytic = float((grad * direction).sum())
+        self.assertLessEqual(abs(fd - analytic) / abs(fd), 1e-5, (analytic, fd))
+        # The four largest entries one by one.
+        flat = np.argsort(np.abs(grad).reshape(-1))[::-1][:4]
+        for index in flat:
+            k, d = divmod(int(index), grad.shape[1])
+            e = np.zeros_like(targets)
+            e[k, d] = eps
+            fd = (objective(targets + e) - objective(targets - e)) / (2 * eps)
+            self.assertLessEqual(abs(fd - grad[k, d]) / abs(fd), 1e-4, (k, d, grad[k, d], fd))
+        scene.release_all_states()
+        physics.destroy_scene(scene)
+
+    def test_wrong_size_is_refused(self) -> None:
+        scene, chain, cube, targets = self._build()
+        chain.set_articulated_target_pose(np.ascontiguousarray(targets[0]))
+        scene.step(DT)
+        n = len(cube.get_contact_points_world())
+        with self.assertRaisesRegex(physics.Error, "3 times the number of contact points"):
+            diffsim.get_contact_points_backward(cube, np.zeros(3 * n + 1, dtype=real_dtype()))
+        physics.destroy_scene(scene)
+
+
 class PolicyRolloutLifetimeTest(unittest.TestCase):
     """A policy rollout releases every captured state when a loss raises (before 2026-09-07: the policy driver repeated the rollout driver's success-path-only release)."""
 
