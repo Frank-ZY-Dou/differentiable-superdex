@@ -46,6 +46,15 @@ And finite-element soft bodies, differentiated through their elastic dynamics an
 | :-: | :-: |
 | ![soft_landing](superdex_physics/examples/media/soft_landing.gif) | ![soft_on_soft](superdex_physics/examples/media/soft_on_soft.gif) |
 
+**A note on interpenetration.** In some of these animations you may see bodies overlap a little.
+SuperDex's contact is a compliant penalty model that permits small penetrations, not a contact
+algorithm that keeps the geometry strictly intersection-free, and it runs no continuous collision
+detection (CCD). Compliant contact gives smooth contact responses and spatially distributed contact
+forces, which is what makes tactile manipulation tractable to model. Slight interpenetration also
+does not stand in the way of sim-to-real transfer of learned policies: a neural policy carries its
+own robustness and is trained under domain randomization and similar augmentation anyway, so what
+matters is that the simulation gives the policy enough information to learn from.
+
 ## 📢 Updates
 
 - **[September 2026]** Initial release, `1.0.0+diffsim.1`: the discrete adjoint of SuperDex
