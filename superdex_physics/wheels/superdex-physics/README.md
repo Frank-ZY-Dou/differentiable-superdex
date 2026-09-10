@@ -202,10 +202,11 @@ All examples live in `superdex_physics/examples` and need `SUPERDEX_PRECISION=do
 | script | what it shows |
 |---|---|
 | `example_diffsim_throw.py` | The per-step adjoint API written out by hand: a thrown cube lands on a target after impact and sliding. No assets, no GUI. |
-| `example_diffsim_video.py` | A rigid throw and a soft landing optimized by gradient descent, rendered to video. |
+| `example_diffsim_video.py` | A rigid throw and finite-element soft-body tasks (a jelly landing on a target, a jelly shoving a jelly) optimized by gradient descent, rendered to video. |
 | `example_diffsim_sysid.py` | System identification. A sliding cube's friction coefficient and density, or (`--mode soft`) a dropped soft cube's Young's modulus and Poisson's ratio, recovered from observed trajectories to 0.01%. |
 | `example_diffsim_ik.py` | Inverse kinematics through the simulator. L-BFGS on the FR3's joint targets with the adjoint gradient of the settled end-effector pose: in free space it reaches a position and orientation to 0.01 mm where the kinematic solution held by the controller sags 55 mm under gravity; on a box it rests the wrist at a point with exactly 10 N of contact force, the height set by the force objective. 25 rollouts, half a minute in all. |
 | `example_diffsim_robot_video.py` | Fifteen manipulation tasks solved by gradient descent through contact, each recorded as a video. |
+| `example_diffsim_tactile.py` | Differentiable tactile control of the XHand1: its 600-taxel fingertip compression map is a differentiable function of the state; from the settled grip the joint targets of a lighter target grip are recovered from the tactile map alone. |
 
 ```bash
 SUPERDEX_PRECISION=double python superdex_physics/examples/example_diffsim_robot_video.py --task all --check

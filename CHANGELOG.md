@@ -205,7 +205,9 @@ branch as of 2026-09-06.
 - `superdex.physics.utils.penetration.PenetrationChecker`: the interpenetration of a scene
   measured from the engine's contact samples, with a report and an assertion.
 - Examples in `superdex_physics/examples`: `example_diffsim_throw.py` (the per-step API by hand),
-  `example_diffsim_video.py` (a rigid throw and a soft landing), `example_diffsim_sysid.py`
+  `example_diffsim_video.py` (a rigid throw and finite-element soft-body tasks: a jelly landing on
+  a target and a jelly shoving a jelly), `example_diffsim_tactile.py` (differentiable tactile control
+  of the XHand1's 600-taxel fingertip map), `example_diffsim_sysid.py`
   (friction and density, or soft material parameters, identified from trajectories),
   `example_diffsim_ik.py` (inverse kinematics through the simulator: joint targets solved by
   L-BFGS on the settled pose, compensating the controller's sag under gravity, and with a
@@ -213,7 +215,8 @@ branch as of 2026-09-06.
   tasks on video, with finite-difference checks, among them grasps with six hands). With `--export-scenes` the demos also write the recorded frames' bodies, meshes,
   textures and camera, and `render_diffsim_blender.py` renders them with Blender.
 - Assets: hand packages for the Wuji Hand 1, the Wuji Hand 2 (beta 2), the RobotEra XHand1 and the
-  Sharpa Wave under `assets/bots/hands` (both sides, converted from the vendors' URDF descriptions), and
+  Sharpa Wave under `assets/bots/hands` (both sides, converted from the vendors' URDF descriptions),
+  the XHand1 v1.3 package with fingertip tactile taxel layouts (`assets/bots/hands/xhand1_official`), and
   FR3 assemblies with the right Wuji Hand 2 (beta 1 and beta 2), Wuji Hand 1, XHand1 and Sharpa Wave under
   `assets/bots/arm_hand_combos`, used by the hand demos.
 - `tools/urdf_to_superdex_bot.py`: converts a URDF description into a SuperDex bot package (kinematics

@@ -69,7 +69,7 @@ def load_scene(stem: pathlib.Path):
 
 
 def _material(name: str, base_color, roughness: float, metallic: float = 0.0, emission=None,
-              texture_path: pathlib.Path | None = None, subsurface: float = 0.0):
+              texture_path: pathlib.Path | None = None, subsurface: float = 0.0, specular: float | None = None):
     import bpy
 
     material = bpy.data.materials.new(name)
@@ -80,8 +80,12 @@ def _material(name: str, base_color, roughness: float, metallic: float = 0.0, em
     bsdf.inputs["Base Color"].default_value = (*base_color[:3], 1.0)
     bsdf.inputs["Roughness"].default_value = roughness
     bsdf.inputs["Metallic"].default_value = metallic
+    if specular is not None and "Specular IOR Level" in bsdf.inputs:
+        bsdf.inputs["Specular IOR Level"].default_value = specular
     if subsurface > 0.0 and "Subsurface Weight" in bsdf.inputs:
         bsdf.inputs["Subsurface Weight"].default_value = subsurface
+        if "Subsurface Radius" in bsdf.inputs:
+            bsdf.inputs["Subsurface Radius"].default_value = tuple(0.02 * c for c in base_color[:3])
     if emission is not None:
         bsdf.inputs["Emission Color"].default_value = (*emission[:3], 1.0)
         bsdf.inputs["Emission Strength"].default_value = 1.0
@@ -97,7 +101,8 @@ def _body_material(meta: dict, stem: pathlib.Path):
     name = meta["name"].lower()
     material = meta.get("material") or {}
     if meta["kind"] == "soft":
-        return _material(meta["name"], (0.25, 0.72, 0.38), 0.35, subsurface=0.25)
+        base = material.get("base_color") or (0.05, 0.42, 0.12)
+        return _material(meta["name"], base, 0.35, specular=0.1)
     if meta["source"] == "render_model":
         base = material.get("base_color") or [0.82, 0.82, 0.8]
         roughness = material.get("roughness")
@@ -107,7 +112,11 @@ def _body_material(meta: dict, stem: pathlib.Path):
             roughness = 0.6 if dark else 0.4
         texture = stem.parent / f"{stem.name}.scene.body{meta['index']}.png" if meta.get("texture") else None
         return _material(meta["name"], base, roughness, metallic, texture_path=texture)
-    # Physics meshes: the manipulated objects.
+    # Physics meshes: the manipulated objects. An exported base color wins; otherwise the
+    # manipulated cube/box is the accent red and anything else a neutral grey.
+    base = material.get("base_color")
+    if base is not None:
+        return _material(meta["name"], base, 0.4)
     if any(key in name for key in ("cube", "box", "block", "target")):
         return _material(meta["name"], (0.72, 0.2, 0.02), 0.35)
     return _material(meta["name"], (0.6, 0.62, 0.66), 0.5)
@@ -228,8 +237,15 @@ def _lights_and_camera(meta: dict, size) -> None:
     scene.camera = camera_obj
     scene.render.resolution_x, scene.render.resolution_y = size
     scene.render.resolution_percentage = 100
-    scene.view_settings.view_transform = "AgX"
-    scene.view_settings.look = "AgX - Medium High Contrast"
+    # The default is AgX; a demo whose colours AgX would wash out (the FEM jellies) exports
+    # its own view transform and exposure in the scene meta.
+    if meta.get("view_transform"):
+        scene.view_settings.view_transform = meta["view_transform"]
+        if meta.get("view_exposure") is not None:
+            scene.view_settings.exposure = float(meta["view_exposure"])
+    else:
+        scene.view_settings.view_transform = "AgX"
+        scene.view_settings.look = "AgX - Medium High Contrast"
 
 
 def _ground() -> None:
@@ -303,12 +319,12 @@ def render(stem: pathlib.Path, frames_dir: pathlib.Path, samples: int, size, onl
             smooth = body["source"] == "render_model"
             objects[index] = _mesh_object(body["name"], vertices, faces, material, uv=uv, smooth=smooth)
 
-    target = bpy.data.objects.new("Target", None)
-    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.035, location=meta["target"], segments=48, ring_count=24)
-    target = bpy.context.active_object
-    target.name = "Target"
-    target.data.materials.append(_material("Target", (0.85, 0.12, 0.1), 0.4, emission=(0.4, 0.05, 0.04)))
-    target.data.polygons.foreach_set("use_smooth", [True] * len(target.data.polygons))
+    if meta.get("target") is not None:
+        bpy.ops.mesh.primitive_uv_sphere_add(radius=0.035, location=meta["target"], segments=48, ring_count=24)
+        target = bpy.context.active_object
+        target.name = "Target"
+        target.data.materials.append(_material("Target", (0.85, 0.12, 0.1), 0.4, emission=(0.4, 0.05, 0.04)))
+        target.data.polygons.foreach_set("use_smooth", [True] * len(target.data.polygons))
 
     trail = _curve_object("Trail", 0.007, _material("Trail", (0.08, 0.32, 0.95), 0.4, emission=(0.04, 0.16, 0.6)))
     curve_objects = {}
@@ -318,7 +334,8 @@ def render(stem: pathlib.Path, frames_dir: pathlib.Path, samples: int, size, onl
     for frame_index, frame in enumerate(meta["frames"]):
         if frame["new_iteration"]:
             trail_points = []
-        trail_points.append(frame["tracked"])
+        if frame["tracked"] is not None:
+            trail_points.append(frame["tracked"])
         if only is not None and frame_index not in only:
             continue
         _set_polyline(trail, np.asarray(trail_points))

@@ -31,6 +31,21 @@ the first iteration, until the object reaches its goal. The animations show the 
 rendered with Blender from the simulated trajectories
 (`superdex_physics/examples/render_diffsim_blender.py`).
 
+The same simulator differentiates a fingertip tactile map. The XHand1's five pads carry a 600-taxel
+compression map that is a differentiable function of the contact forces; gradient descent recovers a
+target grip's joint targets from its tactile map alone (`example_diffsim_tactile.py`):
+
+| The XHand1 recovers a grip from its 600-taxel tactile map (left: current, right: target) |
+| :-: |
+| ![tactile](superdex_physics/examples/media/xhand_tactile_field.gif) |
+
+And finite-element soft bodies, differentiated through their elastic dynamics and soft contact
+(`example_diffsim_video.py`):
+
+| A jelly lands on a target (`soft`) | A jelly shoves a jelly (`soft_on_soft`) |
+| :-: | :-: |
+| ![soft_landing](superdex_physics/examples/media/soft_landing.gif) | ![soft_on_soft](superdex_physics/examples/media/soft_on_soft.gif) |
+
 ## 📢 Updates
 
 - **[September 2026]** Initial release, `1.0.0+diffsim.1`: the discrete adjoint of SuperDex
@@ -42,11 +57,14 @@ rendered with Blender from the simulated trajectories
   observations; examples for the per-step API, system identification, inverse kinematics through
   the simulator, and fifteen manipulation demos solved by gradient descent through contact and
   rendered with Blender, among them grasps with six hands (Tesollo DG-5F, Wuji Hand 2 beta 1 and
-  beta 2, Wuji Hand 1, RobotEra XHand1, Sharpa Wave); hand packages for the Wuji Hand 1, the Wuji
-  Hand 2 beta 2, the XHand1 and the Sharpa Wave with their FR3 assemblies (`assets/bots`) and the URDF conversion tool
-  (`tools/urdf_to_superdex_bot.py`); and 174 gradient checks against finite differences and
-  closed-form references, run in both precisions by CI. Based on Project SuperDex 1.0.0 and its
-  `main` branch of 2026-09-06.
+  beta 2, Wuji Hand 1, RobotEra XHand1, Sharpa Wave), a differentiable tactile example (the XHand1's
+  600-taxel fingertip map, whose gradient recovers a grip's joint targets), and finite-element
+  soft-body examples (a jelly landing on a target, a jelly shoving a jelly); hand packages for the
+  Wuji Hand 1, the Wuji Hand 2 beta 2, the XHand1 and the Sharpa Wave with their FR3 assemblies, and
+  the XHand1 v1.3 package with fingertip tactile taxel layouts (`assets/bots`), and the URDF
+  conversion tool (`tools/urdf_to_superdex_bot.py`); and 174 gradient checks against finite
+  differences and closed-form references, run in both precisions by CI. Based on Project SuperDex
+  1.0.0 and its `main` branch of 2026-09-09.
 
 What this fork adds to SuperDex:
 

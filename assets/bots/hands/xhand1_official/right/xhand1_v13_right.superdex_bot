@@ -1,0 +1,1253 @@
+{
+  "contactOverrides": [
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_index_rota_link1"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_index_rota_link2"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_index_rota_tip"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_index_rotaback_link2"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_index_rotaback_link1"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_mid_link2"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_mid_tip"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_midback_link2"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_midback_link1"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_pinky_link2"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_pinky_tip"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_pinkyback_link2"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_pinkyback_link1"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_ring_link2"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_ring_tip"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_ringback_link2"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_ringback_link1"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_thumb_rota_link1"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_thumb_rota_link2"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_thumb_rota_tip"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_thumb_rotaback_link2"
+    },
+    {
+      "enable": false,
+      "linkA": "right_hand_link",
+      "linkB": "right_hand_thumb_rotaback_link1"
+    }
+  ],
+  "defaultPose": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "joints": [
+    {
+      "name": "world_joint",
+      "type": "Free"
+    },
+    {
+      "name": "right_hand_back_joint",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.065
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "right_hand_ee_joint",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.065
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "axis": [
+        -1.0,
+        0.0,
+        0.0
+      ],
+      "effortLimit": 0.4,
+      "maxLimit": [
+        -0.174,
+        0.0,
+        0.0
+      ],
+      "minLimit": [
+        0.174,
+        -0.0,
+        -0.0
+      ],
+      "name": "right_hand_index_bend_joint",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0065,
+          0.0265,
+          0.0899
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "effortLimit": 1.1,
+      "maxLimit": [
+        0.0,
+        1.919,
+        0.0
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "right_hand_index_joint1",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0178
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "effortLimit": 0.4,
+      "maxLimit": [
+        0.0,
+        1.919,
+        0.0
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "right_hand_index_joint2",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0558
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "name": "right_hand_index_rota_joint3",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0422482924089424
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "right_hand_index_rotaback_joint2",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0422482924089424
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "right_hand_index_rotaback_joint1",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0557999999999955
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "effortLimit": 1.1,
+      "maxLimit": [
+        0.0,
+        1.919,
+        0.0
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "right_hand_mid_joint1",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0065,
+          0.004,
+          0.1082
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "effortLimit": 0.4,
+      "maxLimit": [
+        0.0,
+        1.919,
+        0.0
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "right_hand_mid_joint2",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0558
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "name": "right_hand_mid_joint3",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.042248
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "right_hand_midback_joint2",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0422482924089416
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "right_hand_midback_joint1",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0558
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "effortLimit": 1.1,
+      "maxLimit": [
+        0.0,
+        1.919,
+        0.0
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "right_hand_pinky_joint1",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0065,
+          -0.036,
+          0.1022
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "effortLimit": 0.4,
+      "maxLimit": [
+        0.0,
+        1.919,
+        0.0
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "right_hand_pinky_joint2",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0558
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "name": "right_hand_pinky_joint3",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0422482924089405
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "right_hand_pinkyback_joint2",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0422482924089405
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "right_hand_pinkyback_joint1",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0558000000000001
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "effortLimit": 1.1,
+      "maxLimit": [
+        0.0,
+        1.919,
+        0.0
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "right_hand_ring_joint1",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0065,
+          -0.016,
+          0.1052
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "effortLimit": 0.4,
+      "maxLimit": [
+        0.0,
+        1.919,
+        0.0
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "right_hand_ring_joint2",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0558
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "name": "right_hand_ring_joint3",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0422482924089404
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "right_hand_ringback_joint2",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0422482924089404
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "right_hand_ringback_joint1",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0558
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "axis": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "effortLimit": 1.1,
+      "maxLimit": [
+        0.0,
+        0.0,
+        -1.832
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        -0.0
+      ],
+      "name": "right_hand_thumb_bend_joint",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0095,
+          0.0228,
+          0.0305
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "effortLimit": 1.1,
+      "maxLimit": [
+        1.57,
+        0.0,
+        0.0
+      ],
+      "minLimit": [
+        -0.698,
+        -0.0,
+        -0.0
+      ],
+      "name": "right_hand_thumb_rota_joint1",
+      "parentLinkFromJoint": {
+        "rotation": [
+          0.0026560308583164923,
+          0.1304994696550749,
+          -0.020174509595553045,
+          0.991239538700108
+        ],
+        "translation": [
+          0.0083177,
+          0.028599,
+          -0.00178
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "axis": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "effortLimit": 0.4,
+      "maxLimit": [
+        1.57,
+        0.0,
+        0.0
+      ],
+      "minLimit": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "right_hand_thumb_rota_joint2",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0553,
+          0.0
+        ]
+      },
+      "type": "Revolute"
+    },
+    {
+      "name": "right_hand_thumb_rota_joint3",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0502276499414863,
+          0.0
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "right_hand_thumb_rotaback_joint2",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0502276499414863,
+          0.0
+        ]
+      },
+      "type": "Hard"
+    },
+    {
+      "name": "right_hand_thumb_rotaback_joint1",
+      "parentLinkFromJoint": {
+        "translation": [
+          0.0,
+          0.0553000000000007,
+          0.0
+        ]
+      },
+      "type": "Hard"
+    }
+  ],
+  "links": [
+    {
+      "centerOfMass": [
+        0.010035126340455,
+        -0.00366835056360167,
+        0.0582695212892126
+      ],
+      "mass": 0.53851506,
+      "momentOfInertia": [
+        0.00064186,
+        2e-08,
+        -2.17e-06,
+        0.00046434,
+        5.134e-05,
+        0.00027538
+      ],
+      "name": "right_hand_link",
+      "renderModel": "render/right_hand_link_render.glb",
+      "shape": "collision/right_hand_link_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.0139838,
+        -0.00153794,
+        -0.000635792
+      ],
+      "mass": 0.0211013,
+      "momentOfInertia": [
+        2.97996e-05,
+        4.08242e-08,
+        -1.24644e-08,
+        1.44339e-05,
+        -1.63794e-07,
+        1.69951e-05
+      ],
+      "name": "right_hand_back_link",
+      "parentLink": 0,
+      "renderModel": "render/right_hand_back_link_render.glb",
+      "shape": "collision/right_hand_back_link_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -2.08412e-07,
+        3.83488e-21,
+        -1.35638e-07
+      ],
+      "mass": 3.68626e-05,
+      "momentOfInertia": [
+        9.73916e-11,
+        -2.20911e-28,
+        -6.25259e-15,
+        4.11944e-11,
+        -2.209e-28,
+        9.73971e-11
+      ],
+      "name": "right_hand_ee_link",
+      "parentLink": 0,
+      "renderModel": "render/right_hand_ee_link_render.glb",
+      "shape": "collision/right_hand_ee_link_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.000715851164577249,
+        0.000118997558760756,
+        0.0111903014853532
+      ],
+      "mass": 0.068721,
+      "momentOfInertia": [
+        1.643e-05,
+        1e-11,
+        1.3e-07,
+        1.707e-05,
+        -1.1e-07,
+        3.43e-06
+      ],
+      "name": "right_hand_index_bend_link",
+      "parentLink": 0,
+      "renderModel": "render/right_hand_index_bend_link_render.glb",
+      "shape": "collision/right_hand_index_bend_link_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.00063293051295399,
+        0.00013300810657332,
+        0.0355868719939061
+      ],
+      "mass": 0.06298297,
+      "momentOfInertia": [
+        1.686e-05,
+        1e-11,
+        -1.9e-07,
+        1.738e-05,
+        -2.8e-07,
+        3.2e-06
+      ],
+      "name": "right_hand_index_rota_link1",
+      "parentLink": 3,
+      "renderModel": "render/right_hand_index_rota_link1_render.glb",
+      "shape": "collision/right_hand_index_rota_link1_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.00119905190206782,
+        -0.000248361661986104,
+        0.0213789854478679
+      ],
+      "mass": 0.01582395,
+      "momentOfInertia": [
+        2.83e-06,
+        1e-11,
+        -7e-08,
+        2.77e-06,
+        -1.2e-07,
+        8.5e-07
+      ],
+      "name": "right_hand_index_rota_link2",
+      "parentLink": 4,
+      "renderModel": "render/right_hand_index_rota_link2_render.glb",
+      "shape": "collision/right_hand_index_rota_link2_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -2.08412e-07,
+        -6.13581e-20,
+        -1.35638e-07
+      ],
+      "mass": 3.68626e-05,
+      "momentOfInertia": [
+        9.73916e-11,
+        -2.2041e-28,
+        -6.25259e-15,
+        4.11944e-11,
+        4.42069e-28,
+        9.73971e-11
+      ],
+      "name": "right_hand_index_rota_tip",
+      "parentLink": 5,
+      "renderModel": "render/right_hand_index_rota_tip_render.glb",
+      "shape": "collision/right_hand_index_rota_tip_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.00758611,
+        0.00016023,
+        -0.0176783
+      ],
+      "mass": 0.00119721,
+      "momentOfInertia": [
+        1.30632e-07,
+        -7.63531e-10,
+        -9.6588e-09,
+        1.03147e-07,
+        2.93821e-09,
+        4.00999e-08
+      ],
+      "name": "right_hand_index_rotaback_link2",
+      "parentLink": 5,
+      "renderModel": "render/right_hand_index_rotaback_link2_render.glb",
+      "shape": "collision/right_hand_index_rotaback_link2_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.0115912,
+        -0.000148354,
+        -0.0241333
+      ],
+      "mass": 0.00195814,
+      "momentOfInertia": [
+        5.65252e-07,
+        7.67421e-10,
+        -1.81158e-08,
+        5.28027e-07,
+        7.26173e-09,
+        6.19919e-08
+      ],
+      "name": "right_hand_index_rotaback_link1",
+      "parentLink": 4,
+      "renderModel": "render/right_hand_index_rotaback_link1_render.glb",
+      "shape": "collision/right_hand_index_rotaback_link1_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.000530417592106097,
+        3.58049083658378e-05,
+        0.033278467115721
+      ],
+      "mass": 0.06298297,
+      "momentOfInertia": [
+        1.681e-05,
+        1e-11,
+        -8.7e-07,
+        1.738e-05,
+        -2.8e-07,
+        3.25e-06
+      ],
+      "name": "right_hand_mid_link1",
+      "parentLink": 0,
+      "renderModel": "render/right_hand_mid_link1_render.glb",
+      "shape": "collision/right_hand_mid_link1_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.00119905190206755,
+        -0.000248361661996566,
+        0.0213789854478682
+      ],
+      "mass": 0.01582395,
+      "momentOfInertia": [
+        2.87e-06,
+        -1e-08,
+        -1.9e-07,
+        2.83e-06,
+        -1.2e-07,
+        8.7e-07
+      ],
+      "name": "right_hand_mid_link2",
+      "parentLink": 9,
+      "renderModel": "render/right_hand_mid_link2_render.glb",
+      "shape": "collision/right_hand_mid_link2_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -2.08412e-07,
+        -2.68442e-20,
+        -1.35638e-07
+      ],
+      "mass": 3.68626e-05,
+      "momentOfInertia": [
+        9.73916e-11,
+        -2.20675e-28,
+        -6.25259e-15,
+        4.11944e-11,
+        3.31456e-28,
+        9.73971e-11
+      ],
+      "name": "right_hand_mid_tip",
+      "parentLink": 10,
+      "renderModel": "render/right_hand_mid_tip_render.glb",
+      "shape": "collision/right_hand_mid_tip_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.00758611,
+        0.00016023,
+        -0.0176783
+      ],
+      "mass": 0.00119721,
+      "momentOfInertia": [
+        1.30632e-07,
+        -7.63531e-10,
+        -9.6588e-09,
+        1.03147e-07,
+        2.93821e-09,
+        4.00999e-08
+      ],
+      "name": "right_hand_midback_link2",
+      "parentLink": 10,
+      "renderModel": "render/right_hand_midback_link2_render.glb",
+      "shape": "collision/right_hand_midback_link2_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.0115912,
+        -0.000148354,
+        -0.0241333
+      ],
+      "mass": 0.00195814,
+      "momentOfInertia": [
+        5.65252e-07,
+        7.67421e-10,
+        -1.81158e-08,
+        5.28027e-07,
+        7.26173e-09,
+        6.19919e-08
+      ],
+      "name": "right_hand_midback_link1",
+      "parentLink": 9,
+      "renderModel": "render/right_hand_midback_link1_render.glb",
+      "shape": "collision/right_hand_midback_link1_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.00053041759210553,
+        3.58049083602902e-05,
+        0.0332784671157224
+      ],
+      "mass": 0.06298297,
+      "momentOfInertia": [
+        1.681e-05,
+        1e-11,
+        -8.7e-07,
+        1.738e-05,
+        -2.8e-07,
+        3.25e-06
+      ],
+      "name": "right_hand_pinky_link1",
+      "parentLink": 0,
+      "renderModel": "render/right_hand_pinky_link1_render.glb",
+      "shape": "collision/right_hand_pinky_link1_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.001199051902067,
+        -0.000248361662016403,
+        0.0213789854478657
+      ],
+      "mass": 0.01582395,
+      "momentOfInertia": [
+        2.87e-06,
+        -1e-08,
+        -1.9e-07,
+        2.83e-06,
+        -1.2e-07,
+        8.7e-07
+      ],
+      "name": "right_hand_pinky_link2",
+      "parentLink": 14,
+      "renderModel": "render/right_hand_pinky_link2_render.glb",
+      "shape": "collision/right_hand_pinky_link2_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -2.08412e-07,
+        -2.30093e-20,
+        -1.35638e-07
+      ],
+      "mass": 3.68626e-05,
+      "momentOfInertia": [
+        9.73916e-11,
+        -2.20704e-28,
+        -6.25259e-15,
+        4.11944e-11,
+        -4.41647e-28,
+        9.73971e-11
+      ],
+      "name": "right_hand_pinky_tip",
+      "parentLink": 15,
+      "renderModel": "render/right_hand_pinky_tip_render.glb",
+      "shape": "collision/right_hand_pinky_tip_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.00758611,
+        0.00016023,
+        -0.0176783
+      ],
+      "mass": 0.00119721,
+      "momentOfInertia": [
+        1.30632e-07,
+        -7.63531e-10,
+        -9.6588e-09,
+        1.03147e-07,
+        2.93821e-09,
+        4.00999e-08
+      ],
+      "name": "right_hand_pinkyback_link2",
+      "parentLink": 15,
+      "renderModel": "render/right_hand_pinkyback_link2_render.glb",
+      "shape": "collision/right_hand_pinkyback_link2_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.0115912,
+        -0.000148354,
+        -0.0241333
+      ],
+      "mass": 0.00195814,
+      "momentOfInertia": [
+        5.65252e-07,
+        7.67421e-10,
+        -1.81158e-08,
+        5.28027e-07,
+        7.26173e-09,
+        6.19919e-08
+      ],
+      "name": "right_hand_pinkyback_link1",
+      "parentLink": 14,
+      "renderModel": "render/right_hand_pinkyback_link1_render.glb",
+      "shape": "collision/right_hand_pinkyback_link1_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.000530417592105675,
+        3.58049083603318e-05,
+        0.0332784671157224
+      ],
+      "mass": 0.06298297,
+      "momentOfInertia": [
+        1.681e-05,
+        1e-11,
+        -8.7e-07,
+        1.738e-05,
+        -2.8e-07,
+        3.25e-06
+      ],
+      "name": "right_hand_ring_link1",
+      "parentLink": 0,
+      "renderModel": "render/right_hand_ring_link1_render.glb",
+      "shape": "collision/right_hand_ring_link1_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.00119905192644367,
+        -0.000248361559624762,
+        0.0213789854805378
+      ],
+      "mass": 0.01582395,
+      "momentOfInertia": [
+        2.87e-06,
+        -1e-08,
+        -1.9e-07,
+        2.83e-06,
+        -1.2e-07,
+        8.7e-07
+      ],
+      "name": "right_hand_ring_link2",
+      "parentLink": 19,
+      "renderModel": "render/right_hand_ring_link2_render.glb",
+      "shape": "collision/right_hand_ring_link2_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -2.08412e-07,
+        -7.66977e-21,
+        -1.35638e-07
+      ],
+      "mass": 3.68626e-05,
+      "momentOfInertia": [
+        9.73916e-11,
+        -2.20822e-28,
+        -6.25259e-15,
+        4.11944e-11,
+        5.52241e-28,
+        9.73971e-11
+      ],
+      "name": "right_hand_ring_tip",
+      "parentLink": 20,
+      "renderModel": "render/right_hand_ring_tip_render.glb",
+      "shape": "collision/right_hand_ring_tip_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.00758611,
+        0.00016023,
+        -0.0176783
+      ],
+      "mass": 0.00119721,
+      "momentOfInertia": [
+        1.30632e-07,
+        -7.63531e-10,
+        -9.6588e-09,
+        1.03147e-07,
+        2.93821e-09,
+        4.00999e-08
+      ],
+      "name": "right_hand_ringback_link2",
+      "parentLink": 20,
+      "renderModel": "render/right_hand_ringback_link2_render.glb",
+      "shape": "collision/right_hand_ringback_link2_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.0115912,
+        -0.000148354,
+        -0.0241333
+      ],
+      "mass": 0.00195814,
+      "momentOfInertia": [
+        5.65252e-07,
+        7.67421e-10,
+        -1.81158e-08,
+        5.28027e-07,
+        7.26173e-09,
+        6.19919e-08
+      ],
+      "name": "right_hand_ringback_link1",
+      "parentLink": 19,
+      "renderModel": "render/right_hand_ringback_link1_render.glb",
+      "shape": "collision/right_hand_ringback_link1_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.00116534489100702,
+        0.0144358799903649,
+        5.40665183232092e-05
+      ],
+      "mass": 0.01151453,
+      "momentOfInertia": [
+        1.55e-06,
+        -3e-08,
+        1e-11,
+        6.2e-07,
+        7e-08,
+        1.57e-06
+      ],
+      "name": "right_hand_thumb_bend_link",
+      "parentLink": 0,
+      "renderModel": "render/right_hand_thumb_bend_link_render.glb",
+      "shape": "collision/right_hand_thumb_bend_link_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.00036176505273174,
+        0.0287681485595387,
+        0.00133929684947857
+      ],
+      "mass": 0.1322853,
+      "momentOfInertia": [
+        3.665e-05,
+        -7.88e-06,
+        1.98e-06,
+        1.694e-05,
+        1.85e-06,
+        4.358e-05
+      ],
+      "name": "right_hand_thumb_rota_link1",
+      "parentLink": 24,
+      "renderModel": "render/right_hand_thumb_rota_link1_render.glb",
+      "shape": "collision/right_hand_thumb_rota_link1_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.000881604281134662,
+        0.0225339954987271,
+        0.000614550644508979
+      ],
+      "mass": 0.03516871,
+      "momentOfInertia": [
+        7.79e-06,
+        -2e-08,
+        3.4e-07,
+        3.5e-06,
+        -1.8e-07,
+        8.96e-06
+      ],
+      "name": "right_hand_thumb_rota_link2",
+      "parentLink": 25,
+      "renderModel": "render/right_hand_thumb_rota_link2_render.glb",
+      "shape": "collision/right_hand_thumb_rota_link2_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -2.68442e-20,
+        -2.48185e-07,
+        1.54256e-08
+      ],
+      "mass": 3.68626e-05,
+      "momentOfInertia": [
+        4.11944e-11,
+        8.3076e-29,
+        -2.50369e-29,
+        9.73875e-11,
+        8.46538e-16,
+        9.74011e-11
+      ],
+      "name": "right_hand_thumb_rota_tip",
+      "parentLink": 26,
+      "renderModel": "render/right_hand_thumb_rota_tip_render.glb",
+      "shape": "collision/right_hand_thumb_rota_tip_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        -0.000538499,
+        -0.0258384,
+        -0.0092267
+      ],
+      "mass": 0.0036793,
+      "momentOfInertia": [
+        7.38475e-07,
+        -3.95337e-08,
+        5.37672e-09,
+        5.20109e-07,
+        -4.50514e-08,
+        1.17499e-06
+      ],
+      "name": "right_hand_thumb_rotaback_link2",
+      "parentLink": 26,
+      "renderModel": "render/right_hand_thumb_rotaback_link2_render.glb",
+      "shape": "collision/right_hand_thumb_rotaback_link2_collision.stl"
+    },
+    {
+      "centerOfMass": [
+        0.00144436,
+        -0.0296344,
+        -0.00756586
+      ],
+      "mass": 0.00624887,
+      "momentOfInertia": [
+        1.51992e-06,
+        1.70248e-07,
+        -5.66208e-08,
+        1.56866e-06,
+        1.4798e-07,
+        2.2892e-06
+      ],
+      "name": "right_hand_thumb_rotaback_link1",
+      "parentLink": 25,
+      "renderModel": "render/right_hand_thumb_rotaback_link1_render.glb",
+      "shape": "collision/right_hand_thumb_rotaback_link1_collision.stl"
+    }
+  ],
+  "name": "xhand1_v13_right"
+}

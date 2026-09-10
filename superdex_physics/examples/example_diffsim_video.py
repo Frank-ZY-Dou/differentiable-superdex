@@ -14,7 +14,7 @@
 
 """Example: optimization through the differentiable simulator, recorded as video.
 
-Two tasks are solved by gradient-based optimization where every gradient comes
+Three tasks are solved by gradient-based optimization where every gradient comes
 from the engine's discrete adjoint (``superdex.physics.diffsim``), and the
 whole optimization is rendered offscreen with the built-in polyscope viewer and
 written to MP4 (one file per task):
@@ -30,10 +30,16 @@ written to MP4 (one file per task):
    descent converges monotonically here, 0.34 -> 2e-8 in 40 iterations;
    Adam's per-coordinate normalization overshoots the narrow valley and
    oscillates around 1e-3.)
+3. ``soft_on_soft.mp4`` - a jelly cube is thrown at a jelly cube resting on the
+   ground and shoves it along. Gradient descent on the launch velocity, through
+   the contact between the two deformable bodies and the resting cube's
+   friction on the ground, brings the resting cube's centroid to a target.
 
 Each video shows a selection of optimization iterations back to back: the
 rollout of that iteration, the trail of the tracked point, the target, and the
-current loss. The loss curves are also written as PNG.
+current loss. The loss curves are also written as PNG. At the first iteration
+of every task the adjoint gradient is compared with central finite differences
+of the rollout (``check_gradient``).
 
 On the soft task the engine may log ``Zero Preconditioner-dot product`` from
 its PCG adjoint solve on some steps: the PSD-projected approximate Hessian
@@ -43,7 +49,7 @@ this script (about 1e-10) confirms every adjoint solve still converged.
 
 Requirements: double precision (selected below, before the first physics
 import), ``polyscope`` (offscreen rendering), ``imageio`` with ffmpeg, OpenCV
-(text overlays) and PyTorch (task 2). Run from anywhere::
+(text overlays) and PyTorch (tasks 2-4). Run from anywhere::
 
     python example_diffsim_video.py --output-dir ./diffsim_videos
 """
@@ -64,6 +70,8 @@ import imageio.v3 as iio
 import numpy as np
 import superdex.physics as physics
 from superdex.physics.utils import render_model_registry
+from superdex.physics.diffsim_rollout import step_with_substeps
+from superdex.physics.utils.penetration import PenetrationChecker
 from superdex.physics.utils.transformations import make_transform, transformrt_to_numpy
 from superdex.physics.viewer import Viewer, ViewerCfg
 
@@ -82,17 +90,21 @@ GRAVITY = [0.0, 0.0, -9.81]
 # ---------------------------------------------------------------------------
 
 
-def box_tet_mesh(size: float, cells: int):
-    """A structured tetrahedral mesh of a cube: ``cells^3`` hexahedra, each split
-    into six tetrahedra (Kuhn triangulation). Returns (coordinates, connectivity)
-    flattened the way ``create_tet_mesh_shape`` expects them."""
+def box_tet_mesh(size, cells):
+    """A structured tetrahedral mesh of a box centered at the origin: ``cells``
+    hexahedra per axis (one count or three), each split into six tetrahedra
+    (Kuhn triangulation), spanning ``size`` (one length or three). Returns
+    (coordinates, connectivity) flattened the way ``create_tet_mesh_shape``
+    expects them."""
+    size = np.broadcast_to(np.asarray(size, dtype=np.float64), (3,))
+    cells = np.broadcast_to(np.asarray(cells, dtype=np.int64), (3,))
     n = cells + 1
-    axis = np.linspace(-0.5 * size, 0.5 * size, n)
-    grid = np.stack(np.meshgrid(axis, axis, axis, indexing="ij"), axis=-1)  # (n,n,n,3)
+    axes = [np.linspace(-0.5 * size[a], 0.5 * size[a], n[a]) for a in range(3)]
+    grid = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1)  # (n0,n1,n2,3)
     coordinates = grid.reshape(-1, 3)
 
     def node(i, j, k):
-        return (i * n + j) * n + k
+        return (i * n[1] + j) * n[2] + k
 
     kuhn = [
         (0, 1, 3, 7),
@@ -103,9 +115,9 @@ def box_tet_mesh(size: float, cells: int):
         (0, 2, 3, 7),
     ]
     tets = []
-    for i in range(cells):
-        for j in range(cells):
-            for k in range(cells):
+    for i in range(cells[0]):
+        for j in range(cells[1]):
+            for k in range(cells[2]):
                 corners = [
                     node(i + di, j + dj, k + dk)
                     for di in (0, 1)
@@ -190,13 +202,19 @@ class SceneExport:
     texture, or the physics surface mesh) and its world transform per frame, the soft
     bodies' vertices per frame, the curves, the trail, the target and the camera.
     ``Recorder.write`` stores it as ``<video>.scene.json`` plus ``<video>.scene.npz`` (and
-    the textures as PNG files); ``render_diffsim_blender.py`` renders it with Blender."""
+    the textures as PNG files); ``render_diffsim_blender.py`` renders it with Blender.
+    ``target`` None marks no target; ``colors`` maps actor names to the base color of
+    their physics mesh (the renderer picks one otherwise)."""
 
-    def __init__(self, scene, target, look_from, look_at, title: str):
+    def __init__(self, scene, target, look_from, look_at, title: str, colors=None,
+                 view_transform=None, view_exposure=None):
         self.scene = scene
+        self.colors = {name: [float(c) for c in color] for name, color in (colors or {}).items()}
         self.meta = {
             "title": title,
-            "target": [float(v) for v in target],
+            "view_transform": view_transform,
+            "view_exposure": view_exposure,
+            "target": None if target is None else [float(v) for v in target],
             "look_from": [float(v) for v in look_from],
             "look_at": [float(v) for v in look_at],
             "fps": FPS,
@@ -240,7 +258,7 @@ class SceneExport:
         meta.update(
             kind="soft" if soft else "rigid",
             source="physics_mesh",
-            material={"base_color": None, "metallic": None, "roughness": None},
+            material={"base_color": self.colors.get(actor.get_name()), "metallic": None, "roughness": None},
         )
         self.arrays[f"body{index}_faces"] = faces
         body = {"actor": actor, "local": None, "meta": meta}
@@ -272,7 +290,7 @@ class SceneExport:
         frame = {
             "caption": caption,
             "hold": int(hold),
-            "tracked": [float(v) for v in np.asarray(tracked_point, dtype=np.float64)],
+            "tracked": None if tracked_point is None else [float(v) for v in np.asarray(tracked_point, dtype=np.float64)],
             "new_iteration": self.new_iteration,
             "curves": [],
         }
@@ -317,19 +335,22 @@ class SceneExport:
 
 
 class Recorder:
-    """Offscreen viewer + MP4 writer with text overlays and a tracked-point trail.
+    """Offscreen viewer + MP4 writer with text overlays and a tracked-point trail
+    (``target`` None: no marker; a captured ``tracked_point`` of None: no trail).
     With ``EXPORT_SCENES`` set, the recorded frames are also exported for Blender
-    (see :class:`SceneExport`)."""
+    (see :class:`SceneExport`, which ``colors`` is passed to)."""
 
-    def __init__(self, scene, target, look_from, look_at, title: str, curves=None):
+    def __init__(self, scene, target, look_from, look_at, title: str, curves=None, colors=None,
+                 view_transform=None, view_exposure=None):
         # The scene is Z-up FLU (X forward, Y left, Z up) - the "ros" preset.
         self.viewer = Viewer(
             ViewerCfg(offscreen=True, size=FRAME_SIZE, coordinate_system="ros")
         )
         self.viewer.set_scene(scene)
-        self.viewer.add_point_cloud(
-            "target", np.asarray([target]), radius=0.035, color=[0.9, 0.15, 0.15]
-        )
+        if target is not None:
+            self.viewer.add_point_cloud(
+                "target", np.asarray([target]), radius=0.035, color=[0.9, 0.15, 0.15]
+            )
         self.viewer.set_camera_view(look_from=look_from, look_at=look_at)
         self.title = title
         # Optional extra geometry the viewer does not draw itself (rod centerlines):
@@ -338,7 +359,8 @@ class Recorder:
         self.frames: list[np.ndarray] = []
         self.trail: list[np.ndarray] = []
         self.export = (
-            SceneExport(scene, target, look_from, look_at, title) if EXPORT_SCENES else None
+            SceneExport(scene, target, look_from, look_at, title, colors, view_transform, view_exposure)
+            if EXPORT_SCENES else None
         )
 
     def begin_iteration(self) -> None:
@@ -347,7 +369,8 @@ class Recorder:
             self.export.begin_iteration()
 
     def capture(self, tracked_point, caption: str, hold: int = 1) -> None:
-        self.trail.append(np.asarray(tracked_point, dtype=np.float64))
+        if tracked_point is not None:
+            self.trail.append(np.asarray(tracked_point, dtype=np.float64))
         if len(self.trail) >= 2:
             pts = np.asarray(self.trail)
             edges = np.stack([np.arange(len(pts) - 1), np.arange(1, len(pts))], axis=1)
@@ -422,6 +445,83 @@ def tighten_solvers(scene) -> None:
 def recorded_iterations(num_iterations: int) -> set[int]:
     picks = {0, 1, 2, 3, 5, 8, 12, 18, 25, 35, 50, 70, 100}
     return {i for i in picks if i < num_iterations} | {num_iterations - 1}
+
+
+def check_gradient(name: str, loss_of, params, grad, labels, tolerance: float | None) -> float:
+    """Compares the adjoint gradient ``grad`` of the rollout loss ``loss_of`` at ``params``
+    (both flat) with central finite differences of the rollout, on every entry and along
+    the gradient, at the step sizes 1e-5 and 1e-6. An entry validates the adjoint where
+    its two quotients agree with each other to 1e-4 ("smooth"; the loss of a contact task
+    is not smooth at every scale, and such entries are reported, not judged). With
+    ``tolerance`` a smooth entry whose relative error exceeds it raises. Returns the
+    relative error along the gradient."""
+    params = np.asarray(params, dtype=np.float64).ravel()
+    grad = np.asarray(grad, dtype=np.float64).ravel()
+    print(f"[{name}] gradient check (adjoint vs rollout central FD at eps 1e-5 / 1e-6):")
+
+    def quotients(direction: np.ndarray) -> list[float]:
+        return [
+            (loss_of(params + eps * direction) - loss_of(params - eps * direction)) / (2.0 * eps)
+            for eps in (1e-5, 1e-6)
+        ]
+
+    norm = float(np.linalg.norm(grad))
+    rows = [("along the gradient", norm, quotients(grad / norm))]
+    for index, label in enumerate(labels):
+        rows.append((label, float(grad[index]), quotients(np.eye(len(params))[index])))
+    worst = 0.0
+    for label, adjoint, fds in rows:
+        denominator = max(abs(fds[0]), 1e-30)
+        fd_self = abs(fds[0] - fds[1]) / denominator
+        rel = abs(adjoint - fds[0]) / denominator
+        smooth = fd_self < 1e-4
+        print(
+            f"    {label:>18s}: adjoint {adjoint:+.5e}  fd {fds[0]:+.5e}  rel err {rel:.1e}  "
+            f"fd self-consistency {fd_self:.0e}  [{'smooth' if smooth else 'rough '}]"
+        )
+        if smooth:
+            worst = max(worst, rel)
+    if tolerance is not None and worst > tolerance:
+        raise RuntimeError(
+            f"[{name}] the adjoint gradient is off by {worst:.1e} relative on a smooth entry "
+            f"(tolerance {tolerance:.0e})"
+        )
+    along = rows[0][2][0]
+    return abs(norm - along) / abs(along)
+
+
+def assert_converged(scene, tolerance: float) -> None:
+    """After a plain ``scene.step`` of a replay: the Newton solve must have converged, or
+    stalled with a residual below ``tolerance`` (the scene's round-off floor)."""
+    stats = scene.get_solver_stats()
+    status = stats.convergence_status
+    if status == physics.ConvergenceStatus.CONVERGED:
+        return
+    if status == physics.ConvergenceStatus.STOPPED and stats.residual_norm <= tolerance:
+        return
+    raise RuntimeError(
+        f"forward Newton solve did not converge (status {status}, "
+        f"residual {stats.residual_norm:.2e}, iterations {stats.max_non_linear_iters})"
+    )
+
+
+def jelly_material():
+    """The neo-Hookean jelly of the soft tasks."""
+    material = physics.SoftMaterialParams(density=1000.0, mass_damping_coefficient=1.0)
+    material.neo_hookean = physics.NeoHookeanMaterialParams(youngs_modulus=4.0e4, poisson_ratio=0.45)
+    return material
+
+
+def soft_centroid(actor, rest: np.ndarray):
+    """The world centroid of a soft actor's nodes (``rest``: their rest positions in the
+    actor's frame) and the rotation of the actor's frame, which the centroid's
+    derivative with respect to the displacements is 1/N times."""
+    positions = rest + np.asarray(actor.get_displacements(), dtype=np.float64).reshape(-1, 3)
+    if not actor.has_root_transform():
+        return positions.mean(axis=0), np.eye(3)
+    position, rotvec = transformrt_to_numpy(actor.get_root_transform())
+    world_from_local = np.asarray(make_transform(position, rotvec), dtype=np.float64)
+    return world_from_local[:3, :3] @ positions.mean(axis=0) + world_from_local[:3, 3], world_from_local[:3, :3]
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +623,7 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
 
     dt, num_steps = 0.02, 40
     target = np.array([0.8, -0.2, 0.0])
-    coordinates, connectivity = box_tet_mesh(size=0.2, cells=3)
+    coordinates, connectivity = box_tet_mesh(size=0.2, cells=5)
     num_nodes = coordinates.size // 3
 
     scene = physics.create_scene("Differentiable soft landing")
@@ -535,17 +635,16 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
         is_static=True,
         contact=contact,
     )
-    material = physics.SoftMaterialParams(density=1000.0, mass_damping_coefficient=1.0)
-    material.neo_hookean = physics.NeoHookeanMaterialParams(youngs_modulus=4.0e4, poisson_ratio=0.45)
     jelly = scene.create_soft_actor(
         name="jelly",
         shape=physics.create_tet_mesh_shape(coordinates=coordinates, connectivity=connectivity),
-        material=material,
+        material=jelly_material(),
         contact=contact,
         world_from_local=physics.TransformRT([0.0, 0.0, 0.35]),
     )
     diffsim.make_scene_differentiable(scene)  # also disables recentering (fixed root frame)
     tighten_solvers(scene)
+    penetration = PenetrationChecker(scene)
     rest = coordinates.reshape(-1, 3)
     root = np.array([0.0, 0.0, 0.35])
 
@@ -572,6 +671,8 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
         look_from=[-0.8, -2.0, 1.1],
         look_at=[0.4, -0.05, 0.15],
         title="Soft landing: gradient descent on the launch velocity (FEM + contact adjoint, torch)",
+        view_transform="Standard",
+        view_exposure=-1.2,
     )
     bridge = TorchRollout(
         scene,
@@ -579,6 +680,8 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
         num_steps=num_steps,
         initial_state_actors=[jelly],
         terminal_losses=[CentroidLoss()],
+        max_substep_levels=SOFT_SUBSTEPS,
+        substep_residual_tolerance=SOFT_RESIDUAL_TOLERANCE,
     )
     velocity = torch.zeros(3, dtype=torch.float64, requires_grad=True)
     optimizer = torch.optim.SGD([velocity], lr=4.0)
@@ -586,13 +689,25 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
     record = recorded_iterations(num_iterations)
     u0 = torch.zeros(3 * num_nodes, dtype=torch.float64)
 
+    def rollout(launch: torch.Tensor) -> torch.Tensor:
+        return bridge(initial_states=torch.cat([u0, launch.repeat(num_nodes)]))
+
     for iteration in range(num_iterations):
         optimizer.zero_grad()
-        loss = bridge(initial_states=torch.cat([u0, velocity.repeat(num_nodes)]))
+        loss = rollout(velocity)
         loss.backward()
         losses.append(float(loss))
         v0 = velocity.detach().numpy().copy()
         result = bridge.last_result
+        if iteration == 0:
+            fd_error = check_gradient(
+                "soft",
+                lambda values: float(rollout(torch.as_tensor(values, dtype=torch.float64)).detach()),
+                v0,
+                velocity.grad.numpy(),
+                ("v0 x", "v0 y", "v0 z"),
+                tolerance=None,
+            )
         print(
             f"[soft] iter {iteration:3d}  loss {float(loss):.6f}  v0 {v0.round(3)}  "
             f"|grad| {float(velocity.grad.norm()):.3e}  "
@@ -606,7 +721,8 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
             jelly.set_node_velocities_local(np.tile(v0, num_nodes))
             recorder.begin_iteration()
             for step in range(num_steps):
-                scene.step(dt)
+                step_with_substeps(scene, dt, SOFT_SUBSTEPS, SOFT_RESIDUAL_TOLERANCE, step=step)
+                penetration.record(step)
                 caption = (
                     f"iteration {iteration}   t = {(step + 1) * dt:.2f} s\n"
                     f"v0 = [{v0[0]:+.2f} {v0[1]:+.2f} {v0[2]:+.2f}] m/s   loss = {losses[-1]:.4f}"
@@ -614,9 +730,170 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
                 recorder.capture(centroid_world(), caption, hold=(1 if step < num_steps - 1 else 12))
         optimizer.step()
 
+    print(
+        f"[soft] loss {losses[0]:.3e} -> {losses[-1]:.3e} in {num_iterations} iterations, "
+        f"adjoint vs FD along the gradient {fd_error:.1e}"
+    )
+    print("[soft] " + penetration.report(None).replace("\n", "\n[soft] "))
     bridge.close()
     recorder.write(output_dir / "soft_landing.mp4")
     save_loss_curve(output_dir / "soft_landing_loss.png", losses, "Soft landing: loss vs iteration")
+    physics.destroy_scene(scene)
+
+
+# ---------------------------------------------------------------------------
+# Task 3: a thrown jelly shoves a resting jelly to a target (soft-soft contact)
+# ---------------------------------------------------------------------------
+
+JELLY_SIDE, JELLY_CELLS = 0.2, 4
+SOFT_ON_SOFT_DT, SOFT_ON_SOFT_STEPS = 0.02, 50  # 1 s
+SOFT_ON_SOFT_SETTLE_STEPS = 40  # the resting jelly settles on the ground before the other is added
+SOFT_ON_SOFT_LAUNCH = [-0.42, 0.0, 0.14]  # [m] the thrown jelly's center at launch
+SOFT_ON_SOFT_V0 = [1.5, 0.0, 0.0]  # [m/s] the first guess
+SOFT_ON_SOFT_TARGET = [0.12, 0.03]  # [m] the resting jelly's centroid (x, y) at the end
+SOFT_ON_SOFT_STEP, SOFT_ON_SOFT_DECAY = 0.15, 0.9  # normalized descent: step [m/s], decay per iteration
+SOFT_RESIDUAL_TOLERANCE = 1e-4  # [N] the soft-contact Newton solve floors near 1.3e-5 (measured); this bounds a blow-up
+SOFT_SUBSTEPS = 3   # a hard impact step (residual above the tolerance) is redone as 2, 4, 8 substeps
+
+
+def task_soft_on_soft(output_dir: pathlib.Path, num_iterations: int) -> None:
+    import torch
+    from superdex.physics.diffsim_torch import TorchRollout
+
+    coordinates, connectivity = box_tet_mesh(JELLY_SIDE, JELLY_CELLS)
+    rest = coordinates.reshape(-1, 3)
+    num_nodes = len(rest)
+    target = np.array(SOFT_ON_SOFT_TARGET + [0.5 * JELLY_SIDE])  # the marker at the jelly's height
+
+    scene = physics.create_scene("Differentiable soft on soft")
+    scene.set_gravity(GRAVITY)
+    contact = physics.ContactParams(penalty_coefficient=1e7, coulomb_friction_coefficient=0.4)
+    scene.create_rigid_actor(
+        name="ground",
+        shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
+        is_static=True,
+        contact=contact,
+    )
+
+    def jelly(name: str, position):
+        # Soft actors are no colliders by default; created through the experimental API each
+        # jelly is an SDF collider too, so that the two test their contact samples against
+        # each other (the deformed rest-space grid of the other).
+        experimental = physics.experimental
+        return experimental.create_soft_actor(
+            scene,
+            physics.SoftActorParams(
+                name=name,
+                shape=physics.create_tet_mesh_shape(coordinates=coordinates, connectivity=connectivity),
+                material=jelly_material(),
+                contact=contact,
+                world_from_local=physics.TransformRT(list(position)),
+            ),
+            experimental.ExperimentalSoftActorParams(collider_type=physics.ColliderType.SDF),
+        )
+
+    resting = jelly("resting", [0.0, 0.0, 0.5 * JELLY_SIDE])
+    for _ in range(SOFT_ON_SOFT_SETTLE_STEPS):  # about 1 cm under its own weight
+        scene.step(SOFT_ON_SOFT_DT)
+    thrown = jelly("thrown", SOFT_ON_SOFT_LAUNCH)
+    diffsim.make_scene_differentiable(scene)  # also disables recentering (fixed root frames)
+    tighten_solvers(scene)
+    penetration = PenetrationChecker(scene)
+
+    class ShoveLoss:
+        """0.5 |c_xy - target_xy|^2 on the resting jelly's centroid at the last step (its
+        height is the settled one, which the launch cannot change)."""
+
+        def residual(self):
+            centroid, rotation = soft_centroid(resting, rest)
+            return centroid[:2] - target[:2], rotation
+
+        def value(self) -> float:
+            d, _ = self.residual()
+            return 0.5 * float(d @ d)
+
+        def accumulate_output_grad(self) -> None:
+            d, rotation = self.residual()
+            grad_world = np.array([d[0], d[1], 0.0]) / num_nodes
+            diffsim.get_displacements_backward(resting, np.tile(rotation.T @ grad_world, num_nodes))
+
+    recorder = Recorder(
+        scene,
+        target,
+        look_from=[-0.35, -1.6, 0.8],
+        look_at=[-0.05, 0.0, 0.12],
+        title="Soft on soft: gradient descent on the launch velocity (soft-soft contact adjoint)",
+        colors={"thrown": (0.75, 0.33, 0.05), "resting": (0.06, 0.42, 0.14)},
+        view_transform="Standard",
+        view_exposure=-1.2,
+    )
+    bridge = TorchRollout(
+        scene,
+        dt=SOFT_ON_SOFT_DT,
+        num_steps=SOFT_ON_SOFT_STEPS,
+        initial_state_actors=[thrown],
+        terminal_losses=[ShoveLoss()],
+        max_substep_levels=SOFT_SUBSTEPS,
+        substep_residual_tolerance=SOFT_RESIDUAL_TOLERANCE,
+    )
+    u0 = torch.zeros(3 * num_nodes, dtype=torch.float64)
+
+    def rollout(launch: torch.Tensor) -> torch.Tensor:
+        return bridge(initial_states=torch.cat([u0, launch.repeat(num_nodes)]))
+
+    def replay(v0: np.ndarray, iteration: int) -> None:
+        scene.restore_state(bridge._state_init, False)
+        thrown.set_node_velocities_local(np.tile(v0, num_nodes))
+        recorder.begin_iteration()
+        for step in range(SOFT_ON_SOFT_STEPS):
+            step_with_substeps(scene, SOFT_ON_SOFT_DT, SOFT_SUBSTEPS, SOFT_RESIDUAL_TOLERANCE, step=step)
+            penetration.record(step)
+            caption = (
+                f"iteration {iteration}   t = {(step + 1) * SOFT_ON_SOFT_DT:.2f} s\n"
+                f"v0 = [{v0[0]:+.2f} {v0[1]:+.2f} {v0[2]:+.2f}] m/s   loss = {losses[-1]:.4f}"
+            )
+            recorder.capture(
+                soft_centroid(resting, rest)[0], caption, hold=(1 if step < SOFT_ON_SOFT_STEPS - 1 else 12)
+            )
+
+    velocity = torch.tensor(SOFT_ON_SOFT_V0, dtype=torch.float64, requires_grad=True)
+    losses = []
+    record = recorded_iterations(num_iterations)
+    for iteration in range(num_iterations):
+        if velocity.grad is not None:
+            velocity.grad.zero_()
+        loss = rollout(velocity)
+        loss.backward()
+        losses.append(float(loss))
+        v0 = velocity.detach().numpy().copy()
+        result = bridge.last_result
+        if iteration == 0:
+            fd_error = check_gradient(
+                "soft_on_soft",
+                lambda values: float(rollout(torch.as_tensor(values, dtype=torch.float64)).detach()),
+                v0,
+                velocity.grad.numpy(),
+                ("v0 x", "v0 y", "v0 z"),
+                tolerance=None,
+            )
+        print(
+            f"[soft_on_soft] iter {iteration:3d}  loss {losses[-1]:.6f}  v0 {v0.round(3)}  "
+            f"|grad| {float(velocity.grad.norm()):.3e}  adjoint residual {result.max_adjoint_residual:.1e}"
+        )
+        if iteration in record:
+            replay(v0, iteration)
+        with torch.no_grad():  # a step of decaying length along the gradient's direction
+            step = SOFT_ON_SOFT_STEP * SOFT_ON_SOFT_DECAY**iteration
+            velocity -= step / (velocity.grad.norm() + 1e-30) * velocity.grad
+
+    print(
+        f"[soft_on_soft] loss {losses[0]:.3e} -> {losses[-1]:.3e} in {num_iterations} iterations, "
+        f"adjoint vs FD along the gradient {fd_error:.1e}"
+    )
+    print("[soft_on_soft] " + penetration.report(None).replace("\n", "\n[soft_on_soft] "))
+    bridge.close()
+    recorder.write(output_dir / "soft_on_soft.mp4")
+    save_loss_curve(output_dir / "soft_on_soft_loss.png", losses, "Soft on soft: loss vs iteration")
     physics.destroy_scene(scene)
 
 
@@ -624,7 +901,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--output-dir", type=pathlib.Path, default=pathlib.Path("diffsim_videos"))
     parser.add_argument("--iterations", type=int, default=40)
-    parser.add_argument("--task", choices=["rigid", "soft", "both"], default="both")
+    parser.add_argument("--task", choices=["rigid", "soft", "soft_on_soft", "all"], default="all")
     parser.add_argument(
         "--export-scenes",
         action="store_true",
@@ -637,10 +914,12 @@ def main() -> None:
 
     physics.initialize(num_worker_threads=0)
     start = time.time()
-    if args.task in ("rigid", "both"):
+    if args.task in ("rigid", "all"):
         task_rigid_throw(args.output_dir, args.iterations)
-    if args.task in ("soft", "both"):
+    if args.task in ("soft", "all"):
         task_soft_landing(args.output_dir, args.iterations)
+    if args.task in ("soft_on_soft", "all"):
+        task_soft_on_soft(args.output_dir, args.iterations)
     print(f"done in {time.time() - start:.1f} s")
     physics.shutdown()
 
