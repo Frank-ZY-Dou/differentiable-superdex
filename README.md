@@ -46,14 +46,18 @@ And finite-element soft bodies, differentiated through their elastic dynamics an
 | :-: | :-: |
 | ![soft_landing](superdex_physics/examples/media/soft_landing.gif) | ![soft_on_soft](superdex_physics/examples/media/soft_on_soft.gif) |
 
-**A note on interpenetration.** In some of these animations you may see bodies overlap a little.
-SuperDex's contact is a compliant penalty model that permits small penetrations, not a contact
-algorithm that keeps the geometry strictly intersection-free, and it runs no continuous collision
-detection (CCD). Compliant contact gives smooth contact responses and spatially distributed contact
-forces, which is what makes tactile manipulation tractable to model. Slight interpenetration also
-does not stand in the way of sim-to-real transfer of learned policies: a neural policy carries its
-own robustness and is trained under domain randomization and similar augmentation anyway, so what
-matters is that the simulation gives the policy enough information to learn from.
+**A note on interpenetration.** Small geometric overlaps may be visible in some animations.
+SuperDex uses a compliant, penalty-based contact model that permits finite penetration rather than
+enforcing strict geometric non-penetration. The current implementation does not use continuous
+collision detection (CCD). Its regularized contact formulation provides smooth contact responses
+and spatially distributed contact forces, supporting tactile-sensor modeling and gradient-based
+optimization of contact-rich manipulation.
+
+Limited interpenetration does not, by itself, preclude sim-to-real transfer. However, its impact is
+task-dependent: successful transfer depends on how well the simulation captures the dynamics and
+sensor responses relevant to the task. Domain randomization can help improve robustness to modeling
+errors, but it does not guarantee transfer. The effects of contact-model approximations therefore
+require validation on the target physical system.
 
 ## 📢 Updates
 
