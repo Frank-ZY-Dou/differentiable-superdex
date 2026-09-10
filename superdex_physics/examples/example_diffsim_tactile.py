@@ -28,13 +28,14 @@ Two tasks:
   the joint servo and the frictional contact by ``diffsim.get_contact_force_world_backward``.
 
 - ``--task field`` (the default) matches the whole 600-taxel compression map to a
-  target map (the map of a lighter grip). The readout is written as a torch
+  target map (the map of the 3 N grip). The readout is written as a torch
   function of the engine's per-contact forces and the fingertip rotations, and its
   gradient reaches the joint targets through the engine's per-contact backward
   ``diffsim.get_contact_points_backward`` and ``diffsim.get_root_transform_backward``.
-  Starting from the settled grip, the demo recovers the joint targets of a lighter
-  target grip using only the tactile map's gradient (the readout is validated against
-  finite differences to about 1e-7).
+  The target is the 3 N grip the force task settles into; starting from the ~12 N
+  settled grip, the demo recovers that grip's twelve joint targets using only the
+  tactile map's gradient (the readout is validated against finite differences to
+  about 1e-7).
 
 Both tasks check the adjoint gradient against central finite differences of the
 same rollout at the first iteration (``--check``). The optimisation is rendered
@@ -476,6 +477,8 @@ NUM_STEPS = 60         # rollout length (0.3 s)
 RAMP_STEPS = 20        # the targets ramp from the settled ones to theta over the first steps, then hold
 LOSS_WINDOW = 10       # the loss averages the last steps (the servo's slow pole has settled)
 NEWTON_TOL = 1e-9      # forward Newton tolerance: bounds the gradient fidelity
+FORCE_TARGET_ITERS = 70  # the force task run that defines the field task's target grip
+FORCE_TARGET_LR = 5e-4
 EPS_NORM = 1e-6        # |F|_eps = sqrt(F.F + eps^2): the force-norm loss stays smooth at F = 0
 
 
@@ -908,21 +911,21 @@ def main():
     ap.add_argument("--task", choices=("force", "field"), default="field")
     ap.add_argument("--check", action="store_true", help="finite-difference gradient check first")
     ap.add_argument("--iters", type=int, default=0)
-    ap.add_argument("--lr", type=float, default=None, help="Adam step (default 8e-4 force, 5e-4 field)")
-    ap.add_argument("--decay", type=float, default=1.0, help="final / initial learning rate")
+    ap.add_argument("--lr", type=float, default=8e-4, help="Adam step")
+    ap.add_argument("--decay", type=float, default=0.1, help="final / initial learning rate")
     ap.add_argument("--hold", type=int, default=35, help="iterations at the initial rate before the decay")
     ap.add_argument("--output-dir", type=pathlib.Path, default=pathlib.Path("diffsim_videos"))
     ap.add_argument("--render", type=pathlib.Path, default=None, help="replay a saved run (npz) into the Blender video")
     ap.add_argument("--target", type=pathlib.Path, default=None,
                     help="field task: a saved run whose final targets define the target taxel map "
-                         "(default: the settled 12 N grip's own lighter target, built here)")
+                         "(default: run the force task first and use its F_REF grip)")
     args = ap.parse_args()
 
     if args.render is not None:
         render(args.render, args.output_dir)
         return
 
-    lr = args.lr if args.lr is not None else (5e-4 if args.task == "field" else 8e-4)
+    lr = args.lr
     t0 = time.time()
     rig, theta0 = build()
     print(f"settled in {time.time() - t0:.1f} s: |F| per pad {pad_forces(rig).round(2).tolist()}  "
@@ -937,18 +940,31 @@ def main():
             raise RuntimeError(f"torch readout differs from the reader by {err:.1e} N")
         if args.target is not None:
             theta_star = np.load(args.target)["theta"][-1]
+            source = args.target.name
         else:
-            # A lighter grip's map as the target: hold each servo at ~15% of its torque cap
-            # (about 3 N per pad) instead of the settled ~50% (about 12 N). The optimiser then
-            # has to recover this lighter grip's joint targets from its tactile map alone.
-            theta_star = rig.pose() + 0.15 * effort_caps(rig) / GAIN[0]
+            # The target is the F_REF grip: the force task is run first (from the settled ~12 N
+            # grip) and its joint targets define the target map, which the field task then has
+            # to recover from the tactile map alone.
+            print(f"force task first: regulating every pad to {F_REF:.0f} N for the target grip", flush=True)
+            force_demo = Demo(rig, theta0)
+            force_hist = optimize(force_demo, theta0, FORCE_TARGET_ITERS, FORCE_TARGET_LR, 1.0, 0)
+            theta_star = force_hist[-1][2]
+            rig.scene.restore_state(force_demo.bridge._state_init, False)
+            force_demo.bridge.close()
+            source = f"the force task ({FORCE_TARGET_ITERS} iterations)"
+            if args.output_dir is not None:  # reusable as --target for later field runs
+                args.output_dir.mkdir(parents=True, exist_ok=True)
+                np.savez(args.output_dir / "xhand_tactile_force.npz",
+                         loss=np.array([h[0] for h in force_hist]), forces=np.array([h[1] for h in force_hist]),
+                         theta=np.array([h[2] for h in force_hist]), theta0=theta0, f_ref=F_REF,
+                         joints=np.array(rig.joint_names), task="force")
         probe = Demo(rig, theta0)
         probe.objective(theta_star)
         target = field.numpy()
         rig.scene.restore_state(probe.bridge._state_init, False)
         probe.bridge.close()
-        print(f"target map ({args.target.name if args.target else 'lighter grip'}): "
-              f"{int((target > 0.01).sum())} taxels pressed, per pad {target.sum(1).round(2).tolist()} N", flush=True)
+        print(f"target map from {source}: {int((target > 0.01).sum())} taxels pressed, "
+              f"per pad {target.sum(1).round(2).tolist()} N", flush=True)
         demo = Demo(rig, theta0, [TaxelMapLoss(field, target, 1.0 / LOSS_WINDOW)])
     else:
         demo = Demo(rig, theta0)
@@ -962,7 +978,7 @@ def main():
               f"(started {1e3 * np.abs(theta0 - theta_star).max():.1f} mrad away)", flush=True)
     if args.iters and args.output_dir is not None:
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        extra = {} if target is None else {"target": target}
+        extra = {} if target is None else {"target": target, "theta_star": theta_star}
         out = args.output_dir / f"xhand_tactile_{args.task}.npz"
         np.savez(out, loss=np.array([h[0] for h in hist]), forces=np.array([h[1] for h in hist]),
                  theta=np.array([h[2] for h in hist]), theta0=theta0, f_ref=F_REF,
