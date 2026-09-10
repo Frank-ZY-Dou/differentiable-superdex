@@ -154,6 +154,64 @@ class GradcheckControlsTest(unittest.TestCase):
             )
 
 
+class ObserveSubstepTest(unittest.TestCase):
+    """The bridges forward ``observe_substep`` to the driver: the observer runs on every
+    accepted (sub)step of every call (a monitor sees each rollout, the finite-difference
+    probes of a gradient check included), and a non-callable is rejected."""
+
+    def test_observer_runs_on_every_call(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        num_steps = 3
+        scene, chain = scenes.pendulum(with_controller=True)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        seen: list[tuple[int, float]] = []
+        bridge = diffsim_torch.TorchRollout(
+            scene,
+            dt=DT,
+            num_steps=num_steps,
+            control_actors=[chain],
+            terminal_losses=[ArticulatedPoseErrorLoss(chain, np.array([0.4, -0.2]))],
+            observe_substep=lambda step, sub_dt: seen.append((step, sub_dt)),
+        )
+        self.addCleanup(bridge.close)
+        controls = torch.zeros((num_steps, 2), dtype=torch.float64)
+        bridge(controls=controls)
+        self.assertEqual(seen, [(step, DT) for step in range(num_steps)])
+        bridge(controls=controls)
+        self.assertEqual(len(seen), 2 * num_steps)
+        with self.assertRaises(TypeError):
+            diffsim_torch.TorchRollout(
+                scene,
+                dt=DT,
+                num_steps=num_steps,
+                control_actors=[chain],
+                terminal_losses=[ArticulatedPoseErrorLoss(chain, np.array([0.4, -0.2]))],
+                observe_substep=3,
+            )
+
+    def test_policy_rollout_forwards_the_observer(self) -> None:
+        diffsim_torch = _make_bridge_module()
+        scene, chain = scenes.pendulum(with_controller=True)
+        self.addCleanup(physics.destroy_scene, scene)
+        configure_for_differentiability(scene)
+        n = chain.get_num_dofs()
+        seen: list[tuple[int, float]] = []
+        rollout = diffsim_torch.PolicyRollout(
+            scene,
+            dt=DT,
+            num_steps=3,
+            policy=torch.nn.Linear(n, n).double(),
+            observations=[diffsim_torch.ArticulatedPoseObservation(chain)],
+            control_actors=[chain],
+            terminal_losses=[ArticulatedPoseErrorLoss(chain, ref=np.full(n, 0.1))],
+            observe_substep=lambda step, sub_dt: seen.append((step, sub_dt)),
+        )
+        self.addCleanup(rollout.close)
+        rollout()
+        self.assertEqual(seen, [(step, DT) for step in range(3)])
+
+
 class GradcheckParametersTest(unittest.TestCase):
     """Forces + gravity + contact material + density through one graph."""
 

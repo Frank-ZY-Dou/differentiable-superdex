@@ -109,24 +109,25 @@ def wendland(r):
     return (1.0 - r) ** 4 * (4.0 * r + 1.0)
 
 
-def nearest_faces(mesh, points, search=0.004):
+def nearest_faces(mesh, points):
     """Distance to the mesh surface and the nearest face for each point.
 
-    Candidate faces are those whose centroid lies within ``search`` of the point
-    (the taxels sit on the surface, so the true nearest face is among them)."""
+    Every face is a candidate (a point-to-triangle distance against the whole mesh per
+    point, a few thousand triangles here): a candidate filter by face centroid would
+    drop a large triangle whose interior holds the point. Ties keep the lowest face."""
     import trimesh
 
-    centers = mesh.triangles_center
+    triangles = np.asarray(mesh.triangles, dtype=np.float64)
+    if len(triangles) == 0:
+        raise ValueError("the mesh has no face")
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     dist = np.empty(len(points))
     face = np.empty(len(points), int)
     for i, p in enumerate(points):
-        cand = np.flatnonzero(np.linalg.norm(centers - p, axis=1) < search)
-        if not len(cand):
-            raise ValueError(f"no mesh face within {search * 1e3:.0f} mm of taxel {i}")
-        closest = trimesh.triangles.closest_point(mesh.triangles[cand], np.repeat(p[None], len(cand), 0))
+        closest = trimesh.triangles.closest_point(triangles, np.repeat(p[None], len(triangles), 0))
         d = np.linalg.norm(closest - p, axis=1)
         j = int(np.argmin(d))
-        dist[i], face[i] = d[j], cand[j]
+        dist[i], face[i] = d[j], j
     return dist, face
 
 
@@ -663,7 +664,10 @@ class TaxelMapLoss:
         # grad mode off: the inner graph (leaves -> map -> loss) needs it back on.
         with torch.enable_grad():
             loss, fingers = self.loss()
-            loss.backward()
+            # Without a pad in contact the map is a constant of the state and the loss has
+            # no graph: its vector-Jacobian product is zero, and there is nothing to seed.
+            if loss.requires_grad:
+                loss.backward()
         self.field.seed(fingers)
 
 

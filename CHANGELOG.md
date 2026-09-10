@@ -201,9 +201,15 @@ branch as of 2026-09-06.
   parameters.
 - Forward robustness for differentiable scenes: friction continuation
   (`NonLinearSolverParams.friction_continuation_levels`) and failure-adaptive substepping in the
-  rollout driver.
+  rollout driver, whose `observe_substep(step, sub_dt)` hook (forwarded by the torch bridges)
+  runs a monitor on the final state of every accepted (sub)step of every rollout.
 - `superdex.physics.utils.penetration.PenetrationChecker`: the interpenetration of a scene
-  measured from the engine's contact samples, with a report and an assertion.
+  measured from the engine's contact samples, with a report and an assertion. It watches every
+  non-static rigid, soft, shell or rod actor by default, with or without a collider of its own
+  (a soft actor created from Python has none and still emits samples against the ground), tells
+  actors apart by handle, counts a sample listed by both bodies' queries once, and gives no safe
+  verdict for an unobserved scene, a non-finite sample or a non-finite limit. A sampled measure,
+  not a collision certificate.
 - Examples in `superdex_physics/examples`: `example_diffsim_throw.py` (the per-step API by hand),
   `example_diffsim_video.py` (a rigid throw and finite-element soft-body tasks: a jelly landing on
   a target and a jelly shoving a jelly), `example_diffsim_tactile.py` (differentiable tactile control

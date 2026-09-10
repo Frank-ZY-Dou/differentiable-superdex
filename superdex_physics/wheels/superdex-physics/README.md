@@ -273,11 +273,14 @@ open pose). The Wuji Hand 1, the Wuji Hand 2 beta 2, the XHand1 and the Sharpa W
 from the vendors' URDF descriptions with `tools/urdf_to_superdex_bot.py` (collision hulls, GLB visuals),
 and `assets/bots/arm_hand_combos` mounts each of them on the FR3. `superdex.physics.utils.penetration.PenetrationChecker`
 measures interpenetration from the engine's contact samples (the deepest sample per actor pair
-after each step); the demo replays report it and bound it at 5 mm for the rigid tasks (10 mm for the
-hand pinches, which squeeze the fingertips into the cube by design; they measure 3 to 5.5 mm). Penalty
-contact overlaps under load, about 1 to 3.5 mm at the default stiffness here, and the FR3 wrist's
-render meshes extend up to a centimetre beyond its collision hulls, so a wrist that visibly enters
-a cube overlaps less than it looks.
+after each step, a sampled coverage rather than a collision certificate); the demo replays report it
+and bound it at 5 mm for the rigid tasks (10 mm for the hand pinches, which squeeze the fingertips into
+the cube by design; they measure 3 to 5.5 mm). Penalty contact overlaps under load, about 1 to 3.5 mm
+at the default stiffness here, and the FR3 wrist's render meshes extend up to a centimetre beyond its
+collision hulls, so a wrist that visibly enters a cube overlaps less than it looks. The soft tasks of
+`example_diffsim_video.py` observe the same measure and the element determinants of the jellies on
+every accepted (sub)step of every rollout (the driver's `observe_substep` hook) and abort above 20 mm
+or at an inverted element.
 
 ### Validation
 

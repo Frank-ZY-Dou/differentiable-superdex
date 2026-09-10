@@ -581,6 +581,87 @@ class SubstepTest(unittest.TestCase):
         # All captured states were released on the error path.
         scene.release_all_states()
 
+    def test_observe_substep_sees_every_accepted_substep(self) -> None:
+        """``observe_substep(step, sub_dt)`` runs on the final state of every accepted
+        (sub)step of the schedule - the pieces of the split steps and the last step, in
+        order - and on the plain step of every step without substepping; the rollout's
+        result is the same with and without it, and an observer that raises aborts the
+        rollout with every capture released."""
+        scene, chain, targets, forces, apply_inputs = _controller_setup()
+        self.addCleanup(physics.destroy_scene, scene)
+        terminal = ArticulatedPoseErrorLoss(chain, ref=targets[:, 0] + 0.1)
+        state_init = scene.capture_state()
+        self._inject_failures(self.FAILED_ATTEMPTS)
+        plain = DifferentiableRollout(
+            scene, dt=DT, num_steps=NUM_STEPS, max_substep_levels=2, substep_residual_tolerance=1e-7
+        ).run(apply_inputs=apply_inputs, terminal_losses=[terminal])
+
+        seen: list[tuple[int, float, float]] = []
+
+        def observe(step: int, sub_dt: float) -> None:
+            seen.append((step, sub_dt, terminal.value()))  # the loss on the observed state
+
+        scene.restore_state(state_init, False)
+        self._inject_failures(self.FAILED_ATTEMPTS)
+        observed = DifferentiableRollout(
+            scene,
+            dt=DT,
+            num_steps=NUM_STEPS,
+            max_substep_levels=2,
+            substep_residual_tolerance=1e-7,
+            observe_substep=observe,
+        ).run(apply_inputs=apply_inputs, terminal_losses=[terminal])
+        expected = [(step, sub_dt) for step in range(NUM_STEPS) for sub_dt in self.SCHEDULE.get(step, [DT])]
+        self.assertEqual([(step, sub_dt) for step, sub_dt, _ in seen], expected)
+        self.assertEqual(len(seen), observed.num_solver_steps)
+        self.assertEqual(observed.split_steps, plain.split_steps)
+        self.assertEqual(observed.loss, plain.loss)
+        self.assertEqual(seen[-1][2], observed.loss, "the last observation is the final state")
+        np.testing.assert_array_equal(
+            observed.gradients["chain"].control_targets, plain.gradients["chain"].control_targets
+        )
+
+        seen.clear()
+        scene.restore_state(state_init, False)
+        self._inject_failures(set())
+        DifferentiableRollout(scene, dt=DT, num_steps=NUM_STEPS, observe_substep=observe).run(
+            apply_inputs=apply_inputs, terminal_losses=[terminal]
+        )
+        self.assertEqual([(step, sub_dt) for step, sub_dt, _ in seen], [(step, DT) for step in range(NUM_STEPS)])
+
+        class Abort(Exception):
+            pass
+
+        def raising(step: int, sub_dt: float) -> None:
+            if (step, sub_dt) == (4, DT / 4):
+                raise Abort()
+
+        captured: list = []
+        real_capture = type(scene).capture_state
+
+        def capture(self_scene):
+            handle = real_capture(self_scene)
+            captured.append(handle)
+            return handle
+
+        scene.restore_state(state_init, False)
+        self._inject_failures(self.FAILED_ATTEMPTS)
+        with mock.patch.object(type(scene), "capture_state", capture):
+            with self.assertRaises(Abort):
+                DifferentiableRollout(
+                    scene,
+                    dt=DT,
+                    num_steps=NUM_STEPS,
+                    max_substep_levels=2,
+                    substep_residual_tolerance=1e-7,
+                    observe_substep=raising,
+                ).run(apply_inputs=apply_inputs, terminal_losses=[terminal])
+        self.assertGreater(len(captured), 0)
+        self.assertEqual(_live_handles(scene, captured), [], "captures must be released when the observer raises")
+        scene.release_all_states()
+        with self.assertRaises(TypeError):
+            DifferentiableRollout(scene, dt=DT, num_steps=2, observe_substep=3)
+
     def test_argument_validation(self) -> None:
         scene, _ = scenes.rigid_free()
         self.addCleanup(physics.destroy_scene, scene)

@@ -16,7 +16,14 @@
 a cube resting on the ground under a penalty contact overlaps it by less than the penalty's
 smoothing distance and by less the stiffer the contact, a free cube shows no contact, two
 stacked cubes report the cube-cube and cube-ground pairs, an articulated link pushing a
-cube names the link, and a state restore keeps the query alive."""
+cube names the link, and a state restore keeps the query alive.
+
+``PenetrationCheckerContractTest`` pins the checker's contract: a soft actor without a
+collider (the engine's default for soft actors) is watched by default, a contact seen from
+two watched bodies is counted once, two actors sharing a name stay apart, and no unobserved
+or invalid state - no record, a non-finite sample, a non-finite or negative limit - gets a
+safe verdict. The sample validation is fed synthetic rows through the checker's
+``_contact_points`` seam (the engine emits no non-finite samples in a healthy run)."""
 
 from __future__ import annotations
 
@@ -223,6 +230,245 @@ class PenetrationCheckerTest(unittest.TestCase):
         checker.reset()
         self._run(scene, checker, num_steps=10)
         self.assertAlmostEqual(checker.max_depth(), first, delta=1e-12)
+
+
+class _Row:
+    """A synthetic contact-point row (the fields the checker reads)."""
+
+    def __init__(self, actor_a, actor_b, distance: float, position, sample_index: int):
+        self.actor_a = actor_a
+        self.actor_b = actor_b
+        self.distance = distance
+        self.pos_a = np.asarray(position, dtype=np.float64)
+        self.sample_index = sample_index
+
+
+class _FedChecker(PenetrationChecker):
+    """A checker reading the rows of ``self.rows`` instead of the engine's query."""
+
+    rows: list = []
+
+    def _contact_points(self, actor):
+        return self.rows
+
+
+class PenetrationCheckerContractTest(unittest.TestCase):
+    def _run(self, scene, checker: PenetrationChecker, num_steps: int = NUM_STEPS) -> None:
+        for step in range(num_steps):
+            scene.step(DT)
+            checker.record(step)
+
+    def test_soft_actor_without_collider_is_watched_by_default(self) -> None:
+        """A soft actor created from Python carries no collider yet emits contact samples
+        against the ground's collider: the default selection watches it (it required a
+        collider until 2026-09-10 and reported "no contact" for the jelly on the plane),
+        and an explicit selection of the same actor observes the same depth."""
+        scene, jelly = scenes.soft_cube_on_plane("rich")
+        self.addCleanup(physics.destroy_scene, scene)
+        self.assertEqual(jelly.get_collider_type(), physics.ColliderType.NONE)
+        checker = PenetrationChecker(scene)
+        self.assertEqual([a.get_handle().value for a in checker.actors], [jelly.get_handle().value])
+        self._run(scene, checker, num_steps=10)
+        pairs = checker.worst()
+        self.assertEqual([p.names for p in pairs], [("ground", "jelly")])
+        self.assertGreater(pairs[0].depth, 0.0)
+        self.assertLess(pairs[0].depth, 0.01, pairs[0])
+        self.assertGreater(pairs[0].num_contacts, 0)
+        scene2, jelly2 = scenes.soft_cube_on_plane("rich")
+        self.addCleanup(physics.destroy_scene, scene2)
+        explicit = PenetrationChecker(scene2, actors=[jelly2])
+        self._run(scene2, explicit, num_steps=10)
+        self.assertAlmostEqual(explicit.max_depth(), pairs[0].depth, delta=1e-12)
+
+    def test_contact_seen_from_both_bodies_is_counted_once(self) -> None:
+        """Two stacked cubes, both watched: each cube's query lists the samples of the
+        other cube against its collider too (the same sample twice over the two queries).
+        The pair's sample count is the distinct samples, the same count a checker watching
+        only the lower cube reports, and the raw rows are twice that."""
+        scene, lower = scenes.two_cubes_on_plane("coulomb")
+        self.addCleanup(physics.destroy_scene, scene)
+        upper = find_actor(scene, "top")
+        both = PenetrationChecker(scene)
+        self.assertEqual(len(both.actors), 2)
+        self._run(scene, both)
+        both.reset()
+        both.record()  # one record: the last step's rows
+        key = tuple(sorted((lower.get_name(), upper.get_name())))
+        pair = {p.names: p for p in both.worst()}[key]
+        handles = {lower.get_handle().value, upper.get_handle().value}
+        raw = sum(
+            1
+            for actor in (lower, upper)
+            for point in actor.get_contact_points_world()
+            if {point.actor_a.value, point.actor_b.value} == handles
+        )
+        self.assertGreater(pair.num_contacts, 0)
+        self.assertEqual(raw, 2 * pair.num_contacts, (raw, pair))
+        scene2, lower2 = scenes.two_cubes_on_plane("coulomb")
+        self.addCleanup(physics.destroy_scene, scene2)
+        one = PenetrationChecker(scene2, actors=[lower2])
+        self._run(scene2, one)
+        one.reset()
+        one.record()
+        pair_one = {p.names: p for p in one.worst()}[key]
+        self.assertEqual(pair_one.num_contacts, pair.num_contacts)
+        self.assertAlmostEqual(pair_one.depth, pair.depth, delta=1e-12)
+
+    def test_same_named_actors_stay_apart(self) -> None:
+        """Two dynamic cubes both named "cube" resting on the ground: the checker keeps
+        one pair per handle pair (two "cube / ground" pairs, different handles) while a
+        record's name-keyed summary holds the deeper of the two."""
+        contact = physics.ContactParams(penalty_coefficient=1e6, coulomb_friction_coefficient=0.5)
+        scene = physics.create_scene("same_names")
+        self.addCleanup(physics.destroy_scene, scene)
+        scene.set_gravity([0.0, 0.0, -9.81])
+        scene.create_rigid_actor(
+            name="ground",
+            shape=physics.create_plane_shape(normal=[0.0, 0.0, 1.0], distance=0.0),
+            is_static=True,
+            contact=contact,
+        )
+        half = float(np.abs(scenes.CUBE_COORDS).max())
+        cubes = [
+            scene.create_rigid_actor(
+                name="cube",
+                shape=scenes.cube_shape(),
+                density=density,
+                contact=contact,
+                world_from_local=physics.TransformRT([x, 0.0, half]),
+            )
+            for x, density in ((0.0, 1000.0), (0.5, 4000.0))
+        ]
+        checker = PenetrationChecker(scene)
+        self.assertEqual(len(checker.actors), 2)
+        summary = None
+        for step in range(NUM_STEPS):
+            scene.step(DT)
+            summary = checker.record(step)
+        pairs = checker.worst()
+        self.assertEqual([p.names for p in pairs], [("cube", "ground"), ("cube", "ground")])
+        self.assertNotEqual(pairs[0].handles, pairs[1].handles)
+        self.assertEqual(
+            {p.handles for p in pairs},
+            {tuple(sorted((c.get_handle().value, find_actor(scene, "ground").get_handle().value))) for c in cubes},
+        )
+        # The denser cube sinks deeper; the name-keyed summary keeps the deeper value.
+        self.assertGreater(pairs[0].depth, pairs[1].depth)
+        self.assertEqual(summary[("cube", "ground")], max(checker.record()[("cube", "ground")], 0.0))
+
+    def _fed(self):
+        scene, cube = scenes.rigid_on_plane("none", initial_velocity=(0.0, 0.0, 0.0))
+        self.addCleanup(physics.destroy_scene, scene)
+        ground = find_actor(scene, "ground")
+        checker = _FedChecker(scene)
+        return checker, cube.get_handle(), ground.get_handle()
+
+    def test_unobserved_scene_gets_no_safe_verdict(self) -> None:
+        """No record is not "no contact": the verdict and the maximum raise, the report
+        says so, and a checker without any actor to watch is rejected."""
+        checker, cube, ground = self._fed()
+        self.assertEqual(checker.num_records, 0)
+        self.assertIn("no contact record yet", checker.report())
+        with self.assertRaisesRegex(RuntimeError, "no contact record"):
+            checker.assert_below(0.01)
+        with self.assertRaisesRegex(RuntimeError, "no contact record"):
+            checker.max_depth()
+        checker.rows = []
+        checker.record(0)
+        self.assertEqual(checker.report(), "no contact in 1 records")
+        self.assertEqual(checker.max_depth(), 0.0)
+        checker.assert_below(0.0)
+        with self.assertRaisesRegex(ValueError, "no actor to watch"):
+            PenetrationChecker(checker.scene, actors=[])
+        static_only = physics.create_scene("static_only")
+        self.addCleanup(physics.destroy_scene, static_only)
+        static_only.create_rigid_actor(
+            name="ground",
+            shape=physics.create_plane_shape(normal=[0.0, 0.0, 1.0], distance=0.0),
+            is_static=True,
+        )
+        with self.assertRaisesRegex(ValueError, "no actor to watch"):
+            PenetrationChecker(static_only)
+        with self.assertRaisesRegex(ValueError, "listed twice"):
+            PenetrationChecker(checker.scene, actors=[checker.actors[0], checker.actors[0]])
+
+    def test_invalid_limit_is_rejected(self) -> None:
+        checker, cube, ground = self._fed()
+        checker.rows = [_Row(cube, ground, -0.001, (0.0, 0.0, -0.001), 0)]
+        checker.record(0)
+        for limit in (float("nan"), float("inf"), -float("inf"), -1e-3):
+            with self.subTest(limit=limit):
+                with self.assertRaises(ValueError):
+                    checker.assert_below(limit)
+                with self.assertRaises(ValueError):
+                    checker.report(limit)
+        checker.assert_below(0.002)
+        with self.assertRaisesRegex(RuntimeError, "interpenetration above"):
+            checker.assert_below(0.0005)
+
+    def test_non_finite_samples_fail_closed(self) -> None:
+        """A non-finite distance or position raises at record time in either row order,
+        nothing of that record is kept, and no safe verdict follows until a reset."""
+        checker, cube, ground = self._fed()
+        shallow = _Row(cube, ground, -0.001, (0.0, 0.0, -0.001), 0)
+        deep = _Row(cube, ground, -0.02, (0.1, 0.0, -0.02), 1)
+        checker.rows = [shallow]
+        checker.record(0)
+        bad_rows = {
+            "nan distance": _Row(cube, ground, float("nan"), (0.0, 0.0, 0.0), 2),
+            "inf distance": _Row(cube, ground, -float("inf"), (0.0, 0.0, 0.0), 2),
+            "nan position": _Row(cube, ground, -0.003, (0.0, float("nan"), 0.0), 2),
+            "inf position": _Row(cube, ground, -0.003, (float("inf"), 0.0, 0.0), 2),
+        }
+        for label, bad in bad_rows.items():
+            for order in ((bad, deep), (deep, bad)):
+                with self.subTest(label=label, first=order[0] is bad):
+                    checker.rows = list(order)
+                    with self.assertRaisesRegex(ValueError, "invalid contact sample"):
+                        checker.record(1)
+                    self.assertEqual(checker.num_records, 1)
+                    self.assertEqual([p.depth for p in checker.worst()], [0.001], "the deep row was not folded")
+                    self.assertIn("rejected for non-finite samples", checker.report())
+                    with self.assertRaisesRegex(RuntimeError, "rejected for non-finite"):
+                        checker.assert_below(0.05)
+                    with self.assertRaisesRegex(RuntimeError, "rejected for non-finite"):
+                        checker.max_depth()
+        self.assertEqual(checker.num_invalid_records, 8)
+        checker.reset()
+        self.assertEqual(checker.num_invalid_records, 0)
+        checker.rows = [deep, shallow]
+        checker.record(2)
+        self.assertAlmostEqual(checker.max_depth(), 0.02)
+        with self.assertRaisesRegex(RuntimeError, "20.00 mm at step 2"):
+            checker.assert_below(0.01)
+        # A depth mutated to a non-finite value after the record is caught too.
+        checker.worst()[0].depth = float("nan")
+        with self.assertRaisesRegex(RuntimeError, "invalid stored depth"):
+            checker.assert_below(1.0)
+
+    def test_sample_identity_is_the_emitting_actor_and_index(self) -> None:
+        """Fed rows: the same sample listed twice (as the two bodies' queries do) counts
+        once; a sample of the cube on the ground and one of the ground on the cube with
+        the same index are two samples; the pair depth is the deepest of both directions
+        whatever the order."""
+        checker, cube, ground = self._fed()
+        on_ground = _Row(cube, ground, -0.001, (0.0, 0.0, -0.001), 3)
+        on_cube = _Row(ground, cube, -0.004, (0.0, 0.0, 0.0), 3)
+        checker.rows = [on_ground, on_ground]
+        depths = checker.record(0)
+        pair = checker.worst()[0]
+        self.assertEqual((pair.num_contacts, pair.depth), (1, 0.001))
+        self.assertEqual(depths, {("cube", "ground"): 0.001})
+        for order in ((on_ground, on_cube), (on_cube, on_ground, on_ground)):
+            checker.reset()
+            checker.rows = list(order)
+            checker.record(1)
+            pair = checker.worst()[0]
+            self.assertEqual(pair.num_contacts, 2, order)
+            self.assertEqual(pair.depth, 0.004)
+            self.assertEqual(pair.names, ("cube", "ground"))
+            self.assertEqual(pair.handles, tuple(sorted((cube.value, ground.value))))
+            np.testing.assert_array_equal(pair.position, on_cube.pos_a)
 
 
 if __name__ == "__main__":

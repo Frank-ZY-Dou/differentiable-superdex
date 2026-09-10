@@ -91,6 +91,10 @@ Design and contract:
 - ``step_losses(step)`` is called once per step, during the forward rollout;
   the sweep differentiates the instances it returned (a factory may sample or
   consume data and still defines one objective).
+- ``observe_substep(step, sub_dt)`` is called on the final state of every
+  accepted forward (sub)step of every call, the pieces of a split step and the
+  last step included: a read-only hook for monitors that must see each state
+  the rollout visited (see ``DifferentiableRollout``).
 - Losses follow the ``diffsim_rollout`` protocol (``value()`` and
   ``accumulate_output_grad()``); they are part of the bridge, not tensors, so
   the loss shape itself is fixed at construction.
@@ -356,6 +360,7 @@ class TorchRollout:
         substep_residual_tolerance: float | None = None,
         forward_residual_tolerance: float | None = None,
         require_adjoint_convergence: bool = True,
+        observe_substep: Callable[[int, float], None] | None = None,
     ):
         _require_double_precision()
         if not terminal_losses and step_losses is None:
@@ -376,6 +381,7 @@ class TorchRollout:
             substep_residual_tolerance=substep_residual_tolerance,
             forward_residual_tolerance=forward_residual_tolerance,
             require_adjoint_convergence=require_adjoint_convergence,
+            observe_substep=observe_substep,
         )
         # Actors are resolved by identity (handle), never by name: names label the
         # gradient dictionaries only. Every group is validated before any state is
@@ -930,6 +936,7 @@ class PolicyRollout:
         substep_residual_tolerance: float | None = None,
         forward_residual_tolerance: float | None = None,
         require_adjoint_convergence: bool = True,
+        observe_substep: Callable[[int, float], None] | None = None,
     ):
         _require_double_precision()
         if not terminal_losses and step_losses is None and aux_losses is None:
@@ -958,6 +965,7 @@ class PolicyRollout:
             substep_residual_tolerance=substep_residual_tolerance,
             forward_residual_tolerance=forward_residual_tolerance,
             require_adjoint_convergence=require_adjoint_convergence,
+            observe_substep=observe_substep,
         )
         # Actors are resolved by identity (handle), never by name (see _check_group); the
         # observations' actors must belong to this scene as well.
@@ -1140,17 +1148,27 @@ class PolicyRollout:
                     except BaseException:
                         scene.release_state(pre)
                         raise
+                    # Recorded first: an observer that raises leaves both captures to the
+                    # release below.
                     records.append(_StepRecord(step, self.dt, pre, post))
+                    if driver.observe_substep is not None:
+                        driver.observe_substep(step, self.dt)
                 else:
+
+                    def on_substep(pre, post, sub_dt, step=step) -> None:
+                        # Observed before the captures are recorded: if the observer
+                        # raises, step_with_substeps still owns them and releases them.
+                        if driver.observe_substep is not None:
+                            driver.observe_substep(step, sub_dt)
+                        records.append(_StepRecord(step, sub_dt, pre, post))
+
                     step_with_substeps(
                         scene,
                         self.dt,
                         driver.max_substep_levels,
                         driver.substep_residual_tolerance,
                         step=step,
-                        on_substep=lambda pre, post, sub_dt, step=step: records.append(
-                            _StepRecord(step, sub_dt, pre, post)
-                        ),
+                        on_substep=on_substep,
                     )
                     max_forward_residual = max(
                         max_forward_residual, float(_solver_stats(scene).residual_norm)

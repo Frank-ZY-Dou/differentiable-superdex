@@ -524,6 +524,104 @@ def soft_centroid(actor, rest: np.ndarray):
     return world_from_local[:3, :3] @ positions.mean(axis=0) + world_from_local[:3, 3], world_from_local[:3, :3]
 
 
+SOFT_MAX_PENETRATION = 0.02  # [m] no contact sample deeper than a tenth of the jelly's side
+
+
+class SoftMonitor:
+    """Contact overlap and element validity of the soft bodies, observed on every accepted
+    (sub)step of every rollout - the optimizer's, the finite-difference probes', the camera
+    replays' - and judged after each rollout by an explicit policy:
+
+    - no contact sample of any actor pair deeper than ``max_penetration``. The measure is
+      the engine's own contact samples (``PenetrationChecker``): a sampled coverage of
+      the penalty contact's overlap, not a collision certificate - a vertex between two
+      samples, or a thin body crossing between samples within a substep, is not seen.
+      The bound is a tenth of the jelly's side: deeper, the overlap shows in the render
+      and the penalty contact no longer stands in for a non-penetrating one;
+    - no inverted tetrahedron: the determinant of every element's deformation gradient
+      (its deformed over its rest signed volume) stays positive, in the initial state
+      (checked at construction) and after every accepted (sub)step.
+
+    The forward solve's convergence is the rollout driver's separate condition
+    (``substep_residual_tolerance``). ``begin()`` opens a rollout and forgets the previous
+    one's records (a restored state carries no record), ``observe`` is the driver's
+    ``observe_substep`` hook and ``step`` its stand-in for a replay outside the bridge,
+    ``check`` applies the policy. ``bodies`` maps each soft actor to its rest coordinates
+    and tetrahedra."""
+
+    def __init__(self, scene, bodies: dict, max_penetration: float):
+        self.scene = scene
+        self.penetration = PenetrationChecker(scene)
+        self.max_penetration = float(max_penetration)
+        self.bodies = []
+        for actor, (coordinates, connectivity) in bodies.items():
+            rest = np.asarray(coordinates, dtype=np.float64).reshape(-1, 3)
+            tets = np.asarray(connectivity, dtype=np.int64).reshape(-1, 4)
+            rest_det = np.linalg.det(rest[tets[:, 1:]] - rest[tets[:, :1]])
+            if not np.all(rest_det > 0.0):
+                raise ValueError(f"{actor.get_name()}: {int((rest_det <= 0.0).sum())} elements of non-positive rest volume")
+            self.bodies.append((actor, rest, tets, rest_det))
+        self.min_det = float("inf")
+        self.num_observed = 0
+        self.rollouts = 0
+        self.observed_total = 0
+        self.worst_depth = 0.0
+        self.worst_det = float("inf")
+        initial = self._min_det()
+        if not initial > 0.0:
+            raise RuntimeError(f"inverted element in the initial state (min det {initial:.3e})")
+
+    def _min_det(self) -> float:
+        value = float("inf")
+        for actor, rest, tets, rest_det in self.bodies:
+            positions = rest + np.asarray(actor.get_displacements(), dtype=np.float64).reshape(-1, 3)
+            det = np.linalg.det(positions[tets[:, 1:]] - positions[tets[:, :1]]) / rest_det
+            value = min(value, float(det.min()))
+        return value
+
+    def begin(self) -> None:
+        self.penetration.reset()
+        self.min_det = float("inf")
+        self.num_observed = 0
+
+    def observe(self, step: int, sub_dt: float) -> None:
+        self.penetration.record(step)
+        self.min_det = min(self.min_det, self._min_det())
+        self.num_observed += 1
+
+    def step(self, dt: float, step: int) -> None:
+        """A replay step outside the bridge, substepped like the rollout's, every accepted piece observed."""
+
+        def on_substep(pre, post, sub_dt: float) -> None:
+            self.scene.release_state(pre)
+            self.scene.release_state(post)
+            self.observe(step, sub_dt)
+
+        step_with_substeps(self.scene, dt, SOFT_SUBSTEPS, SOFT_RESIDUAL_TOLERANCE, step=step, on_substep=on_substep)
+
+    def check(self, label: str) -> None:
+        """The policy on the rollout observed since ``begin()``; raises on a violation."""
+        if self.num_observed == 0:
+            raise RuntimeError(f"{label}: no (sub)step was observed")
+        if not self.min_det > 0.0:
+            raise RuntimeError(f"{label}: inverted element (min deformation-gradient determinant {self.min_det:.3e})")
+        try:
+            self.penetration.assert_below(self.max_penetration)
+        except RuntimeError as error:
+            raise RuntimeError(f"{label}: {error}") from error
+        self.rollouts += 1
+        self.observed_total += self.num_observed
+        self.worst_depth = max(self.worst_depth, self.penetration.max_depth())
+        self.worst_det = min(self.worst_det, self.min_det)
+
+    def summary(self) -> str:
+        return (
+            f"{self.rollouts} rollouts, {self.observed_total} accepted (sub)steps observed: deepest contact "
+            f"sample {1000.0 * self.worst_depth:.2f} mm (limit {1000.0 * self.max_penetration:.0f} mm, sampled "
+            f"coverage), min element determinant {self.worst_det:.3f} (limit > 0)"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Task 1: rigid throw with the per-step adjoint API
 # ---------------------------------------------------------------------------
@@ -644,7 +742,7 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
     )
     diffsim.make_scene_differentiable(scene)  # also disables recentering (fixed root frame)
     tighten_solvers(scene)
-    penetration = PenetrationChecker(scene)
+    monitor = SoftMonitor(scene, {jelly: (coordinates, connectivity)}, SOFT_MAX_PENETRATION)
     rest = coordinates.reshape(-1, 3)
     root = np.array([0.0, 0.0, 0.35])
 
@@ -682,6 +780,7 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
         terminal_losses=[CentroidLoss()],
         max_substep_levels=SOFT_SUBSTEPS,
         substep_residual_tolerance=SOFT_RESIDUAL_TOLERANCE,
+        observe_substep=monitor.observe,
     )
     velocity = torch.zeros(3, dtype=torch.float64, requires_grad=True)
     optimizer = torch.optim.SGD([velocity], lr=4.0)
@@ -690,7 +789,10 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
     u0 = torch.zeros(3 * num_nodes, dtype=torch.float64)
 
     def rollout(launch: torch.Tensor) -> torch.Tensor:
-        return bridge(initial_states=torch.cat([u0, launch.repeat(num_nodes)]))
+        monitor.begin()
+        loss = bridge(initial_states=torch.cat([u0, launch.repeat(num_nodes)]))
+        monitor.check("rollout")
+        return loss
 
     for iteration in range(num_iterations):
         optimizer.zero_grad()
@@ -720,21 +822,23 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
             scene.restore_state(bridge._state_init, False)
             jelly.set_node_velocities_local(np.tile(v0, num_nodes))
             recorder.begin_iteration()
+            monitor.begin()
             for step in range(num_steps):
-                step_with_substeps(scene, dt, SOFT_SUBSTEPS, SOFT_RESIDUAL_TOLERANCE, step=step)
-                penetration.record(step)
+                monitor.step(dt, step)
                 caption = (
                     f"iteration {iteration}   t = {(step + 1) * dt:.2f} s\n"
                     f"v0 = [{v0[0]:+.2f} {v0[1]:+.2f} {v0[2]:+.2f}] m/s   loss = {losses[-1]:.4f}"
                 )
                 recorder.capture(centroid_world(), caption, hold=(1 if step < num_steps - 1 else 12))
+            monitor.check(f"replay of iteration {iteration}")
         optimizer.step()
 
     print(
         f"[soft] loss {losses[0]:.3e} -> {losses[-1]:.3e} in {num_iterations} iterations, "
         f"adjoint vs FD along the gradient {fd_error:.1e}"
     )
-    print("[soft] " + penetration.report(None).replace("\n", "\n[soft] "))
+    print("[soft] " + monitor.summary())
+    print("[soft] last replay: " + monitor.penetration.report(SOFT_MAX_PENETRATION).replace("\n", "\n[soft] "))
     bridge.close()
     recorder.write(output_dir / "soft_landing.mp4")
     save_loss_curve(output_dir / "soft_landing_loss.png", losses, "Soft landing: loss vs iteration")
@@ -798,7 +902,9 @@ def task_soft_on_soft(output_dir: pathlib.Path, num_iterations: int) -> None:
     thrown = jelly("thrown", SOFT_ON_SOFT_LAUNCH)
     diffsim.make_scene_differentiable(scene)  # also disables recentering (fixed root frames)
     tighten_solvers(scene)
-    penetration = PenetrationChecker(scene)
+    monitor = SoftMonitor(
+        scene, {resting: (coordinates, connectivity), thrown: (coordinates, connectivity)}, SOFT_MAX_PENETRATION
+    )
 
     class ShoveLoss:
         """0.5 |c_xy - target_xy|^2 on the resting jelly's centroid at the last step (its
@@ -835,19 +941,23 @@ def task_soft_on_soft(output_dir: pathlib.Path, num_iterations: int) -> None:
         terminal_losses=[ShoveLoss()],
         max_substep_levels=SOFT_SUBSTEPS,
         substep_residual_tolerance=SOFT_RESIDUAL_TOLERANCE,
+        observe_substep=monitor.observe,
     )
     u0 = torch.zeros(3 * num_nodes, dtype=torch.float64)
 
     def rollout(launch: torch.Tensor) -> torch.Tensor:
-        return bridge(initial_states=torch.cat([u0, launch.repeat(num_nodes)]))
+        monitor.begin()
+        loss = bridge(initial_states=torch.cat([u0, launch.repeat(num_nodes)]))
+        monitor.check("rollout")
+        return loss
 
     def replay(v0: np.ndarray, iteration: int) -> None:
         scene.restore_state(bridge._state_init, False)
         thrown.set_node_velocities_local(np.tile(v0, num_nodes))
         recorder.begin_iteration()
+        monitor.begin()
         for step in range(SOFT_ON_SOFT_STEPS):
-            step_with_substeps(scene, SOFT_ON_SOFT_DT, SOFT_SUBSTEPS, SOFT_RESIDUAL_TOLERANCE, step=step)
-            penetration.record(step)
+            monitor.step(SOFT_ON_SOFT_DT, step)
             caption = (
                 f"iteration {iteration}   t = {(step + 1) * SOFT_ON_SOFT_DT:.2f} s\n"
                 f"v0 = [{v0[0]:+.2f} {v0[1]:+.2f} {v0[2]:+.2f}] m/s   loss = {losses[-1]:.4f}"
@@ -855,6 +965,7 @@ def task_soft_on_soft(output_dir: pathlib.Path, num_iterations: int) -> None:
             recorder.capture(
                 soft_centroid(resting, rest)[0], caption, hold=(1 if step < SOFT_ON_SOFT_STEPS - 1 else 12)
             )
+        monitor.check(f"replay of iteration {iteration}")
 
     velocity = torch.tensor(SOFT_ON_SOFT_V0, dtype=torch.float64, requires_grad=True)
     losses = []
@@ -890,7 +1001,11 @@ def task_soft_on_soft(output_dir: pathlib.Path, num_iterations: int) -> None:
         f"[soft_on_soft] loss {losses[0]:.3e} -> {losses[-1]:.3e} in {num_iterations} iterations, "
         f"adjoint vs FD along the gradient {fd_error:.1e}"
     )
-    print("[soft_on_soft] " + penetration.report(None).replace("\n", "\n[soft_on_soft] "))
+    print("[soft_on_soft] " + monitor.summary())
+    print(
+        "[soft_on_soft] last replay: "
+        + monitor.penetration.report(SOFT_MAX_PENETRATION).replace("\n", "\n[soft_on_soft] ")
+    )
     bridge.close()
     recorder.write(output_dir / "soft_on_soft.mp4")
     save_loss_curve(output_dir / "soft_on_soft_loss.png", losses, "Soft on soft: loss vs iteration")

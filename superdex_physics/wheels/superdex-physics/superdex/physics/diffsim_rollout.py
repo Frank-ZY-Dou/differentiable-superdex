@@ -481,6 +481,7 @@ class DifferentiableRollout:
         substep_residual_tolerance: float | None = None,
         forward_residual_tolerance: float | None = None,
         require_adjoint_convergence: bool = True,
+        observe_substep: Callable[[int, float], None] | None = None,
     ):
         """``max_substep_levels`` > 0 enables failure-adaptive substepping: a
         step whose Newton solve ends without convergence and with a residual
@@ -506,6 +507,13 @@ class DifferentiableRollout:
         reports as unconverged (true residual above the outer solver's threshold) raise
         :class:`AdjointSolveError`; a non-finite adjoint residual or gradient always raises.
         The result reports each condition in its own field.
+
+        ``observe_substep(step, sub_dt)``, when given, is called on the final state of
+        every accepted forward (sub)step - the plain step without substepping, each
+        accepted piece of a split step otherwise - before the reverse sweep. It is a
+        read-only hook for monitors (contact penetration, element validity) that must
+        see every state the rollout actually visited, the peaks inside a split step
+        and the last step included; it must not change the scene.
         """
         if num_steps <= 0:
             raise ValueError("num_steps must be positive")
@@ -541,6 +549,9 @@ class DifferentiableRollout:
         self.grad_clip_norm = grad_clip_norm
         self.max_substep_levels = max_substep_levels
         self.substep_residual_tolerance = substep_residual_tolerance
+        if observe_substep is not None and not callable(observe_substep):
+            raise TypeError("observe_substep must be callable")
+        self.observe_substep = observe_substep
         self.entries = _collect_actors(scene)
 
     # -- pieces ------------------------------------------------------------
@@ -579,17 +590,27 @@ class DifferentiableRollout:
                     except BaseException:
                         self.scene.release_state(pre)
                         raise
+                    # Recorded first: an observer that raises leaves both captures to the
+                    # release below.
                     records.append(_StepRecord(step, self.dt, pre, post))
+                    if self.observe_substep is not None:
+                        self.observe_substep(step, self.dt)
                 else:
+
+                    def on_substep(pre, post, sub_dt, step=step) -> None:
+                        # Observed before the captures are recorded: if the observer
+                        # raises, step_with_substeps still owns them and releases them.
+                        if self.observe_substep is not None:
+                            self.observe_substep(step, sub_dt)
+                        records.append(_StepRecord(step, sub_dt, pre, post))
+
                     step_with_substeps(
                         self.scene,
                         self.dt,
                         self.max_substep_levels,
                         self.substep_residual_tolerance,
                         step=step,
-                        on_substep=lambda pre, post, sub_dt, step=step: records.append(
-                            _StepRecord(step, sub_dt, pre, post)
-                        ),
+                        on_substep=on_substep,
                     )
                     self._max_forward_residual = max(
                         self._max_forward_residual, float(_solver_stats(self.scene).residual_norm)
