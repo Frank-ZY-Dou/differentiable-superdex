@@ -18,7 +18,11 @@ triangle is on the surface, and random meshes agree with an exhaustive point-to-
 reference - and the taxel-map loss handles pads without contact: no pad in contact gives a
 graph-free loss whose vector-Jacobian product is zero (the unconditional ``backward`` used
 to raise), one pad in contact seeds its force cotangent, which a central finite difference of
-the map confirms, and contact removed then regained seeds nothing stale."""
+the map confirms, and contact removed then regained seeds nothing stale.
+
+The example needs the native physics build (required under ``SUPERDEX_REQUIRE_NATIVE``) and
+the robotics extension, torch, trimesh and the video example's OpenCV and imageio; a checkout
+without one of those (the physics-only CI job) skips this module and says which is missing."""
 
 from __future__ import annotations
 
@@ -34,26 +38,39 @@ EXAMPLE = pathlib.Path(__file__).resolve().parents[3] / "examples" / "example_di
 
 try:
     import superdex.physics as physics  # noqa: F401  (the example imports the native modules)
-    import torch
-    import trimesh
-except ImportError as error:  # pragma: no cover - the native build or a dependency is absent
+except ImportError as error:  # pragma: no cover - the native build is absent
     if os.environ.get("SUPERDEX_REQUIRE_NATIVE"):
         raise
-    raise unittest.SkipTest(f"the tactile example tests need the native build, torch and trimesh: {error}") from error
+    raise unittest.SkipTest(f"the tactile example tests need the native build: {error}") from error
 
 if not EXAMPLE.is_file():  # pragma: no cover - installed wheel without the source tree
     raise unittest.SkipTest(f"the tactile example is not beside this checkout: {EXAMPLE}")
 
 
 def _load_example():
+    """The example as a module; a failed load leaves nothing behind in ``sys.modules``."""
     name = "example_diffsim_tactile"
     module = sys.modules.get(name)
-    if module is None:
-        spec = importlib.util.spec_from_file_location(name, EXAMPLE)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
+    if module is not None:
+        return module
+    spec = importlib.util.spec_from_file_location(name, EXAMPLE)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
         spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[name]
+        raise
     return module
+
+
+try:
+    _load_example()
+except ImportError as error:  # pragma: no cover - a dependency of the example is absent
+    raise unittest.SkipTest(f"the tactile example cannot be imported here: {error}") from error
+
+import torch  # noqa: E402  (imported by the example above)
+import trimesh  # noqa: E402
 
 
 class NearestFacesTest(unittest.TestCase):
