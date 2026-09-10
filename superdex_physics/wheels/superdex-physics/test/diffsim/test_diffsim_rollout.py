@@ -661,6 +661,49 @@ class SubstepTest(unittest.TestCase):
         scene.release_all_states()
         with self.assertRaises(TypeError):
             DifferentiableRollout(scene, dt=DT, num_steps=2, observe_substep=3)
+        with self.assertRaises(TypeError):
+            DifferentiableRollout(scene, dt=DT, num_steps=2, observe_initial="no")
+
+    def test_observe_initial_sees_the_initial_state_once_per_rollout(self) -> None:
+        """``observe_initial()`` runs once per rollout on the initial state, before the first
+        step and before any ``observe_substep`` call; an exception in it aborts the rollout
+        before a capture is taken."""
+        scene, chain, targets, forces, apply_inputs = _controller_setup()
+        self.addCleanup(physics.destroy_scene, scene)
+        terminal = ArticulatedPoseErrorLoss(chain, ref=targets[:, 0] + 0.1)
+        initial_value = terminal.value()
+        events: list = []
+        rollout = DifferentiableRollout(
+            scene,
+            dt=DT,
+            num_steps=NUM_STEPS,
+            observe_substep=lambda step, sub_dt: events.append(("step", step)),
+            observe_initial=lambda: events.append(("initial", terminal.value())),
+        )
+        rollout.run(apply_inputs=apply_inputs, terminal_losses=[terminal])
+        self.assertEqual(events[0], ("initial", initial_value))
+        self.assertEqual(events[1:], [("step", step) for step in range(NUM_STEPS)])
+
+        class Abort(Exception):
+            pass
+
+        def refuse() -> None:
+            raise Abort()
+
+        captured: list = []
+        real_capture = type(scene).capture_state
+
+        def capture(self_scene):
+            handle = real_capture(self_scene)
+            captured.append(handle)
+            return handle
+
+        with mock.patch.object(type(scene), "capture_state", capture):
+            with self.assertRaises(Abort):
+                DifferentiableRollout(scene, dt=DT, num_steps=NUM_STEPS, observe_initial=refuse).run(
+                    apply_inputs=apply_inputs, terminal_losses=[terminal]
+                )
+        self.assertEqual(captured, [], "nothing is captured before the initial state is accepted")
 
     def test_argument_validation(self) -> None:
         scene, _ = scenes.rigid_free()

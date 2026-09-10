@@ -93,8 +93,10 @@ Design and contract:
   consume data and still defines one objective).
 - ``observe_substep(step, sub_dt)`` is called on the final state of every
   accepted forward (sub)step of every call, the pieces of a split step and the
-  last step included: a read-only hook for monitors that must see each state
-  the rollout visited (see ``DifferentiableRollout``).
+  last step included, and ``observe_initial()`` once per call on the initial
+  state after the initial-state tensors are applied and before the first step:
+  read-only hooks for monitors that must see each state the rollout visited
+  (see ``DifferentiableRollout``).
 - Losses follow the ``diffsim_rollout`` protocol (``value()`` and
   ``accumulate_output_grad()``); they are part of the bridge, not tensors, so
   the loss shape itself is fixed at construction.
@@ -361,6 +363,7 @@ class TorchRollout:
         forward_residual_tolerance: float | None = None,
         require_adjoint_convergence: bool = True,
         observe_substep: Callable[[int, float], None] | None = None,
+        observe_initial: Callable[[], None] | None = None,
     ):
         _require_double_precision()
         if not terminal_losses and step_losses is None:
@@ -382,6 +385,7 @@ class TorchRollout:
             forward_residual_tolerance=forward_residual_tolerance,
             require_adjoint_convergence=require_adjoint_convergence,
             observe_substep=observe_substep,
+            observe_initial=observe_initial,
         )
         # Actors are resolved by identity (handle), never by name: names label the
         # gradient dictionaries only. Every group is validated before any state is
@@ -937,6 +941,7 @@ class PolicyRollout:
         forward_residual_tolerance: float | None = None,
         require_adjoint_convergence: bool = True,
         observe_substep: Callable[[int, float], None] | None = None,
+        observe_initial: Callable[[], None] | None = None,
     ):
         _require_double_precision()
         if not terminal_losses and step_losses is None and aux_losses is None:
@@ -966,6 +971,7 @@ class PolicyRollout:
             forward_residual_tolerance=forward_residual_tolerance,
             require_adjoint_convergence=require_adjoint_convergence,
             observe_substep=observe_substep,
+            observe_initial=observe_initial,
         )
         # Actors are resolved by identity (handle), never by name (see _check_group); the
         # observations' actors must belong to this scene as well.
@@ -1109,6 +1115,8 @@ class PolicyRollout:
         # differentiates those instances (see DifferentiableRollout.run).
         step_loss_lists: dict[int, list] = {}
         running_total = 0.0
+        if driver.observe_initial is not None:
+            driver.observe_initial()
         try:
             for step in range(self.num_steps):
                 obs = np.concatenate(obs_history[: self.history])

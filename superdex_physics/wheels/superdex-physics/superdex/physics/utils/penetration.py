@@ -101,7 +101,8 @@ class PenetrationChecker:
             actor of another type, or one the engine gives no contact samples, is
             rejected when its query is registered.
         pair_names: optional callable ``(actor_name_a, actor_name_b) -> bool`` selecting
-            the pairs to record (default: all).
+            the pairs to record (default: all); it receives the two names in name order,
+            as the report lists them. Rows it excludes are still validated.
 
     Raises:
         ValueError: no actor to watch, an actor listed twice, or an actor of a type
@@ -183,15 +184,9 @@ class PenetrationChecker:
             for point in self._contact_points(actor):
                 handle_a, handle_b = point.actor_a, point.actor_b
                 sample = (int(handle_a.value), int(handle_b.value), int(point.sample_index))
-                if sample in seen:
-                    continue  # the same sample listed by the other body's query
-                seen.add(sample)
-                key = (sample[0], sample[1]) if sample[0] <= sample[1] else (sample[1], sample[0])
                 name_a, name_b = self._name(handle_a), self._name(handle_b)
-                if self._pair_filter is not None and not self._pair_filter(
-                    *((name_a, name_b) if key[0] == sample[0] else (name_b, name_a))
-                ):
-                    continue
+                # Every row read is validated, before the duplicate and pair filters: a
+                # non-finite datum is rejected wherever it appears.
                 distance = float(point.distance)
                 position = np.asarray(point.pos_a, dtype=np.float64).reshape(-1)
                 if not (
@@ -202,6 +197,13 @@ class PenetrationChecker:
                         f"invalid contact sample {sample[2]} of {name_a} on {name_b}{where}: "
                         f"distance {distance}, position {position.tolist()}"
                     )
+                if sample in seen:
+                    continue  # the same sample listed by the other body's query
+                seen.add(sample)
+                key = (sample[0], sample[1]) if sample[0] <= sample[1] else (sample[1], sample[0])
+                # The pair filter sees the names in name order, as the report lists them.
+                if self._pair_filter is not None and not self._pair_filter(*sorted((name_a, name_b))):
+                    continue
                 depth = -distance
                 entry = current.get(key)
                 if entry is None:

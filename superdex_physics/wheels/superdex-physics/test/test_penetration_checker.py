@@ -446,6 +446,40 @@ class PenetrationCheckerContractTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "invalid stored depth"):
             checker.assert_below(1.0)
 
+    def test_pair_filter_sees_names_in_name_order(self) -> None:
+        """The ``pair_names`` predicate receives the two names in name order whatever the
+        handle order (the ground here has the lower handle but the later name): a filter
+        written for the report's order keeps selecting the pair."""
+        checker, cube, ground = self._fed()
+        self.assertLess(ground.value, cube.value)
+        self.assertLess("cube", "ground")
+        seen: list[tuple[str, str]] = []
+
+        def only_cube_ground(a: str, b: str) -> bool:
+            seen.append((a, b))
+            return (a, b) == ("cube", "ground")
+
+        filtered = _FedChecker(checker.scene, actors=[checker.actors[0]], pair_names=only_cube_ground)
+        filtered.rows = [_Row(cube, ground, -0.01, (0.0, 0.0, -0.01), 0), _Row(ground, cube, -0.002, (0.0, 0.0, 0.0), 0)]
+        filtered.record(0)
+        self.assertEqual(seen, [("cube", "ground"), ("cube", "ground")])
+        self.assertEqual([(p.names, p.depth) for p in filtered.worst()], [(("cube", "ground"), 0.01)])
+
+    def test_duplicate_rows_are_validated_before_they_are_dropped(self) -> None:
+        """A second copy of a sample (the other body's query) with a non-finite datum is
+        rejected even though the first copy was valid, and so is a non-finite row of a pair
+        the filter excludes."""
+        checker, cube, ground = self._fed()
+        good = _Row(cube, ground, -0.001, (0.0, 0.0, -0.001), 0)
+        checker.rows = [good, _Row(cube, ground, float("nan"), (0.0, 0.0, -0.001), 0)]
+        with self.assertRaisesRegex(ValueError, "invalid contact sample"):
+            checker.record(0)
+        self.assertEqual((checker.num_records, checker.num_invalid_records), (0, 1))
+        excluded = _FedChecker(checker.scene, actors=[checker.actors[0]], pair_names=lambda a, b: False)
+        excluded.rows = [_Row(cube, ground, -0.001, (float("nan"), 0.0, 0.0), 1)]
+        with self.assertRaisesRegex(ValueError, "invalid contact sample"):
+            excluded.record(0)
+
     def test_sample_identity_is_the_emitting_actor_and_index(self) -> None:
         """Fed rows: the same sample listed twice (as the two bodies' queries do) counts
         once; a sample of the cube on the ground and one of the ground on the cube with

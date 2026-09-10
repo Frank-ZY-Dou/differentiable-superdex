@@ -482,6 +482,7 @@ class DifferentiableRollout:
         forward_residual_tolerance: float | None = None,
         require_adjoint_convergence: bool = True,
         observe_substep: Callable[[int, float], None] | None = None,
+        observe_initial: Callable[[], None] | None = None,
     ):
         """``max_substep_levels`` > 0 enables failure-adaptive substepping: a
         step whose Newton solve ends without convergence and with a residual
@@ -514,6 +515,10 @@ class DifferentiableRollout:
         read-only hook for monitors (contact penetration, element validity) that must
         see every state the rollout actually visited, the peaks inside a split step
         and the last step included; it must not change the scene.
+        ``observe_initial()`` is called once per rollout on the initial state, before
+        the first step and after the caller applied its inputs to that state (a bridge
+        applies its initial-state tensors before running), so an invalid start - an
+        inverted element, a non-finite displacement - is caught before it is simulated.
         """
         if num_steps <= 0:
             raise ValueError("num_steps must be positive")
@@ -551,7 +556,10 @@ class DifferentiableRollout:
         self.substep_residual_tolerance = substep_residual_tolerance
         if observe_substep is not None and not callable(observe_substep):
             raise TypeError("observe_substep must be callable")
+        if observe_initial is not None and not callable(observe_initial):
+            raise TypeError("observe_initial must be callable")
         self.observe_substep = observe_substep
+        self.observe_initial = observe_initial
         self.entries = _collect_actors(scene)
 
     # -- pieces ------------------------------------------------------------
@@ -575,6 +583,8 @@ class DifferentiableRollout:
         ``self._max_forward_residual`` holds the largest step residual afterwards."""
         records: list[_StepRecord] = []
         self._max_forward_residual = 0.0
+        if self.observe_initial is not None:
+            self.observe_initial()
         try:
             for step in range(self.num_steps):
                 if apply_inputs is not None:

@@ -201,8 +201,9 @@ branch as of 2026-09-06.
   parameters.
 - Forward robustness for differentiable scenes: friction continuation
   (`NonLinearSolverParams.friction_continuation_levels`) and failure-adaptive substepping in the
-  rollout driver, whose `observe_substep(step, sub_dt)` hook (forwarded by the torch bridges)
-  runs a monitor on the final state of every accepted (sub)step of every rollout.
+  rollout driver, whose `observe_substep(step, sub_dt)` and `observe_initial()` hooks
+  (forwarded by the torch bridges) run a monitor on the final state of every accepted
+  (sub)step of every rollout and on its initial state.
 - `superdex.physics.utils.penetration.PenetrationChecker`: the interpenetration of a scene
   measured from the engine's contact samples, with a report and an assertion. It watches every
   non-static rigid, soft, shell or rod actor by default, with or without a collider of its own

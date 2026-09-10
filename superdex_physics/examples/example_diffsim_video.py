@@ -528,9 +528,9 @@ SOFT_MAX_PENETRATION = 0.02  # [m] no contact sample deeper than a tenth of the 
 
 
 class SoftMonitor:
-    """Contact overlap and element validity of the soft bodies, observed on every accepted
-    (sub)step of every rollout - the optimizer's, the finite-difference probes', the camera
-    replays' - and judged after each rollout by an explicit policy:
+    """Contact overlap and element validity of the soft bodies, observed on the initial state
+    and on every accepted (sub)step of every rollout - the optimizer's, the finite-difference
+    probes', the camera replays' - and judged after each rollout by an explicit policy:
 
     - no contact sample of any actor pair deeper than ``max_penetration``. The measure is
       the engine's own contact samples (``PenetrationChecker``): a sampled coverage of
@@ -538,73 +538,145 @@ class SoftMonitor:
       samples, or a thin body crossing between samples within a substep, is not seen.
       The bound is a tenth of the jelly's side: deeper, the overlap shows in the render
       and the penalty contact no longer stands in for a non-penetrating one;
-    - no inverted tetrahedron: the determinant of every element's deformation gradient
-      (its deformed over its rest signed volume) stays positive, in the initial state
-      (checked at construction) and after every accepted (sub)step.
+    - no inverted or degenerate tetrahedron: the determinant of every element's
+      deformation gradient (its deformed over its rest signed volume) stays positive, in
+      the rollout's initial state and after every accepted (sub)step. The states between
+      two observations are not seen either.
 
-    The forward solve's convergence is the rollout driver's separate condition
-    (``substep_residual_tolerance``). ``begin()`` opens a rollout and forgets the previous
-    one's records (a restored state carries no record), ``observe`` is the driver's
-    ``observe_substep`` hook and ``step`` its stand-in for a replay outside the bridge,
-    ``check`` applies the policy. ``bodies`` maps each soft actor to its rest coordinates
-    and tetrahedra."""
+    Every geometry read is validated before it is reduced (a non-finite displacement or
+    determinant raises, whichever body it is in, and a Python ``min`` never sees it); a
+    rejected read or contact record is latched, and the rollout gets no verdict until the
+    next ``begin()``. The forward solve's convergence is the rollout driver's separate
+    condition (``substep_residual_tolerance``).
+
+    ``begin()`` opens a rollout and forgets the previous one's records (a restored state
+    carries no record); ``observe_initial`` is the driver's hook on the rollout's initial
+    state (after the bridge applied its initial-state tensors) and ``observe`` its hook on
+    every accepted (sub)step; ``step`` stands in for both hooks' driver on a replay outside
+    the bridge; ``check`` applies the policy and requires the initial state and at least one
+    (sub)step to have been observed. The state the monitor is built on is validated too.
+    ``bodies`` maps each soft actor to its rest coordinates and tetrahedra."""
 
     def __init__(self, scene, bodies: dict, max_penetration: float):
         self.scene = scene
-        self.penetration = PenetrationChecker(scene)
-        self.max_penetration = float(max_penetration)
+        max_penetration = float(max_penetration)
+        if not np.isfinite(max_penetration) or max_penetration < 0.0:
+            raise ValueError(f"the penetration limit must be a finite non-negative length, got {max_penetration}")
+        if not bodies:
+            raise ValueError("no soft body to monitor")
         self.bodies = []
         for actor, (coordinates, connectivity) in bodies.items():
-            rest = np.asarray(coordinates, dtype=np.float64).reshape(-1, 3)
-            tets = np.asarray(connectivity, dtype=np.int64).reshape(-1, 4)
+            name = actor.get_name()
+            rest = np.asarray(coordinates, dtype=np.float64)
+            if rest.size == 0 or rest.size % 3:
+                raise ValueError(f"{name}: the rest coordinates must be a non-empty (n, 3) array")
+            rest = rest.reshape(-1, 3)
+            if not np.all(np.isfinite(rest)):
+                raise ValueError(f"{name}: non-finite rest coordinates")
+            tets = np.asarray(connectivity)
+            if tets.size == 0 or tets.size % 4 or not np.issubdtype(tets.dtype, np.integer):
+                raise ValueError(f"{name}: the connectivity must be a non-empty (m, 4) integer array")
+            tets = tets.reshape(-1, 4).astype(np.int64)
+            if np.any(tets < 0) or np.any(tets >= len(rest)):
+                raise ValueError(f"{name}: tetrahedron index out of range")
             rest_det = np.linalg.det(rest[tets[:, 1:]] - rest[tets[:, :1]])
-            if not np.all(rest_det > 0.0):
-                raise ValueError(f"{actor.get_name()}: {int((rest_det <= 0.0).sum())} elements of non-positive rest volume")
+            bad = ~(np.isfinite(rest_det) & (rest_det > 0.0))
+            if np.any(bad):
+                raise ValueError(f"{name}: {int(bad.sum())} elements of non-positive or non-finite rest volume")
             self.bodies.append((actor, rest, tets, rest_det))
+        self.penetration = PenetrationChecker(scene)
+        self.max_penetration = max_penetration
         self.min_det = float("inf")
         self.num_observed = 0
+        self.initial_observed = False
+        self.invalid = 0
         self.rollouts = 0
         self.observed_total = 0
+        self.rejected_total = 0
         self.worst_depth = 0.0
         self.worst_det = float("inf")
-        initial = self._min_det()
-        if not initial > 0.0:
-            raise RuntimeError(f"inverted element in the initial state (min det {initial:.3e})")
+        built = self._min_det()
+        if not built > 0.0:
+            raise RuntimeError(
+                f"inverted or degenerate element in the state the monitor is built on (min determinant {built:.3e})"
+            )
 
     def _min_det(self) -> float:
+        """The smallest deformation-gradient determinant over every element of every body
+        in the current state. Every displacement, position and determinant is checked to be
+        finite before anything is reduced; the first invalid body raises."""
         value = float("inf")
         for actor, rest, tets, rest_det in self.bodies:
-            positions = rest + np.asarray(actor.get_displacements(), dtype=np.float64).reshape(-1, 3)
-            det = np.linalg.det(positions[tets[:, 1:]] - positions[tets[:, :1]]) / rest_det
+            name = actor.get_name()
+            displacements = np.asarray(actor.get_displacements(), dtype=np.float64).reshape(-1)
+            if displacements.size != rest.size:
+                raise ValueError(f"{name}: {displacements.size} displacement values for {rest.size} rest coordinates")
+            positions = rest + displacements.reshape(-1, 3)
+            if not np.all(np.isfinite(positions)):
+                raise ValueError(f"{name}: non-finite node positions")
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                det = np.linalg.det(positions[tets[:, 1:]] - positions[tets[:, :1]]) / rest_det
+            if not np.all(np.isfinite(det)):
+                raise ValueError(f"{name}: non-finite element determinant")
             value = min(value, float(det.min()))
         return value
+
+    def _read_geometry(self) -> float:
+        """``_min_det`` with the failure latched: a rejected read blocks the rollout's verdict."""
+        try:
+            return self._min_det()
+        except (ValueError, np.linalg.LinAlgError):
+            self.invalid += 1
+            self.rejected_total += 1
+            raise
 
     def begin(self) -> None:
         self.penetration.reset()
         self.min_det = float("inf")
         self.num_observed = 0
+        self.initial_observed = False
+        self.invalid = 0
+
+    def observe_initial(self) -> None:
+        """The rollout's initial state, inputs applied: an inverted element is refused here."""
+        det = self._read_geometry()
+        if not det > 0.0:
+            self.invalid += 1
+            self.rejected_total += 1
+            raise RuntimeError(f"inverted or degenerate element in the initial state (min determinant {det:.3e})")
+        self.min_det = min(self.min_det, det)
+        self.initial_observed = True
 
     def observe(self, step: int, sub_dt: float) -> None:
         self.penetration.record(step)
-        self.min_det = min(self.min_det, self._min_det())
+        self.min_det = min(self.min_det, self._read_geometry())
         self.num_observed += 1
 
     def step(self, dt: float, step: int) -> None:
         """A replay step outside the bridge, substepped like the rollout's, every accepted piece observed."""
 
         def on_substep(pre, post, sub_dt: float) -> None:
+            # Observed first: if the observer raises, step_with_substeps still owns the two
+            # captures and releases them; they are released here only after a good observation.
+            self.observe(step, sub_dt)
             self.scene.release_state(pre)
             self.scene.release_state(post)
-            self.observe(step, sub_dt)
 
         step_with_substeps(self.scene, dt, SOFT_SUBSTEPS, SOFT_RESIDUAL_TOLERANCE, step=step, on_substep=on_substep)
 
     def check(self, label: str) -> None:
-        """The policy on the rollout observed since ``begin()``; raises on a violation."""
+        """The policy on the rollout observed since ``begin()``; raises on a violation, on a
+        rollout whose initial state or steps were not observed, and after a rejected read."""
+        if self.invalid:
+            raise RuntimeError(f"{label}: {self.invalid} geometry reads were rejected: no verdict until begin()")
+        if not self.initial_observed:
+            raise RuntimeError(f"{label}: the initial state was not observed")
         if self.num_observed == 0:
             raise RuntimeError(f"{label}: no (sub)step was observed")
-        if not self.min_det > 0.0:
-            raise RuntimeError(f"{label}: inverted element (min deformation-gradient determinant {self.min_det:.3e})")
+        if not (np.isfinite(self.min_det) and self.min_det > 0.0):
+            raise RuntimeError(
+                f"{label}: inverted or degenerate element (min deformation-gradient determinant {self.min_det:.3e})"
+            )
         try:
             self.penetration.assert_below(self.max_penetration)
         except RuntimeError as error:
@@ -618,7 +690,8 @@ class SoftMonitor:
         return (
             f"{self.rollouts} rollouts, {self.observed_total} accepted (sub)steps observed: deepest contact "
             f"sample {1000.0 * self.worst_depth:.2f} mm (limit {1000.0 * self.max_penetration:.0f} mm, sampled "
-            f"coverage), min element determinant {self.worst_det:.3f} (limit > 0)"
+            f"coverage), min element determinant {self.worst_det:.3f} (limit > 0), "
+            f"{self.rejected_total} geometry reads rejected"
         )
 
 
@@ -781,6 +854,7 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
         max_substep_levels=SOFT_SUBSTEPS,
         substep_residual_tolerance=SOFT_RESIDUAL_TOLERANCE,
         observe_substep=monitor.observe,
+        observe_initial=monitor.observe_initial,
     )
     velocity = torch.zeros(3, dtype=torch.float64, requires_grad=True)
     optimizer = torch.optim.SGD([velocity], lr=4.0)
@@ -823,6 +897,7 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
             jelly.set_node_velocities_local(np.tile(v0, num_nodes))
             recorder.begin_iteration()
             monitor.begin()
+            monitor.observe_initial()
             for step in range(num_steps):
                 monitor.step(dt, step)
                 caption = (
@@ -942,6 +1017,7 @@ def task_soft_on_soft(output_dir: pathlib.Path, num_iterations: int) -> None:
         max_substep_levels=SOFT_SUBSTEPS,
         substep_residual_tolerance=SOFT_RESIDUAL_TOLERANCE,
         observe_substep=monitor.observe,
+        observe_initial=monitor.observe_initial,
     )
     u0 = torch.zeros(3 * num_nodes, dtype=torch.float64)
 
@@ -956,6 +1032,7 @@ def task_soft_on_soft(output_dir: pathlib.Path, num_iterations: int) -> None:
         thrown.set_node_velocities_local(np.tile(v0, num_nodes))
         recorder.begin_iteration()
         monitor.begin()
+        monitor.observe_initial()
         for step in range(SOFT_ON_SOFT_STEPS):
             monitor.step(SOFT_ON_SOFT_DT, step)
             caption = (
