@@ -35,7 +35,7 @@ The same simulator differentiates a fingertip tactile map. The XHand1's five pad
 compression map that is a differentiable function of the contact forces; gradient descent recovers a
 target grip's joint targets from its tactile map alone (`example_diffsim_tactile.py`):
 
-| The XHand1 recovers a grip from its 600-taxel tactile map (left: current, right: target) |
+| The XHand1 recovers a grip from its 600-taxel tactile map (the grasp, the current vs target maps, and the per-pad forces) |
 | :-: |
 | ![tactile](superdex_physics/examples/media/xhand_tactile_field.gif) |
 
