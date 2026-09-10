@@ -27,9 +27,9 @@ written to MP4 (one file per task):
    velocity, gradients from the ``superdex.physics.diffsim_torch`` autograd
    bridge) makes its centroid come to rest on the target; the gradient flows
    through the elastic dynamics and the soft-body contact adjoint. (Plain
-   descent converges monotonically here, 0.34 -> 5e-6 in 20 iterations;
-   Adam's per-coordinate normalization overshoots the narrow valley and
-   oscillates around 1e-3.)
+   descent converges monotonically here, by several orders of magnitude in
+   20 iterations; Adam's per-coordinate normalization overshoots the narrow
+   valley and oscillates.)
 3. ``soft_on_soft.mp4`` - a jelly cube is thrown at a jelly cube resting on the
    ground and shoves it along. Gradient descent on the launch velocity, through
    the contact between the two deformable bodies and the resting cube's
@@ -506,10 +506,9 @@ def assert_converged(scene, tolerance: float) -> None:
 
 
 def jelly_material():
-    """The neo-Hookean jelly of the soft tasks: light and moderately stiff so that at the soft
-    contact stiffness it rests on the ground with under a millimetre of interpenetration."""
-    material = physics.SoftMaterialParams(density=250.0, mass_damping_coefficient=1.0)
-    material.neo_hookean = physics.NeoHookeanMaterialParams(youngs_modulus=6.0e4, poisson_ratio=0.45)
+    """The neo-Hookean jelly of the soft tasks (soft enough to squash visibly on impact)."""
+    material = physics.SoftMaterialParams(density=1000.0, mass_damping_coefficient=1.0)
+    material.neo_hookean = physics.NeoHookeanMaterialParams(youngs_modulus=4.0e4, poisson_ratio=0.45)
     return material
 
 
@@ -629,7 +628,7 @@ def task_soft_landing(output_dir: pathlib.Path, num_iterations: int) -> None:
 
     scene = physics.create_scene("Differentiable soft landing")
     scene.set_gravity(GRAVITY)
-    contact = physics.ContactParams(penalty_coefficient=6e7, coulomb_friction_coefficient=0.4)
+    contact = physics.ContactParams(penalty_coefficient=1e8, coulomb_friction_coefficient=0.4)
     scene.create_rigid_actor(
         name="ground",
         shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
@@ -768,7 +767,7 @@ def task_soft_on_soft(output_dir: pathlib.Path, num_iterations: int) -> None:
 
     scene = physics.create_scene("Differentiable soft on soft")
     scene.set_gravity(GRAVITY)
-    contact = physics.ContactParams(penalty_coefficient=6e7, coulomb_friction_coefficient=0.4)
+    contact = physics.ContactParams(penalty_coefficient=1e8, coulomb_friction_coefficient=0.4)
     scene.create_rigid_actor(
         name="ground",
         shape=physics.create_plane_shape(normal=[0, 0, 1], distance=0.0),
